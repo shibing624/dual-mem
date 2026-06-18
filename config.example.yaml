@@ -1,0 +1,29 @@
+# dual-mem 配置示例
+# 复制到 ~/.dual_mem/config.yaml 后按需修改。
+# 也可用 DUAL_MEM_CONFIG_FILE 环境变量指定其它路径。
+# 字段同名环境变量（DUAL_MEM_ 前缀）可临时覆盖本文件。
+
+# 运行档位：lite | pro | ultra
+mode: pro
+
+# 向量/图/KV 数据落盘目录
+storage_dir: ./.dual_mem_data
+
+# LLM（抽取 / 整理 / System2）
+llm_base_url: https://api.openai.com/v1
+llm_api_key: sk-your-llm-key
+llm_model: gpt-4o-mini
+
+# Embedding
+embed_base_url: https://api.openai.com/v1
+embed_api_key: sk-your-embed-key
+embed_model: text-embedding-3-small
+embed_dim: 1536
+
+# 鉴权（REST）
+auth_disabled: true
+app_whitelist:
+  - default
+
+# System2 触发：per_write | manual | scheduled
+system2_trigger_mode: per_write

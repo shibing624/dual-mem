@@ -44,3 +44,32 @@ def test_env_prefix(monkeypatch):
     s = Settings()
     assert s.mode == "ultra"
     assert s.embed_dim == 768
+
+
+def test_yaml_source(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "mode: ultra\nembed_dim: 256\nllm_model: my-model\napp_whitelist:\n  - alpha\n  - beta\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DUAL_MEM_CONFIG_FILE", str(cfg))
+    s = Settings()
+    assert s.mode == "ultra"
+    assert s.embed_dim == 256
+    assert s.llm_model == "my-model"
+    assert s.app_whitelist == ["alpha", "beta"]
+
+
+def test_env_overrides_yaml(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("mode: ultra\n", encoding="utf-8")
+    monkeypatch.setenv("DUAL_MEM_CONFIG_FILE", str(cfg))
+    monkeypatch.setenv("DUAL_MEM_MODE", "lite")
+    assert Settings().mode == "lite"
+
+
+def test_init_overrides_yaml(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("mode: ultra\n", encoding="utf-8")
+    monkeypatch.setenv("DUAL_MEM_CONFIG_FILE", str(cfg))
+    assert Settings(mode="pro").mode == "pro"

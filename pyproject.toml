@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.6",
     "pydantic-settings>=2.2",
+    "pyyaml>=6.0",
     "openai>=1.30",
     "chromadb>=0.5",
     "kuzu>=0.4",

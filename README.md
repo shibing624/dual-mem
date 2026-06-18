@@ -59,24 +59,32 @@ async def main():
 asyncio.run(main())
 ```
 
-### 配置（`.env` / 环境变量）
+### 配置（YAML）
 
-所有配置走 `DUAL_MEM_` 前缀的环境变量或项目根 `.env`（参考 `.env.example`）：
+配置主源是 YAML 文件，默认读 `~/.dual_mem/config.yaml`（可用环境变量 `DUAL_MEM_CONFIG_FILE` 指定其它路径）。复制仓库根的 `config.example.yaml` 即可：
 
 ```bash
-DUAL_MEM_MODE=pro                       # lite | pro | ultra
-DUAL_MEM_STORAGE_DIR=./.dual_mem_data
-DUAL_MEM_LLM_BASE_URL=https://api.openai.com/v1
-DUAL_MEM_LLM_API_KEY=sk-your-llm-key
-DUAL_MEM_LLM_MODEL=gpt-4o-mini
-DUAL_MEM_EMBED_BASE_URL=https://api.openai.com/v1
-DUAL_MEM_EMBED_API_KEY=sk-your-embed-key
-DUAL_MEM_EMBED_MODEL=text-embedding-3-small
-DUAL_MEM_EMBED_DIM=1536
-DUAL_MEM_AUTH_DISABLED=true              # REST 本地鉴权开关
-DUAL_MEM_APP_WHITELIST=default          # REST app_id 白名单（逗号分隔）
-DUAL_MEM_SYSTEM2_TRIGGER_MODE=per_write # per_write | manual | scheduled
+mkdir -p ~/.dual_mem
+cp config.example.yaml ~/.dual_mem/config.yaml
 ```
+
+```yaml
+mode: pro                       # lite | pro | ultra
+storage_dir: ./.dual_mem_data
+llm_base_url: https://api.openai.com/v1
+llm_api_key: sk-your-llm-key
+llm_model: gpt-4o-mini
+embed_base_url: https://api.openai.com/v1
+embed_api_key: sk-your-embed-key
+embed_model: text-embedding-3-small
+embed_dim: 1536
+auth_disabled: true             # REST 本地鉴权开关
+app_whitelist:                  # REST app_id 白名单
+  - default
+system2_trigger_mode: per_write # per_write | manual | scheduled
+```
+
+优先级：显式传参 `MemoryClient(mode=...)` > `DUAL_MEM_` 前缀环境变量（临时覆盖）> YAML 文件 > 默认值。
 
 LLM/Embed 走 OpenAI 兼容协议，`base_url` 可指向任意兼容服务（OpenAI / Hunyuan / 本地推理）。
 

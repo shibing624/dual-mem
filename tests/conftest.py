@@ -5,6 +5,7 @@ import os
 os.environ.setdefault("DUAL_MEM_LLM_API_KEY", "sk-test-fake")
 os.environ.setdefault("DUAL_MEM_EMBED_API_KEY", "sk-test-fake")
 os.environ.setdefault("DUAL_MEM_AUTH_DISABLED", "true")
+os.environ.setdefault("DUAL_MEM_CONFIG_FILE", "/nonexistent/dual_mem_test_config.yaml")
 
 import pytest
 

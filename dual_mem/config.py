@@ -1,13 +1,27 @@
+import os
+from pathlib import Path
 from typing import Literal
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+    YamlConfigSettingsSource,
+)
+
+DEFAULT_CONFIG_PATH = Path.home() / ".dual_mem" / "config.yaml"
+
+
+def config_path() -> Path:
+    """主配置文件路径，默认 ``~/.dual_mem/config.yaml``，可用 DUAL_MEM_CONFIG_FILE 覆盖。"""
+    override = os.environ.get("DUAL_MEM_CONFIG_FILE")
+    return Path(override).expanduser() if override else DEFAULT_CONFIG_PATH
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="DUAL_MEM_",
-        env_file=".env",
         extra="ignore",
     )
 
@@ -34,6 +48,18 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [item.strip() for item in v.split(",") if item.strip()]
         return v
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        yaml_source = YamlConfigSettingsSource(settings_cls, yaml_file=config_path())
+        return (init_settings, env_settings, yaml_source)
 
     @property
     def agent_mode(self) -> str:
