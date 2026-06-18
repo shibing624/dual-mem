@@ -55,3 +55,17 @@ def test_add_edge(gstore, fake_embed):
     gstore.add_node(_gnode(fake_embed, "s1", "node a"))
     gstore.add_node(_gnode(fake_embed, "s2", "node b"))
     gstore.add_edge(from_id="s1", to_id="s2", rel="RELATED_TO")
+
+
+def test_list_by_layer_and_custom_roundtrip(gstore, fake_embed):
+    basic = _gnode(fake_embed, "s1", "basic schema")
+    core = _gnode(fake_embed, "s2", "core schema")
+    core.custom = {"sub_type": "core"}
+    gstore.add_node(basic)
+    gstore.add_node(core)
+
+    nodes = gstore.list_by_layer(layer="L6_SCHEMA", user_id="u", app_ids=["app"])
+    assert {n.node_id for n in nodes} == {"s1", "s2"}
+    by_id = {n.node_id: n for n in nodes}
+    assert by_id["s1"].custom is None
+    assert by_id["s2"].custom == {"sub_type": "core"}

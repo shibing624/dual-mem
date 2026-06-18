@@ -1,3 +1,4 @@
+import json
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -10,7 +11,7 @@ _SCHEMA_DDL = [
     "CREATE NODE TABLE IF NOT EXISTS Memory("
     "node_id STRING, layer STRING, content STRING, app_id STRING, "
     "user_id STRING, agent_id STRING, embedding DOUBLE[], tags STRING[], "
-    "gmt_created INT64, PRIMARY KEY(node_id))",
+    "gmt_created INT64, custom STRING, PRIMARY KEY(node_id))",
     "CREATE NODE TABLE IF NOT EXISTS VdbRef(node_id STRING, PRIMARY KEY(node_id))",
     "CREATE NODE TABLE IF NOT EXISTS Topic(name STRING, PRIMARY KEY(name))",
     "CREATE REL TABLE IF NOT EXISTS RELATED_TO(FROM Memory TO Memory)",
@@ -31,6 +32,7 @@ class GraphNode:
     embedding: list[float] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     gmt_created: int = 0
+    custom: dict | None = None
     score: float = 0.0
 
 
@@ -56,6 +58,11 @@ class GraphStore(ABC):
         app_ids: list[str],
         embedding: list[float],
         top_k: int = 10,
+    ) -> list[GraphNode]: ...
+
+    @abstractmethod
+    def list_by_layer(
+        self, *, layer: str, user_id: str, app_ids: list[str], limit: int = 1000
     ) -> list[GraphNode]: ...
 
     @abstractmethod
@@ -85,7 +92,7 @@ class KuzuGraphStore(GraphStore):
             "MERGE (m:Memory {node_id: $nid}) "
             "SET m.layer=$layer, m.content=$content, m.app_id=$app_id, "
             "m.user_id=$user_id, m.agent_id=$agent_id, m.embedding=$embedding, "
-            "m.tags=$tags, m.gmt_created=$gmt_created",
+            "m.tags=$tags, m.gmt_created=$gmt_created, m.custom=$custom",
             {
                 "nid": node.node_id,
                 "layer": node.layer,
@@ -96,6 +103,7 @@ class KuzuGraphStore(GraphStore):
                 "embedding": node.embedding,
                 "tags": node.tags,
                 "gmt_created": node.gmt_created,
+                "custom": json.dumps(node.custom or {}, ensure_ascii=False),
             },
         )
         for tag in node.tags:
@@ -119,27 +127,48 @@ class KuzuGraphStore(GraphStore):
             "MATCH (m:Memory) WHERE m.layer=$layer AND m.user_id=$user_id "
             "AND m.app_id IN $app_ids "
             "RETURN m.node_id, m.content, m.app_id, m.user_id, m.agent_id, "
-            "m.embedding, m.tags, m.gmt_created",
+            "m.embedding, m.tags, m.gmt_created, m.custom",
             {"layer": layer, "user_id": user_id, "app_ids": app_ids},
         )
+        nodes = self._rows_to_nodes(result, layer)
+        for node in nodes:
+            node.score = _cosine(embedding, node.embedding)
+        nodes.sort(key=lambda n: n.score, reverse=True)
+        return nodes[:top_k]
+
+    def list_by_layer(
+        self, *, layer: str, user_id: str, app_ids: list[str], limit: int = 1000
+    ) -> list[GraphNode]:
+        result = self.conn.execute(
+            "MATCH (m:Memory) WHERE m.layer=$layer AND m.user_id=$user_id "
+            "AND m.app_id IN $app_ids "
+            "RETURN m.node_id, m.content, m.app_id, m.user_id, m.agent_id, "
+            "m.embedding, m.tags, m.gmt_created, m.custom "
+            "ORDER BY m.gmt_created ASC LIMIT $limit",
+            {"layer": layer, "user_id": user_id, "app_ids": app_ids, "limit": limit},
+        )
+        return self._rows_to_nodes(result, layer)
+
+    @staticmethod
+    def _rows_to_nodes(result, layer: str) -> list[GraphNode]:
         nodes: list[GraphNode] = []
         while result.has_next():
             row = result.get_next()
-            node = GraphNode(
-                node_id=row[0],
-                layer=layer,
-                content=row[1],
-                app_id=row[2],
-                user_id=row[3],
-                agent_id=row[4],
-                embedding=row[5],
-                tags=row[6],
-                gmt_created=row[7],
+            nodes.append(
+                GraphNode(
+                    node_id=row[0],
+                    layer=layer,
+                    content=row[1],
+                    app_id=row[2],
+                    user_id=row[3],
+                    agent_id=row[4],
+                    embedding=row[5],
+                    tags=row[6],
+                    gmt_created=row[7],
+                    custom=json.loads(row[8]) or None if row[8] else None,
+                )
             )
-            node.score = _cosine(embedding, row[5])
-            nodes.append(node)
-        nodes.sort(key=lambda n: n.score, reverse=True)
-        return nodes[:top_k]
+        return nodes
 
     def add_evidence(self, *, schema_id: str, fact_id: str) -> None:
         self.conn.execute("MERGE (v:VdbRef {node_id: $fid})", {"fid": fact_id})
