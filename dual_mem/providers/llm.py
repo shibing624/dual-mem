@@ -44,6 +44,17 @@ class LLMClient:
         content = resp.choices[0].message.content or ""
         return _parse_json(content)
 
+    def chat_text(self, *, system: str, user: str, temperature: float = 0.2) -> str:
+        resp = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=temperature,
+        )
+        return resp.choices[0].message.content or ""
+
     def chat_with_tools(
         self, *, system: str, user: str, tools: list, temperature: float = 0.2
     ) -> dict:
