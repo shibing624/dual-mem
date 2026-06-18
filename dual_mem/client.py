@@ -6,6 +6,7 @@ from dual_mem.config import Settings
 from dual_mem.isolation import build_filter
 from dual_mem.registry import ComponentFactory
 from dual_mem.retrieval.reader import Reader
+from dual_mem.system2.system2_writer import System2Writer
 from dual_mem.types import MemoryStatus
 from dual_mem.writer.memory_writer import MemoryWriter
 
@@ -37,10 +38,14 @@ class MemoryClient:
             factory_kwargs["llm"] = llm
         self.factory = ComponentFactory(**factory_kwargs)
 
-        # TODO(M5): ultra 模式应改用 System2Writer，当前先用 MemoryWriter 占位
-        self.writer = MemoryWriter(
-            factory=self.factory, agent_mode=self.settings.agent_mode
-        )
+        if self.settings.mode == "ultra":
+            self.writer = System2Writer(
+                factory=self.factory, agent_mode=self.settings.agent_mode
+            )
+        else:
+            self.writer = MemoryWriter(
+                factory=self.factory, agent_mode=self.settings.agent_mode
+            )
         self.reader = Reader(factory=self.factory)
 
     async def add(
@@ -188,7 +193,7 @@ class MemoryClient:
         return {"success": True, "deleted": len(node_ids)}
 
     async def digest(self) -> dict:
-        if hasattr(self.writer, "run_system2_pending"):
+        if isinstance(self.writer, System2Writer):
             processed = await self.writer.run_system2_pending()
             return {"success": True, "processed": processed}
         return {"success": True, "processed": 0}
