@@ -90,7 +90,7 @@ class MemoryClient:
     ) -> dict:
         request_id = str(uuid.uuid4())
         start = time.perf_counter()
-        memories = await self.reader.search(
+        memories = self.reader.search(
             query=query,
             app_ids=app_ids,
             user_id=user_id,
@@ -100,14 +100,8 @@ class MemoryClient:
             min_score=min_score,
             profile_limit=profile_limit,
             profile_min_score=profile_min_score,
+            created_after=created_after,
         )
-        if created_after is not None:
-            for group in ("profile", "proactive", "normal"):
-                memories[group] = [
-                    item
-                    for item in memories[group]
-                    if item["gmt_created"] >= created_after
-                ]
         return {
             "success": True,
             "request_id": request_id,

@@ -13,6 +13,7 @@ def build_filter(
     session_ids: list[str] | None = None,
     layers: list[Layer] | None = None,
     statuses: list[MemoryStatus] | None = None,
+    created_after: int | None = None,
 ) -> dict:
     where: dict = {
         "app_id": {"$in": app_ids},
@@ -26,4 +27,6 @@ def build_filter(
         where["layer"] = {"$in": [layer.value for layer in layers]}
     if statuses is not None:
         where["status"] = {"$in": [status.value for status in statuses]}
+    if created_after is not None:
+        where["gmt_created"] = {"$gte": created_after}
     return where
