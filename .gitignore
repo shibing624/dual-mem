@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# docs
+docs/hy-memory-test/
+docs/superpowers/
+
+# scratch / smoke demos
+tmp/
