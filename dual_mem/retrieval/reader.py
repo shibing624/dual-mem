@@ -2,7 +2,7 @@ from dual_mem.isolation import build_filter
 from dual_mem.registry import ComponentFactory
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
-NORMAL_LAYERS = [Layer.L2_FACT, Layer.L5_KNOWLEDGE, Layer.L3_SUMMARY]
+NORMAL_LAYERS = [Layer.L1_RAW, Layer.L2_FACT, Layer.L5_KNOWLEDGE, Layer.L3_SUMMARY]
 
 
 class Reader:

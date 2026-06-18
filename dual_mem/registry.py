@@ -10,14 +10,20 @@ _UNSET = object()
 
 
 class ComponentFactory:
-    def __init__(self, *, settings: Settings):
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        embed: EmbedService | None = None,
+        llm=_UNSET,
+    ):
         self.settings = settings
-        self._embed: EmbedService | None = None
+        self._embed: EmbedService | None = embed
         self._vector: ChromaVectorStore | None = None
         self._cache: CacheStore | None = None
         self._history: HistoryStore | None = None
         self._graph = _UNSET
-        self._llm = _UNSET
+        self._llm = llm
 
     @property
     def embed(self) -> EmbedService:
