@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 
+from dual_mem.agent.mem_agent import MemAgent
 from dual_mem.registry import ComponentFactory
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
@@ -48,10 +49,42 @@ class MemoryWriter:
 
         extra_node_ids: list[str] = []
         if self.agent_mode == "full":
-            extra_node_ids = await self._run_cognition(raw=node, request_id=request_id)
-            self.factory.vector.update_status(node.node_id, MemoryStatus.SHADOW)
+            extra_node_ids = await self._run_cognition(
+                raw=node,
+                content=content,
+                app_id=app_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                session_id=session_id,
+                request_id=request_id,
+                memory_at=memory_at,
+            )
+            if extra_node_ids:
+                node.status = MemoryStatus.SHADOW
+                self.factory.vector.upsert([node])
 
         return WriteResult(memory_id=node.node_id, extra_node_ids=extra_node_ids)
 
-    async def _run_cognition(self, *, raw: MemoryNode, request_id: str) -> list[str]:
-        return []
+    async def _run_cognition(
+        self,
+        *,
+        raw: MemoryNode,
+        content: str,
+        app_id: str,
+        user_id: str,
+        agent_id: str,
+        session_id: str,
+        request_id: str,
+        memory_at: int | None,
+    ) -> list[str]:
+        agent = MemAgent(factory=self.factory)
+        return agent.run(
+            raw_node=raw,
+            content=content,
+            app_id=app_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            request_id=request_id,
+            memory_at=memory_at,
+        )
