@@ -221,5 +221,10 @@ __marimo__/
 docs/hy-memory-test/
 docs/superpowers/
 
+
 # scratch / smoke demos
 tmp/
+
+# example & runtime data
+examples/.data/
+.dual_mem_data/

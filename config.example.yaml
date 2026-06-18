@@ -27,3 +27,8 @@ app_whitelist:
 
 # System2 触发：per_write | manual | scheduled
 system2_trigger_mode: per_write
+
+# System2 聚类相似度阈值（cosine）。默认适配 text-embedding-3-small；
+# 换用相似度更集中的中文 embedding（bge/Qwen 等）可调高到 0.55 / 0.75。
+cluster_stage1_sim: 0.42
+cluster_stage2_sim: 0.55
