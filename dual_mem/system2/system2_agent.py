@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: System2 cognitive-processing agent: prepares clustered fact materials, then
-runs a single LLM call to emit schema/intention ops executed by the ToolExecutor.
+@description: System2 cognitive-processing agent: prepares clustered fact materials, then emits
+schema/intention ops (single LLM call by default, or a bounded multi-turn loop when
+system2_agent_loop is set) executed by the ToolExecutor.
 """
+import json
+
 from dual_mem.isolation import build_filter
 from dual_mem.providers.llm import is_chinese
 from dual_mem.registry import ComponentFactory
@@ -29,15 +32,15 @@ Schema 捕获用户在**特定领域**内的**一个**行为模式，含三要�
 ❌ "用户想成为更好的人。"（无具体行动）
 
 ## 输出格式
-只输出一个 JSON 数组（ops），不要任何解释或代码块外文字。每个 op 是以下四类之一：
-[
+只输出一个 JSON 对象，键 `ops` 是操作数组，不要任何解释或代码块外文字。每个 op 是以下四类之一：
+{{"ops": [
   {{"op": "create_schema", "content": "当...时，用户...——反映...", "tags": ["..."], "evidence": ["fact_id", ...]}},
   {{"op": "create_intention", "content": "...", "tags": ["..."], "evidence": ["fact_id", ...]}},
   {{"op": "add_evidence", "schema_id": "已有schema_id", "evidence": ["fact_id", ...]}},
   {{"op": "add_edge", "from_id": "...", "to_id": "...", "rel": "RELATED_TO"}}
-]
+]}}
 打标签时优先复用已有标签列表中的标签。证据 fact_id 必须来自聚类中给出的 id。
-若数据不足以得出可靠结论，输出空数组 []。"""
+若数据不足以得出可靠结论，输出 {{"ops": []}}。"""
 
 SYSTEM2_OPS_PROMPT_EN = """You are a cognitive processing Agent. Evolve higher-order cognitive structures (L6 Schema / L7 Intention) from the user's fact clusters, and output them as a list of operations (ops).
 
@@ -57,15 +60,15 @@ GOOD: "The user is preparing for a job interview."
 BAD: "The user wants to be a better person." (no concrete action)
 
 ## Output format
-Output ONLY a JSON array (ops), no prose and nothing outside the array. Each op is one of four kinds:
-[
+Output ONLY a JSON object whose key `ops` is the operations array, no prose and nothing outside it. Each op is one of four kinds:
+{{"ops": [
   {{"op": "create_schema", "content": "When ..., the user ... — reflecting ...", "tags": ["..."], "evidence": ["fact_id", ...]}},
   {{"op": "create_intention", "content": "...", "tags": ["..."], "evidence": ["fact_id", ...]}},
   {{"op": "add_evidence", "schema_id": "existing_schema_id", "evidence": ["fact_id", ...]}},
   {{"op": "add_edge", "from_id": "...", "to_id": "...", "rel": "RELATED_TO"}}
-]
+]}}
 Prefer reusing tags from the existing tags list. Evidence fact_ids MUST come from the cluster ids provided.
-If the data is insufficient for reliable conclusions, output an empty array []."""
+If the data is insufficient for reliable conclusions, output {{"ops": []}}."""
 
 _S2_LAYERS = [Layer.L2_FACT, Layer.L4_IDENTITY]
 _GRAPH_TOPK = 8
@@ -153,8 +156,16 @@ def _build_user_message(materials: dict) -> str:
         parts.append("\n## 已有标签 / Existing tags")
         parts.append("  " + ", ".join(tags))
 
-    parts.append("\n请输出 ops JSON 数组 / Output the ops JSON array.")
+    parts.append("\n请输出 ops JSON 对象 / Output the ops JSON object.")
     return "\n".join(parts)
+
+
+def _extract_ops(raw) -> list:
+    """Normalize the LLM reply (JSON-mode object or bare array) into an ops list."""
+    if isinstance(raw, dict):
+        ops = raw.get("ops")
+        return ops if isinstance(ops, list) else []
+    return raw if isinstance(raw, list) else []
 
 
 class System2Agent:
@@ -182,14 +193,49 @@ class System2Agent:
             for f in cluster["facts"]
         )
         system = SYSTEM2_OPS_PROMPT_ZH if is_chinese(cluster_text) else SYSTEM2_OPS_PROMPT_EN
-        raw = self.factory.llm.chat_json(system=system, user=_build_user_message(materials))
-        ops = raw if isinstance(raw, list) else []
+        base_user = _build_user_message(materials)
 
-        stats = ToolExecutor(factory=self.factory).apply(
-            ops=ops, app_id=app_id, user_id=user_id, agent_id=agent_id
-        )
+        if self.factory.settings.system2_agent_loop:
+            stats = self._run_loop(
+                system=system, base_user=base_user, app_id=app_id, user_id=user_id, agent_id=agent_id
+            )
+        else:
+            raw = self.factory.llm.chat_json(system=system, user=base_user)
+            stats = ToolExecutor(factory=self.factory).apply(
+                ops=_extract_ops(raw), app_id=app_id, user_id=user_id, agent_id=agent_id
+            )
+
         self._mark_clustered_processed(materials["clusters"])
         return stats
+
+    def _run_loop(
+        self, *, system: str, base_user: str, app_id: str, user_id: str, agent_id: str
+    ) -> dict:
+        """Multi-turn ops emission: each round may add more ops or stop, feeding prior ops back."""
+        executor = ToolExecutor(factory=self.factory)
+        total = {
+            "created_schemas": 0,
+            "created_intentions": 0,
+            "evidence_added": 0,
+            "edges_added": 0,
+        }
+        history_ops: list = []
+        for _ in range(max(1, self.factory.settings.system2_loop_max_iters)):
+            user = base_user
+            if history_ops:
+                user = (
+                    base_user
+                    + "\n\n## 本轮已生成的 ops（避免重复，可补充新结构或停止）\n"
+                    + json.dumps(history_ops, ensure_ascii=False)
+                )
+            ops = _extract_ops(self.factory.llm.chat_json(system=system, user=user))
+            if not ops:
+                break
+            stats = executor.apply(ops=ops, app_id=app_id, user_id=user_id, agent_id=agent_id)
+            for key in total:
+                total[key] += stats[key]
+            history_ops.extend(ops)
+        return total
 
     def _mark_clustered_processed(self, clusters: list[dict]) -> None:
         """Mark all clustered facts as processed so unused ones are not re-consumed next digest."""

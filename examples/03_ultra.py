@@ -20,6 +20,9 @@ async def main() -> None:
 
     # 给一组「互不取代但同主题」的离散事实：System2 才能聚类并归纳出行为模式。
     # （若给的是会被 Reconciler 合并成同一条 identity 的近义句，聚类样本会不足。）
+    # 注意：这里刻意用串行写入——System2 聚类依赖这些离散事实各自落库；
+    # 若改并发（asyncio.gather），重叠的 reconcile 会把同主题事实合并成一条，聚类样本不足，
+    # 反而出不了 Schema。并发写入只适合彼此完全独立、无需跨事实归纳的场景（见 examples/README）。
     section("写入同领域多条离散事实（System1 先落 L2/L4）")
     facts = [
         "我上周把整个衣柜按颜色和季节重新分类整理了一遍。",

@@ -29,3 +29,20 @@ python examples/05_cli.py       # CLI：通过 dual-mem 命令行调用
 ```
 
 > pro/ultra 会产生真实 LLM 调用（gpt-4o），有少量费用与数秒延迟。lite/REST/CLI 示例仅用 embedding。
+
+## 并发写入（按需）
+
+`add()` 是 async 的，多条**彼此完全独立**的记忆可以并发写入以缩短总耗时：
+
+```python
+import asyncio
+results = await asyncio.gather(
+    *(client.add(content=f, app_id=app, user_id=user) for f in facts)
+)
+```
+
+注意取舍：
+
+- 并发时多次 `add` 的 Reconciler 召回会重叠，**演化链/合并语义会变**——只适合互不取代、无需跨事实归纳的离散写入。
+- ultra 的 System2 聚类依赖同主题离散事实各自落库；并发会把它们合并成一条，导致聚类样本不足、出不了 Schema。因此 `03_ultra.py` 刻意保持**串行**。
+- 需要稳定演化链（如 `02_pro.py` 的 Java→Python、上海→北京）时，必须串行以保证顺序。

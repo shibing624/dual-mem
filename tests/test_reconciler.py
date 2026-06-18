@@ -100,3 +100,20 @@ def test_parse_ops_dedup_double_touch():
 
 def test_parse_ops_empty():
     assert Reconciler._parse_ops([]) == []
+
+
+def test_parse_ops_unwraps_json_mode_object():
+    """JSON mode 下 reconcile 返回 {"updates": [...]} 对象，应被正确解包。"""
+    data = {
+        "updates": [
+            {"reason": "r", "ops": [{"op": "ADD", "content": "用户喜欢茶", "layer": "L4_IDENTITY"}]}
+        ]
+    }
+    ops = Reconciler._parse_ops(data)
+    assert len(ops) == 1
+    assert ops[0].op == "ADD"
+    assert ops[0].content == "用户喜欢茶"
+
+
+def test_parse_ops_empty_updates_object():
+    assert Reconciler._parse_ops({"updates": []}) == []

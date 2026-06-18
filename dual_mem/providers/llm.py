@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: OpenAI-compatible LLM client wrapper offering JSON/text/tool-call chat
-helpers, plus language detection and tolerant JSON parsing of model output.
+@description: OpenAI-compatible LLM client wrapper offering JSON (optionally JSON mode) and
+text chat helpers, plus language detection, tolerant JSON parsing and per-call INFO logging.
 """
 import itertools
 import json
@@ -47,8 +47,17 @@ def _parse_json(content: str):
 class LLMClient:
     """Thin synchronous wrapper over an OpenAI-compatible chat completions endpoint."""
 
-    def __init__(self, *, base_url: str, api_key: str, model: str, timeout: int = 60):
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout: int = 60,
+        json_mode: bool = True,
+    ):
         self.model = model
+        self.json_mode = json_mode
         self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
 
     def _log_call(self, kind: str, elapsed_ms: float) -> None:
@@ -58,8 +67,23 @@ class LLMClient:
             "LLM call #%d kind=%s model=%s took=%.0fms", seq, kind, self.model, elapsed_ms
         )
 
-    def chat_json(self, *, system: str, user: str, temperature: float = 0.2) -> dict:
-        """Run a chat completion and parse the reply as JSON."""
+    def chat_json(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float = 0.2,
+        json_object: bool | None = None,
+    ):
+        """Run a chat completion and parse the reply as JSON.
+
+        json_object overrides the client default: True forces OpenAI JSON mode (object only),
+        None uses self.json_mode. Callers expecting a top-level array pass json_object=False.
+        """
+        use_json_mode = self.json_mode if json_object is None else json_object
+        kwargs: dict = {}
+        if use_json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
         start = time.perf_counter()
         resp = self.client.chat.completions.create(
             model=self.model,
@@ -68,6 +92,7 @@ class LLMClient:
                 {"role": "user", "content": user},
             ],
             temperature=temperature,
+            **kwargs,
         )
         self._log_call("chat_json", (time.perf_counter() - start) * 1000)
         content = resp.choices[0].message.content or ""
@@ -86,26 +111,3 @@ class LLMClient:
         )
         self._log_call("chat_text", (time.perf_counter() - start) * 1000)
         return resp.choices[0].message.content or ""
-
-    def chat_with_tools(
-        self, *, system: str, user: str, tools: list, temperature: float = 0.2
-    ) -> dict:
-        """Run a tool-enabled chat completion and return content plus normalized tool calls."""
-        start = time.perf_counter()
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            tools=tools,
-            temperature=temperature,
-        )
-        self._log_call("chat_with_tools", (time.perf_counter() - start) * 1000)
-        msg = resp.choices[0].message
-        tool_calls = []
-        for tc in msg.tool_calls or []:
-            tool_calls.append(
-                {"function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-            )
-        return {"content": msg.content or "", "tool_calls": tool_calls}

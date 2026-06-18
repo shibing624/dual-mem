@@ -1,50 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: L0_BASIC_INFO tool (update_basic_user_profile): merges stable structured
-user attributes into an evolution chain, storing only the KV diff and superseding the old head.
+@description: L0_BASIC_INFO profile updater: merges stable structured user attributes into an
+evolution chain, storing only the KV diff and superseding the old head.
 """
 from dual_mem.isolation import build_filter
 from dual_mem.providers.embedding import EmbedService
 from dual_mem.storage.vector_store import VectorStore
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
-TOOL_NAME = "update_basic_user_profile"
-
-TOOL_DESCRIPTION = (
-    "Record or update the user's stable structured personal attributes "
-    "(name, age, location, occupation, employer). "
-    "Call this ONLY when the conversation clearly states or updates one or more of these attributes. "
-    "Pass ONLY the attributes that appear in the conversation — omit fields that are not mentioned. "
-    "Do NOT repeat these attributes as identity memories; the memory system handles them separately."
-)
-
 BASIC_FIELDS = ["name", "age", "location", "occupation", "employer"]
-
-TOOL_PARAMETERS = {
-    "type": "object",
-    "properties": {
-        "name": {"type": "string", "description": "User's full or preferred name."},
-        "age": {"type": "integer", "description": "User's age in years."},
-        "location": {"type": "string", "description": "User's primary city / region of residence."},
-        "occupation": {"type": "string", "description": "User's job title or role."},
-        "employer": {"type": "string", "description": "User's employer / company name."},
-    },
-    "required": [],
-    "additionalProperties": False,
-}
-
-
-def openai_tool_schema() -> dict:
-    """Return the OpenAI function-calling schema for the basic-profile tool."""
-    return {
-        "type": "function",
-        "function": {
-            "name": TOOL_NAME,
-            "description": TOOL_DESCRIPTION,
-            "parameters": TOOL_PARAMETERS,
-        },
-    }
 
 
 def render_content(kv: dict) -> str:
@@ -83,7 +48,7 @@ def _sanitize_arguments(arguments: dict) -> dict:
 
 
 class BasicProfileTool:
-    """Maintains the L0 basic-info evolution chain from tool-call arguments."""
+    """Maintains the L0 basic-info evolution chain from extracted profile attributes."""
 
     def __init__(self, *, vector: VectorStore, embed: EmbedService):
         self.vector = vector

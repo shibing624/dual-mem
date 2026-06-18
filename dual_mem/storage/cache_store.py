@@ -70,7 +70,13 @@ class CacheStore:
         return json.loads(row["data"]) if row else None
 
     def enqueue_s2_task(self, user_id: str, app_id: str) -> None:
-        """Append a pending System2 distillation task for an app/user pair."""
+        """Append a pending System2 task for an app/user pair, skipping if one is already pending."""
+        existing = self.conn.execute(
+            "SELECT 1 FROM s2_queue WHERE status = 'pending' AND user_id = ? AND app_id = ? LIMIT 1",
+            (user_id, app_id),
+        ).fetchone()
+        if existing is not None:
+            return
         self.conn.execute(
             "INSERT INTO s2_queue (user_id, app_id, status, ts) VALUES (?, ?, 'pending', ?)",
             (user_id, app_id, time.time()),

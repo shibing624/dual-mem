@@ -49,30 +49,35 @@ def test_chat_json_regex_fallback():
 
 
 @respx.mock
-def test_chat_with_tools_returns_tool_calls():
-    respx.post("https://api.test/v1/chat/completions").mock(
-        return_value=httpx.Response(
-            200,
-            json=_completion(
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "t1",
-                            "type": "function",
-                            "function": {"name": "add", "arguments": '{"x":1}'},
-                        }
-                    ],
-                }
-            ),
-        )
+def test_chat_json_sends_json_mode_by_default():
+    import json as _json
+
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=_completion({"role": "assistant", "content": "{}"}))
     )
-    tools = [{"type": "function", "function": {"name": "add", "parameters": {}}}]
-    result = _make_client().chat_with_tools(system="s", user="u", tools=tools)
-    assert result["content"] == ""
-    assert result["tool_calls"][0]["function"]["name"] == "add"
-    assert result["tool_calls"][0]["function"]["arguments"] == '{"x":1}'
+    _make_client().chat_json(system="s", user="u")
+    body = _json.loads(route.calls.last.request.content)
+    assert body["response_format"] == {"type": "json_object"}
+
+
+@respx.mock
+def test_chat_json_disabled_json_mode_omits_response_format():
+    import json as _json
+
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=_completion({"role": "assistant", "content": "[]"}))
+    )
+    # client-level json_mode off
+    LLMClient(
+        base_url="https://api.test/v1", api_key="sk-x", model="gpt-test", json_mode=False
+    ).chat_json(system="s", user="u")
+    body = _json.loads(route.calls.last.request.content)
+    assert "response_format" not in body
+
+    # per-call override off
+    _make_client().chat_json(system="s", user="u", json_object=False)
+    body2 = _json.loads(route.calls.last.request.content)
+    assert "response_format" not in body2
 
 
 @pytest.mark.parametrize(

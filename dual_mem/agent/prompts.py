@@ -61,11 +61,11 @@ EXTRACT_ZH = """你是一位专业的记忆分析专家。请从以下对话中�
 - 未来的计划和安排
 - 客观事实陈述（非观点）
 
-### 基本结构化属性——由工具处理，不要作为 identity/facts 输出
-稳定的结构化个人属性——**姓名、年龄、所在地、职业、雇主**——不作为 identity 或 fact 记忆输出。而是调用 `update_basic_user_profile` function-calling 工具，只传入对话中明确提到或更新的字段。未提及的字段不传。
+### 基本结构化属性——放入 basic_info，不要作为 identity/facts 输出
+稳定的结构化个人属性——**姓名、年龄、所在地、职业、雇主**——不作为 identity 或 fact 记忆输出，而是放入输出 JSON 的 `basic_info` 对象，只填对话中明确提到或更新的字段（键名用 name/age/location/occupation/employer），未提及的字段不要出现。若没有任何基本属性，`basic_info` 输出空对象 `{{}}`。
 
 - 不要生成仅复述这五个属性的 identity 记忆。
-- 例外: 如果属性附带丰富的叙事上下文（如"用户2023年从工程师转为产品经理，因为想更贴近用户"），该叙事属于 `identity`；基本事实仍通过工具处理。
+- 例外: 如果属性附带丰富的叙事上下文（如"用户2023年从工程师转为产品经理，因为想更贴近用户"），该叙事属于 `identity`；基本事实仍放入 `basic_info`。
 
 ### 跨层重叠记忆
 一段对话可能同时产出多条 facts + identity 记忆，内容可能有重叠——这是正常的。
@@ -121,7 +121,8 @@ JSON 结构:
       "speculate": "如果原因不明确则解释为什么，否则为 null",
       "tags": ["主题1"]
     }}
-  ]
+  ],
+  "basic_info": {{"name": "...", "location": "..."}}
 }}
 ```
 
@@ -182,11 +183,11 @@ Includes:
 - Future plans and scheduled events
 - Objective factual statements (not opinions)
 
-### Basic structured attributes — handled by tool, NOT by identity/facts
-Stable structured personal attributes — **name, age, location, occupation, employer** — are NOT emitted as identity or fact memories. Instead, invoke the function-calling tool `update_basic_user_profile` with ONLY the fields that are clearly stated or updated in the conversation. Omit unmentioned fields.
+### Basic structured attributes — put into basic_info, NOT identity/facts
+Stable structured personal attributes — **name, age, location, occupation, employer** — are NOT emitted as identity or fact memories. Instead put them into the `basic_info` object of the output JSON, filling ONLY the fields clearly stated or updated in the conversation (keys: name/age/location/occupation/employer). Omit unmentioned fields. If there are no basic attributes, output an empty object `{{}}` for `basic_info`.
 
 - Do NOT emit an identity memory that merely restates one of these five attributes.
-- Exception: if the attribute comes with rich narrative context (e.g., "The user became a product manager in 2023 after 5 years as an engineer because they wanted to work closer to users"), that narrative belongs in `identity`; the bare fact still goes via the tool.
+- Exception: if the attribute comes with rich narrative context (e.g., "The user became a product manager in 2023 after 5 years as an engineer because they wanted to work closer to users"), that narrative belongs in `identity`; the bare fact still goes into `basic_info`.
 
 ### Overlapping memories across layers
 A single conversation snippet may produce multiple facts + identity memories with overlapping content — this is expected and acceptable.
@@ -243,7 +244,8 @@ JSON shape:
       "speculate": "why it happened if ambiguous, else null",
       "tags": ["topic1"]
     }}
-  ]
+  ],
+  "basic_info": {{"name": "...", "location": "..."}}
 }}
 ```
 
@@ -390,38 +392,33 @@ RECONCILE_ZH = """你是一个记忆管理系统。你的任务是将一批新�
 
 ## 输出格式
 
-顶层是一个 JSON 分组数组。每组是一个逻辑更新:
-
-```
-{{"reason": "<简短描述>",
-  "ops": [ <操作>, <操作>, ... ]}}
-```
-
-格式参考:
+输出一个 JSON 对象，顶层键 `updates` 是一个分组数组。每组是一个逻辑更新:
 
 ```json
-[
-  {{
-    "reason": "<为什么需要这组操作>",
-    "ops": [
-      {{"op": "ADD", "content": "用户...", "layer": "L4_IDENTITY",
-        "supersedes": [], "tags": ["..."]}},
-      {{"op": "ADD", "content": "用户...", "layer": "L4_IDENTITY",
-        "supersedes": ["<existing_id>"], "tags": ["..."]}},
-      {{"op": "DELETE", "memory_id": "<existing_id>"}}
-    ]
-  }}
-]
+{{
+  "updates": [
+    {{
+      "reason": "<为什么需要这组操作>",
+      "ops": [
+        {{"op": "ADD", "content": "用户...", "layer": "L4_IDENTITY",
+          "supersedes": [], "tags": ["..."]}},
+        {{"op": "ADD", "content": "用户...", "layer": "L4_IDENTITY",
+          "supersedes": ["<existing_id>"], "tags": ["..."]}},
+        {{"op": "DELETE", "memory_id": "<existing_id>"}}
+      ]
+    }}
+  ]
+}}
 ```
 
 ## 输出约定（严格）
 
-1. 输出必须是一个单独的 JSON 数组，包裹在以 ```json 开头、以 ``` 结尾的代码块中。
-2. 代码块外不要有任何文字、markdown、道歉或思维链。
-3. 如果不需要任何变更，在代码块中输出 `[]`。
+1. 输出必须是一个有效的 JSON 对象，顶层键为 `updates`（一个数组）。
+2. 不要有任何文字、markdown、道歉或思维链。
+3. 如果不需要任何变更，输出 `{{"updates": []}}`。
 4. 字段类型必须严格匹配: `supersedes` 和 `tags` 是数组（为空时用 `[]`）。
 
-现在输出 JSON 数组。"""
+现在输出 JSON。"""
 
 RECONCILE_EN = """You are a memory management system. Your task is to integrate a batch of new memories into the existing memory base while keeping it clean, retrievable, and losslessly informative.
 
@@ -537,38 +534,33 @@ Memories you choose not to operate on remain untouched. Do not emit ops against 
 
 ## Output format
 
-Top-level is a JSON array of groups. Each group is one logical update:
-
-```
-{{"reason": "<short description>",
-  "ops": [ <op>, <op>, ... ]}}
-```
-
-Shape-only reference:
+Output a JSON object whose top-level key `updates` is an array of groups. Each group is one logical update:
 
 ```json
-[
-  {{
-    "reason": "<why this group exists>",
-    "ops": [
-      {{"op": "ADD", "content": "The user ...", "layer": "L4_IDENTITY",
-        "supersedes": [], "tags": ["..."]}},
-      {{"op": "ADD", "content": "The user now prefers tea.", "layer": "L4_IDENTITY",
-        "supersedes": ["<existing_id>"], "supersede_reason": "Previously preferred coffee, now prefers tea", "tags": ["..."]}},
-      {{"op": "DELETE", "memory_id": "<existing_id>"}}
-    ]
-  }}
-]
+{{
+  "updates": [
+    {{
+      "reason": "<why this group exists>",
+      "ops": [
+        {{"op": "ADD", "content": "The user ...", "layer": "L4_IDENTITY",
+          "supersedes": [], "tags": ["..."]}},
+        {{"op": "ADD", "content": "The user now prefers tea.", "layer": "L4_IDENTITY",
+          "supersedes": ["<existing_id>"], "supersede_reason": "Previously preferred coffee, now prefers tea", "tags": ["..."]}},
+        {{"op": "DELETE", "memory_id": "<existing_id>"}}
+      ]
+    }}
+  ]
+}}
 ```
 
 ## Output contract (strict)
 
-1. Output MUST be a single JSON array wrapped in a fenced code block that starts with ```json and ends with ```.
-2. NO prose, markdown, apologies, or chain-of-thought outside the fenced block.
-3. If nothing needs to change, output `[]` inside the fenced block.
+1. Output MUST be a valid JSON object with the top-level key `updates` (an array).
+2. NO prose, markdown, apologies, or chain-of-thought.
+3. If nothing needs to change, output `{{"updates": []}}`.
 4. Field types must match exactly: `supersedes` and `tags` are arrays (use `[]` when empty).
 
-Now produce the JSON array."""
+Now produce the JSON."""
 
 SUMMARY_ZH = """为以下对话内容生成简洁的摘要。
 

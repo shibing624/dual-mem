@@ -25,7 +25,12 @@ class MemAgent:
         self.basic_profile_tool = BasicProfileTool(vector=self.vector, embed=self.embed)
         self.extractor = Extractor(llm=factory.llm, basic_profile_tool=self.basic_profile_tool)
         self.summarizer = Summarizer(llm=factory.llm)
-        self.reconciler = Reconciler(llm=factory.llm, embed=self.embed, vector=self.vector)
+        self.reconciler = Reconciler(
+            llm=factory.llm,
+            embed=self.embed,
+            vector=self.vector,
+            enable_search_query=factory.settings.reconcile_search_query,
+        )
 
     def run(
         self,

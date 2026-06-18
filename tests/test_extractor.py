@@ -12,15 +12,11 @@ def store(tmp_storage):
     return ChromaVectorStore(tmp_storage)
 
 
-def test_extract_identity_facts_and_tool_call(store, fake_embed):
+def test_extract_identity_facts_and_basic_info(store, fake_embed):
     extract_response = {
-        "content": (
-            '{"identity":[{"content":"用户喜欢喝咖啡","speculate":null,"tags":["food"]}],'
-            '"facts":[{"content":"用户昨天去了北京","speculate":null,"tags":["travel"]}]}'
-        ),
-        "tool_calls": [
-            {"function": {"name": "update_basic_user_profile", "arguments": '{"name": "张三"}'}}
-        ],
+        "identity": [{"content": "用户喜欢喝咖啡", "speculate": None, "tags": ["food"]}],
+        "facts": [{"content": "用户昨天去了北京", "speculate": None, "tags": ["travel"]}],
+        "basic_info": {"name": "张三"},
     }
     llm = FakeLLMClient(responses={"extract": extract_response})
     tool = BasicProfileTool(vector=store, embed=fake_embed)
@@ -44,40 +40,13 @@ def test_extract_identity_facts_and_tool_call(store, fake_embed):
     l0 = store.get(out["l0_node_id"])
     assert l0.custom["basic_info_kv"] == {"name": "张三"}
 
+    # 只调用一次 LLM（合并后的 Extractor 不再有 chat_with_tools + fallback 两次）。
+    assert sum(1 for c in llm.calls if c["type"] == "chat_json") == 1
 
-def test_extract_falls_back_to_chat_json_when_content_empty(store, fake_embed):
-    """真实模型走工具路径时 content 为空，应补一次 chat_json 拿 identity/facts。"""
+
+def test_extract_single_call_no_basic_info(store, fake_embed):
     llm = FakeLLMClient(
-        responses={
-            "extract": {
-                "content": "",
-                "tool_calls": [
-                    {"function": {"name": "update_basic_user_profile", "arguments": '{"name": "李四"}'}}
-                ],
-            },
-            "json": {"identity": [{"content": "用户是工程师", "tags": []}], "facts": []},
-        }
-    )
-    tool = BasicProfileTool(vector=store, embed=fake_embed)
-    extractor = Extractor(llm=llm, basic_profile_tool=tool)
-
-    out = extractor.extract(
-        content="我叫李四，是个工程师",
-        current_time="",
-        app_id="app",
-        user_id="u",
-        agent_id="ag",
-        session_id="se",
-    )
-
-    assert out["identity"] == [{"content": "用户是工程师", "tags": []}]
-    assert out["l0_node_id"] is not None
-    assert store.get(out["l0_node_id"]).custom["basic_info_kv"] == {"name": "李四"}
-
-
-def test_extract_no_tool_call(store, fake_embed):
-    llm = FakeLLMClient(
-        responses={"extract": {"content": '{"identity":[],"facts":[]}', "tool_calls": []}}
+        responses={"extract": {"identity": [], "facts": [], "basic_info": {}}}
     )
     tool = BasicProfileTool(vector=store, embed=fake_embed)
     extractor = Extractor(llm=llm, basic_profile_tool=tool)

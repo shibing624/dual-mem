@@ -42,7 +42,7 @@ class Reconciler:
         llm: LLMClient,
         embed: EmbedService,
         vector: VectorStore,
-        enable_search_query: bool = True,
+        enable_search_query: bool = False,
     ):
         self.llm = llm
         self.embed = embed
@@ -174,7 +174,7 @@ class Reconciler:
             new_memories=mem_lines
         )
         try:
-            queries = self.llm.chat_json(system=system, user=mem_lines)
+            queries = self.llm.chat_json(system=system, user=mem_lines, json_object=False)
         except json.JSONDecodeError:
             return []
         if not isinstance(queries, list):
@@ -215,6 +215,13 @@ class Reconciler:
     @staticmethod
     def _parse_ops(data) -> list[ReconcileOp]:
         """Normalize the LLM's grouped/flat output into validated, conflict-free ReconcileOps."""
+        if isinstance(data, dict):
+            for key in ("updates", "groups", "results"):
+                if isinstance(data.get(key), list):
+                    data = data[key]
+                    break
+            else:
+                data = [data]
         if not isinstance(data, list):
             data = [data]
 

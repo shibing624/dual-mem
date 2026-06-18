@@ -2,9 +2,7 @@ import pytest
 
 from dual_mem.agent.basic_profile import (
     BASIC_FIELDS,
-    TOOL_NAME,
     BasicProfileTool,
-    openai_tool_schema,
     render_content,
 )
 from dual_mem.isolation import build_filter
@@ -25,13 +23,6 @@ def _full_kv(nodes):
             if k in BASIC_FIELDS:
                 kv[k] = v
     return kv
-
-
-def test_tool_schema_shape():
-    schema = openai_tool_schema()
-    assert schema["type"] == "function"
-    assert schema["function"]["name"] == TOOL_NAME
-    assert set(schema["function"]["parameters"]["properties"]) == set(BASIC_FIELDS)
 
 
 def test_render_content():

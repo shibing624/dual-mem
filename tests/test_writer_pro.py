@@ -9,11 +9,9 @@ from dual_mem.writer.memory_writer import MemoryWriter
 from conftest import FakeLLMClient
 
 EXTRACT_RESPONSE = {
-    "content": (
-        '{"identity":[{"content":"用户喜欢喝咖啡","speculate":null,"tags":["food"]}],'
-        '"facts":[{"content":"用户昨天去了北京","speculate":null,"tags":["travel"]}]}'
-    ),
-    "tool_calls": [],
+    "identity": [{"content": "用户喜欢喝咖啡", "speculate": None, "tags": ["food"]}],
+    "facts": [{"content": "用户昨天去了北京", "speculate": None, "tags": ["travel"]}],
+    "basic_info": {},
 }
 
 

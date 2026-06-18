@@ -13,6 +13,9 @@ storage_dir: ./.dual_mem_data
 llm_base_url: https://api.openai.com/v1
 llm_api_key: sk-your-llm-key
 llm_model: gpt-4o-mini
+# 用 OpenAI JSON mode（response_format=json_object）让返回 JSON 更稳、省重试。
+# 仅当所用 endpoint 不支持 response_format 时才设为 false。
+llm_json_mode: true
 
 # Embedding
 embed_base_url: https://api.openai.com/v1
@@ -32,3 +35,10 @@ system2_trigger_mode: per_write
 # 换用相似度更集中的中文 embedding（bge/Qwen 等）可调高到 0.55 / 0.75。
 cluster_stage1_sim: 0.42
 cluster_stage2_sim: 0.55
+
+# Reconciler 额外的 LLM 召回查询改写：默认关闭，语义召回已够用，每次写入省一次 LLM。
+reconcile_search_query: false
+
+# System2 用多轮 ops 循环（更强的取证/反思，但更慢更贵）；默认单轮即可。
+system2_agent_loop: false
+system2_loop_max_iters: 3

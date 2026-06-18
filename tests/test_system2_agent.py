@@ -98,6 +98,44 @@ def test_system2_marks_clustered_facts_processed(ultra_factory):
     assert result2["created_schemas"] == 0
 
 
+def test_system2_extracts_ops_from_json_mode_object(ultra_factory):
+    """JSON mode 下 System2 返回 {"ops": [...]} 对象，应被正确解包执行。"""
+    _seed_fresh_facts(ultra_factory)
+    ultra_factory.llm.responses["json"] = {
+        "ops": [
+            {"op": "create_schema", "content": "当X时用户Y——反映Z。", "tags": [], "evidence": ["a1", "a2", "a3"]}
+        ]
+    }
+    result = System2Agent(factory=ultra_factory).run(app_id="app", user_id="u")
+    assert result["created_schemas"] == 1
+    assert result["evidence_added"] == 3
+
+
+def test_system2_agent_loop_multi_turn(tmp_storage, fake_embed):
+    """开启 system2_agent_loop：多轮 ops，直到返回空 ops 停止。"""
+    settings = Settings(mode="ultra", storage_dir=tmp_storage, system2_agent_loop=True)
+    rounds = [
+        {"ops": [{"op": "create_schema", "content": "当X时用户Y——反映Z。", "tags": [], "evidence": ["a1", "a2"]}]},
+        {"ops": [{"op": "add_evidence", "schema_id": "__nope__", "evidence": ["a3"]}]},
+        {"ops": []},
+    ]
+    calls = {"n": 0}
+
+    def scripted(*, system, user):
+        i = min(calls["n"], len(rounds) - 1)
+        calls["n"] += 1
+        return rounds[i]
+
+    llm = FakeLLMClient(responses={"json": scripted})
+    factory = ComponentFactory(settings=settings, embed=fake_embed, llm=llm)
+    _seed_fresh_facts(factory)
+
+    result = System2Agent(factory=factory).run(app_id="app", user_id="u")
+    assert result["created_schemas"] == 1
+    # 至少跑了两轮（第三轮空 ops 停止）
+    assert calls["n"] >= 2
+
+
 def test_system2_agent_no_clusters_no_ops(ultra_factory):
     # 只有 2 条 fact，不足以成簇 → 空 ops
     node = MemoryNode(

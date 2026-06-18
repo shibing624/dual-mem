@@ -86,6 +86,7 @@ class ComponentFactory:
                     base_url=self.settings.llm_base_url,
                     api_key=self.settings.llm_api_key,
                     model=self.settings.llm_model,
+                    json_mode=self.settings.llm_json_mode,
                 )
                 if self.settings.mode in ("pro", "ultra")
                 else None

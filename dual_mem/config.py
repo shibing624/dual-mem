@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
+    # Use OpenAI JSON mode (response_format=json_object) for JSON-returning calls.
+    # Turn off only if the endpoint does not support response_format.
+    llm_json_mode: bool = True
 
     embed_base_url: str = "https://api.openai.com/v1"
     embed_api_key: str = ""
@@ -53,6 +56,12 @@ class Settings(BaseSettings):
     # 若改用相似度更集中的中文 embedding（如 bge/Qwen），可调高到 0.55/0.75。
     cluster_stage1_sim: float = 0.42
     cluster_stage2_sim: float = 0.55
+
+    # Reconciler 额外的 LLM 召回查询改写：默认关闭（语义召回本身够用，省一次 LLM/写入）。
+    reconcile_search_query: bool = False
+    # System2 用多轮 ops 循环（更强的取证/反思，但更慢更贵）；默认单轮。
+    system2_agent_loop: bool = False
+    system2_loop_max_iters: int = 3
 
     @field_validator("app_whitelist", mode="before")
     @classmethod
