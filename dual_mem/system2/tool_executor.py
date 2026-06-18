@@ -1,12 +1,9 @@
-"""System2 ops 执行器。
-
-把 LLM 输出的 ops JSON 数组串行落库到图谱：
-- create_schema  → L6_SCHEMA 节点 + DERIVED_FROM 证据边 + fact 证据计数 +1
-- create_intention → L7_INTENTION 节点（同样支持证据）
-- add_evidence   → 给已有节点追加 DERIVED_FROM 证据边 + 计数 +1
-- add_edge       → 两节点间建 RELATED_TO 关系
+# -*- coding: utf-8 -*-
 """
-
+@author:XuMing(xuming624@qq.com)
+@description: Executes System2 ops against the graph store: create_schema/create_intention
+nodes, add_evidence edges (bumping fact evidence counts) and add_edge relations.
+"""
 import time
 import uuid
 
@@ -18,16 +15,20 @@ _ALLOWED_RELS = {"RELATED_TO", "CROSS_ABSTRACTS_TO"}
 
 
 def _str_list(value) -> list[str]:
+    """Coerce a value into a list of non-empty strings (empty list otherwise)."""
     if not isinstance(value, list):
         return []
     return [v for v in value if isinstance(v, str) and v.strip()]
 
 
 class ToolExecutor:
+    """Applies System2-generated ops to the graph store and returns operation counts."""
+
     def __init__(self, *, factory: ComponentFactory):
         self.factory = factory
 
     def apply(self, *, ops: list[dict], app_id: str, user_id: str, agent_id: str) -> dict:
+        """Execute a list of System2 ops sequentially; return counts of each effect."""
         graph = self.factory.graph
         created_schemas = 0
         created_intentions = 0
@@ -77,6 +78,7 @@ class ToolExecutor:
     def _create_node(
         self, layer: Layer, op: dict, app_id: str, user_id: str, agent_id: str
     ) -> str:
+        """Create and persist a new graph node for the given layer; return its id."""
         node_id = str(uuid.uuid4())
         content = op.get("content", "")
         self.factory.graph.add_node(
@@ -95,6 +97,7 @@ class ToolExecutor:
         return node_id
 
     def _link_evidence(self, schema_id: str, fact_ids: list[str]) -> int:
+        """Link fact evidence to a node and bump each fact's evidence count; return count added."""
         added = 0
         for fact_id in fact_ids:
             self.factory.graph.add_evidence(schema_id=schema_id, fact_id=fact_id)
@@ -103,6 +106,7 @@ class ToolExecutor:
         return added
 
     def _bump_evidence_count(self, fact_id: str) -> None:
+        """Increment a fact node's System2 evidence count by one."""
         node = self.factory.vector.get(fact_id)
         if node is None:
             return

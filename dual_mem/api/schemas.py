@@ -1,7 +1,14 @@
+# -*- coding: utf-8 -*-
+"""
+@author:XuMing(xuming624@qq.com)
+@description: Pydantic request/response schemas for the dual-mem REST API endpoints.
+"""
 from pydantic import BaseModel, Field
 
 
 class AddRequest(BaseModel):
+    """Request body for adding a memory (raw content or message list)."""
+
     content: str = ""
     messages: list[dict] | None = None
     app_id: str
@@ -12,6 +19,8 @@ class AddRequest(BaseModel):
 
 
 class AddResponse(BaseModel):
+    """Response for a successful add, including the new memory id and timing."""
+
     success: bool
     memory_id: str
     request_id: str
@@ -19,6 +28,8 @@ class AddResponse(BaseModel):
 
 
 class SearchRequest(BaseModel):
+    """Request body for semantic search with scope and route parameters."""
+
     query: str
     app_ids: list[str]
     user_id: str
@@ -33,6 +44,8 @@ class SearchRequest(BaseModel):
 
 
 class SearchResponse(BaseModel):
+    """Response carrying grouped search results and timing."""
+
     success: bool
     request_id: str
     memories: dict
@@ -40,39 +53,53 @@ class SearchResponse(BaseModel):
 
 
 class DeleteResponse(BaseModel):
+    """Response for deleting a single memory."""
+
     success: bool
 
 
 class DeleteBulkResponse(BaseModel):
+    """Response for a bulk delete, including the number removed."""
+
     success: bool
     deleted: int
 
 
 class ErrorResponse(BaseModel):
+    """Contract-aligned error envelope."""
+
     success: bool = False
     error_code: int
     error_message: str
 
 
 class HealthResponse(BaseModel):
+    """Health-check response with serving status and uptime."""
+
     status: str
     message: str
     uptime_seconds: float
 
 
 class PingResponse(BaseModel):
+    """Ping response with server time and timestamp."""
+
     message: str
     server_time: str
     timestamp: int
 
 
 class InfoResponse(BaseModel):
+    """Service info response (SDK version, mode, build)."""
+
     sdk_version: str
     mode: str
     build: str
 
 
 class MemoryItem(BaseModel):
+    """A single memory record as returned by list/get endpoints."""
+
     memory_id: str
     content: str
     category: str

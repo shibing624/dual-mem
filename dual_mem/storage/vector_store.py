@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+@author:XuMing(xuming624@qq.com)
+@description: Vector store abstraction and a Chroma-backed implementation for
+upserting, querying and managing MemoryNode embeddings with metadata filters.
+"""
 from abc import ABC, abstractmethod
 
 import chromadb
@@ -9,6 +15,7 @@ _COLLECTION = "memories"
 
 
 def _normalize_where(where: dict | None) -> dict | None:
+    """Wrap a multi-key where-filter in Chroma's $and form; pass single keys through."""
     if not where:
         return None
     if len(where) == 1:
@@ -17,6 +24,8 @@ def _normalize_where(where: dict | None) -> dict | None:
 
 
 class VectorStore(ABC):
+    """Abstract interface for embedding-backed memory storage."""
+
     @abstractmethod
     def upsert(self, nodes: list[MemoryNode]) -> None: ...
 
@@ -42,6 +51,8 @@ class VectorStore(ABC):
 
 
 class ChromaVectorStore(VectorStore):
+    """Persistent Chroma-backed vector store using cosine distance."""
+
     def __init__(self, storage_dir: str):
         self.client = chromadb.PersistentClient(
             path=f"{storage_dir}/chroma",
@@ -53,6 +64,7 @@ class ChromaVectorStore(VectorStore):
         )
 
     def upsert(self, nodes: list[MemoryNode]) -> None:
+        """Insert or update the given nodes (embeddings, content and metadata)."""
         if not nodes:
             return
         self.collection.upsert(
@@ -65,6 +77,7 @@ class ChromaVectorStore(VectorStore):
     def query(
         self, *, embedding: list[float], where: dict, top_k: int = 10
     ) -> list[MemoryNode]:
+        """Nearest-neighbor search under a filter; node.score is cosine similarity (1 - distance)."""
         result = self.collection.query(
             query_embeddings=[embedding],
             where=_normalize_where(where),
@@ -83,6 +96,7 @@ class ChromaVectorStore(VectorStore):
         return nodes
 
     def get(self, node_id: str) -> MemoryNode | None:
+        """Fetch a single node (with embedding) by id, or None if absent."""
         result = self.collection.get(
             ids=[node_id], include=["metadatas", "documents", "embeddings"]
         )
@@ -93,6 +107,7 @@ class ChromaVectorStore(VectorStore):
         return MemoryNode.from_storage(result["documents"][0], result["metadatas"][0], embedding)
 
     def get_many(self, where: dict, limit: int = 1000) -> list[MemoryNode]:
+        """Fetch all nodes matching a metadata filter (no embeddings), up to limit."""
         result = self.collection.get(
             where=_normalize_where(where),
             include=["metadatas", "documents"],
@@ -104,6 +119,7 @@ class ChromaVectorStore(VectorStore):
         ]
 
     def update_payload(self, node_id: str, patch: dict) -> None:
+        """Merge a metadata patch into an existing node; no-op if it does not exist."""
         current = self.collection.get(ids=[node_id], include=["metadatas"])
         if not current["ids"]:
             return
@@ -112,9 +128,11 @@ class ChromaVectorStore(VectorStore):
         self.collection.update(ids=[node_id], metadatas=[meta])
 
     def update_status(self, node_id: str, status: MemoryStatus) -> None:
+        """Update only the status field of a node."""
         self.update_payload(node_id, {"status": status.value})
 
     def delete(self, node_ids: list[str]) -> None:
+        """Physically remove the given node ids from the collection."""
         if not node_ids:
             return
         self.collection.delete(ids=node_ids)

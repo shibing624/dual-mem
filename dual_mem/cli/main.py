@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+@author:XuMing(xuming624@qq.com)
+@description: Typer CLI for the dual-mem SDK with commands to add/search/list/get/delete
+memories, trigger System2 digest, and serve the REST API or MCP server.
+"""
 import asyncio
 import json
 
@@ -11,10 +17,12 @@ app = typer.Typer(help="dual-mem 分层记忆 SDK 命令行")
 
 
 def make_client(mode: str | None = None) -> MemoryClient:
+    """Construct a MemoryClient for the given mode (or the configured default)."""
     return MemoryClient(mode=mode)
 
 
 def _echo_json(data) -> None:
+    """Pretty-print data as UTF-8 JSON to stdout."""
     typer.echo(json.dumps(data, ensure_ascii=False, indent=2))
 
 

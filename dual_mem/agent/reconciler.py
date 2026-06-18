@@ -1,13 +1,9 @@
-"""Reconciler：把一批新记忆与向量库已有记忆做协调，产出 ADD/DELETE 操作列表。
-
-流程（忠实复现源码 lite reconcile）：
-  1. 可选生成 search queries（提升召回）。
-  2. 双路向量搜索（每条新记忆 + 每条 query），合并候选池，保留最佳 score。
-  3. 按 supersedes 链把候选归并到 head，组 history_versions。
-  4. 无候选 → 全部 ADD(supersedes=[])。
-  5. 构造 prompt，chat_json（最多重试 3 次，空 [] 也算成功），解析为 ops。
+# -*- coding: utf-8 -*-
 """
-
+@author:XuMing(xuming624@qq.com)
+@description: Reconciler that recalls related existing memories, merges supersedes chains
+and asks the LLM to emit ADD/DELETE ops integrating new memories losslessly.
+"""
 import json
 from dataclasses import dataclass, field
 
@@ -21,6 +17,8 @@ from dual_mem.types import Layer, MemoryStatus
 
 @dataclass
 class ReconcileOp:
+    """A single reconciliation operation (ADD or DELETE) parsed from the LLM output."""
+
     op: str = "ADD"
     content: str | None = None
     layer: str | None = None
@@ -32,6 +30,8 @@ class ReconcileOp:
 
 
 class Reconciler:
+    """Recalls candidates and drives the LLM to integrate new memories into the store."""
+
     SEARCH_THRESHOLD = 0.3
     SEARCH_TOPK = 20
     FINAL_TOPK = 10
@@ -59,6 +59,7 @@ class Reconciler:
         agent_id: str,
         current_time: str,
     ) -> list[ReconcileOp]:
+        """Recall related memories and return LLM-proposed ADD/DELETE ops for the new batch."""
         if not new_memories:
             return []
 
@@ -166,6 +167,7 @@ class Reconciler:
         return []
 
     def _gen_search_queries(self, new_memories: list[str]) -> list[str]:
+        """Ask the LLM for extra recall queries derived from the new memories."""
         mem_lines = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(new_memories))
         joined = "\n".join(new_memories)
         system = prompts.pick(prompts.SEARCH_QUERY_ZH, prompts.SEARCH_QUERY_EN, joined).format(
@@ -180,6 +182,7 @@ class Reconciler:
         return [q for q in queries if isinstance(q, str) and q.strip()]
 
     def _merge_chains(self, candidate_map: dict) -> dict:
+        """Group candidate nodes under their chain head, collecting ancestors per head."""
         chain_ancestors: dict = {}
         for nid, node in candidate_map.items():
             superseded_by = node.superseded_by
@@ -202,6 +205,7 @@ class Reconciler:
 
     @staticmethod
     def _format_new_memory(index: int, meta: dict) -> str:
+        """Format one new memory (with optional tags) as a numbered prompt line."""
         line = f"{index + 1}. {meta.get('content', '')}"
         tags = meta.get("tags")
         if tags:
@@ -210,6 +214,7 @@ class Reconciler:
 
     @staticmethod
     def _parse_ops(data) -> list[ReconcileOp]:
+        """Normalize the LLM's grouped/flat output into validated, conflict-free ReconcileOps."""
         if not isinstance(data, list):
             data = [data]
 

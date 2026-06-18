@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+@author:XuMing(xuming624@qq.com)
+@description: Runtime configuration via pydantic-settings; resolves Settings from init
+args, DUAL_MEM_* env vars and a YAML file, and derives mode-based flags.
+"""
 import os
 from pathlib import Path
 from typing import Literal
@@ -14,7 +20,7 @@ DEFAULT_CONFIG_PATH = Path.home() / ".dual_mem" / "config.yaml"
 
 
 def config_path() -> Path:
-    """主配置文件路径，默认 ``~/.dual_mem/config.yaml``，可用 DUAL_MEM_CONFIG_FILE 覆盖。"""
+    """Resolve the YAML config path, honoring the DUAL_MEM_CONFIG_FILE override."""
     override = os.environ.get("DUAL_MEM_CONFIG_FILE")
     return Path(override).expanduser() if override else DEFAULT_CONFIG_PATH
 
@@ -51,6 +57,7 @@ class Settings(BaseSettings):
     @field_validator("app_whitelist", mode="before")
     @classmethod
     def _split_whitelist(cls, v):
+        """Accept a comma-separated string for app_whitelist and split it into a list."""
         if isinstance(v, str):
             return [item.strip() for item in v.split(",") if item.strip()]
         return v
@@ -64,13 +71,16 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Order config sources as init args > env vars > YAML file."""
         yaml_source = YamlConfigSettingsSource(settings_cls, yaml_file=config_path())
         return (init_settings, env_settings, yaml_source)
 
     @property
     def agent_mode(self) -> str:
+        """Derived LLM-cognition mode: disabled for lite, full otherwise."""
         return "disabled" if self.mode == "lite" else "full"
 
     @property
     def enable_graph(self) -> bool:
+        """Whether the graph store is enabled (ultra mode only)."""
         return self.mode == "ultra"

@@ -1,12 +1,9 @@
-"""分层记忆 Agent 的 prompt 集合（中英双版，逐字来自 Hy-Memory 源码）。
-
-每组提供中英两版，运行时按输入语言用 `pick` 选择，使 LLM 输出语言与输入一致。
-占位符：
-- EXTRACT/SUMMARY: {content}, {current_time}
-- SEARCH_QUERY:    {new_memories}
-- RECONCILE:       {current_time}, {existing_memories}, {new_memories}, {existing_tags}
+# -*- coding: utf-8 -*-
 """
-
+@author:XuMing(xuming624@qq.com)
+@description: Bilingual (zh/en) prompt templates for the System1 memory agent (extract,
+search-query, reconcile, summary); pick() selects a language matching the input.
+"""
 from dual_mem.providers.llm import is_chinese
 
 EXTRACT_ZH = """你是一位专业的记忆分析专家。请从以下对话中提取关于用户的结构化信息。
@@ -646,4 +643,5 @@ Strict formatting rules:
 Now produce the summary."""
 
 def pick(zh_prompt: str, en_prompt: str, text: str) -> str:
+    """Choose the Chinese or English prompt variant based on the input text's language."""
     return zh_prompt if is_chinese(text) else en_prompt

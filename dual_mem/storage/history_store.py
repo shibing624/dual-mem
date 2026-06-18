@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+@author:XuMing(xuming624@qq.com)
+@description: SQLite-backed append-only history store recording memory lifecycle events
+(add/update/delete) with old/new snapshots for auditing.
+"""
 import json
 import sqlite3
 import time
@@ -16,6 +22,8 @@ CREATE TABLE IF NOT EXISTS history (
 
 
 class HistoryStore:
+    """Append-only audit log of memory lifecycle events."""
+
     def __init__(self, storage_dir: str):
         self.conn = sqlite3.connect(
             f"{storage_dir}/history.db", check_same_thread=False
@@ -33,6 +41,7 @@ class HistoryStore:
         old: dict | None,
         new: dict | None,
     ) -> None:
+        """Append one history event with optional old/new metadata snapshots."""
         self.conn.execute(
             "INSERT INTO history (event, node_id, user_id, old, new, ts) "
             "VALUES (?, ?, ?, ?, ?, ?)",
@@ -48,6 +57,7 @@ class HistoryStore:
         self.conn.commit()
 
     def list_for_node(self, node_id: str) -> list[dict]:
+        """Return all history events for a node in chronological order, snapshots decoded."""
         rows = self.conn.execute(
             "SELECT * FROM history WHERE node_id = ? ORDER BY id ASC", (node_id,)
         ).fetchall()

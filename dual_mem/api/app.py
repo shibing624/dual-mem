@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+@author:XuMing(xuming624@qq.com)
+@description: FastAPI app factory exposing the dual-mem REST API (add/search/list/get/
+delete/health), with Bearer auth, app whitelist enforcement and contract error responses.
+"""
 import time
 from datetime import datetime
 
@@ -22,10 +28,12 @@ from dual_mem.config import Settings
 
 
 def _get_settings(request: Request) -> Settings:
+    """FastAPI dependency returning the app's Settings."""
     return request.app.state.settings
 
 
 def _get_client(request: Request) -> MemoryClient:
+    """FastAPI dependency returning the app's MemoryClient."""
     return request.app.state.client
 
 
@@ -33,6 +41,7 @@ def _verify_bearer(
     request: Request,
     authorization: str | None = Header(default=None),
 ) -> None:
+    """Enforce a non-empty Bearer token unless auth is disabled."""
     settings: Settings = request.app.state.settings
     if settings.auth_disabled:
         return
@@ -44,6 +53,7 @@ def _verify_bearer(
 
 
 def _check_whitelist(settings: Settings, app_ids: list[str]) -> None:
+    """Reject app_ids not in the configured whitelist unless auth is disabled."""
     if settings.auth_disabled:
         return
     for app_id in app_ids:
@@ -54,6 +64,7 @@ def _check_whitelist(settings: Settings, app_ids: list[str]) -> None:
 def create_app(
     *, client: MemoryClient | None = None, settings: Settings | None = None
 ) -> FastAPI:
+    """Build and return the FastAPI app, wiring routes, auth and a MemoryClient."""
     if settings is None:
         settings = client.settings if client is not None else Settings()
     if client is None:

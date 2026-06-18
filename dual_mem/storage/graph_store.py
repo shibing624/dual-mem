@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+@author:XuMing(xuming624@qq.com)
+@description: Graph store abstraction and a Kuzu-backed implementation modeling memory
+nodes, tag topics, evidence and cross-layer relations for ultra-mode reasoning.
+"""
 import json
 import math
 from abc import ABC, abstractmethod
@@ -37,6 +43,7 @@ class GraphNode:
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two vectors; 0.0 when either has zero norm."""
     dot = sum(x * y for x, y in zip(a, b))
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(y * y for y in b))
@@ -46,6 +53,8 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 
 class GraphStore(ABC):
+    """Abstract interface for the memory knowledge graph."""
+
     @abstractmethod
     def add_node(self, node: GraphNode) -> None: ...
 
@@ -81,6 +90,8 @@ class GraphStore(ABC):
 
 
 class KuzuGraphStore(GraphStore):
+    """Kuzu-embedded-database implementation of the memory knowledge graph."""
+
     def __init__(self, storage_dir: str):
         self.db = kuzu.Database(f"{storage_dir}/kuzu")
         self.conn = kuzu.Connection(self.db)
@@ -88,6 +99,7 @@ class KuzuGraphStore(GraphStore):
             self.conn.execute(ddl)
 
     def add_node(self, node: GraphNode) -> None:
+        """Upsert a memory node and link it to its tag topics."""
         self.conn.execute(
             "MERGE (m:Memory {node_id: $nid}) "
             "SET m.layer=$layer, m.content=$content, m.app_id=$app_id, "
@@ -123,6 +135,7 @@ class KuzuGraphStore(GraphStore):
         embedding: list[float],
         top_k: int = 10,
     ) -> list[GraphNode]:
+        """Rank a layer's nodes for a user by cosine similarity to the query embedding."""
         result = self.conn.execute(
             "MATCH (m:Memory) WHERE m.layer=$layer AND m.user_id=$user_id "
             "AND m.app_id IN $app_ids "
@@ -139,6 +152,7 @@ class KuzuGraphStore(GraphStore):
     def list_by_layer(
         self, *, layer: str, user_id: str, app_ids: list[str], limit: int = 1000
     ) -> list[GraphNode]:
+        """List a layer's nodes for a user in creation order, up to limit."""
         result = self.conn.execute(
             "MATCH (m:Memory) WHERE m.layer=$layer AND m.user_id=$user_id "
             "AND m.app_id IN $app_ids "
@@ -151,6 +165,7 @@ class KuzuGraphStore(GraphStore):
 
     @staticmethod
     def _rows_to_nodes(result, layer: str) -> list[GraphNode]:
+        """Materialize a Kuzu query result into GraphNode objects."""
         nodes: list[GraphNode] = []
         while result.has_next():
             row = result.get_next()
@@ -171,6 +186,7 @@ class KuzuGraphStore(GraphStore):
         return nodes
 
     def add_evidence(self, *, schema_id: str, fact_id: str) -> None:
+        """Record that a schema node was derived from a fact (DERIVED_FROM edge)."""
         self.conn.execute("MERGE (v:VdbRef {node_id: $fid})", {"fid": fact_id})
         self.conn.execute(
             "MATCH (m:Memory {node_id: $sid}), (v:VdbRef {node_id: $fid}) "
@@ -179,6 +195,7 @@ class KuzuGraphStore(GraphStore):
         )
 
     def evidence_of(self, schema_id: str) -> list[str]:
+        """Return the fact ids that a schema node was derived from."""
         result = self.conn.execute(
             "MATCH (m:Memory {node_id: $sid})-[:DERIVED_FROM]->(v:VdbRef) "
             "RETURN v.node_id",
@@ -190,6 +207,7 @@ class KuzuGraphStore(GraphStore):
         return ids
 
     def add_edge(self, *, from_id: str, to_id: str, rel: str) -> None:
+        """Create a relation edge of an allowed type between two memory nodes."""
         if rel not in _REL_TYPES:
             raise ValueError(f"unsupported rel: {rel}")
         self.conn.execute(
@@ -201,6 +219,7 @@ class KuzuGraphStore(GraphStore):
     def neighbors_by_tag(
         self, *, tag: str, user_id: str, app_ids: list[str]
     ) -> list[str]:
+        """Return ids of a user's memory nodes tagged with the given topic."""
         result = self.conn.execute(
             "MATCH (m:Memory)-[:TAGGED_WITH]->(t:Topic {name: $tag}) "
             "WHERE m.user_id=$user_id AND m.app_id IN $app_ids "

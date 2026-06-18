@@ -1,9 +1,9 @@
-"""把三路检索结果拼成 LLM 上下文字符串。
-
-顺序 profile → proactive → normal，演化链按 latest→oldest 展开多版本，
-raw 类记忆内容超长截断。空分组跳过。
+# -*- coding: utf-8 -*-
 """
-
+@author:XuMing(xuming624@qq.com)
+@description: Formats three-route search results into an LLM context string (profile ->
+proactive -> normal), expanding evolution chains and truncating long raw memories.
+"""
 _GROUP_TITLES = [
     ("profile", "【画像 Profile】"),
     ("proactive", "【主动 Proactive】"),
@@ -12,6 +12,7 @@ _GROUP_TITLES = [
 
 
 def _format_item(item: dict, raw_truncate: int) -> str:
+    """Format one memory item as a context line, expanding any evolution chain."""
     content = item["content"]
     if item["category"] == "raw" and len(content) > raw_truncate:
         content = content[:raw_truncate] + "…"
@@ -26,6 +27,7 @@ def _format_item(item: dict, raw_truncate: int) -> str:
 
 
 def format_memories(result: dict, raw_truncate: int = 800) -> str:
+    """Join non-empty profile/proactive/normal groups into a single context string."""
     blocks: list[str] = []
     for key, title in _GROUP_TITLES:
         items = result.get(key) or []

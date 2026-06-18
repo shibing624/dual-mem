@@ -1,18 +1,19 @@
-"""演化链回溯（忠实复现 hy_memory _retrieval/evolution，适配同步 API）。
-
-对一批 search hits，识别其中在演化链上的节点，双向追溯完整链，以链头
-（is_latest=True；否则 gmt_created/memory_at 最新）为代表返回，同链多个 hit
-去重合并（保留最高 score）。
+# -*- coding: utf-8 -*-
 """
-
+@author:XuMing(xuming624@qq.com)
+@description: Evolution-chain expansion for search hits: traces full supersedes chains,
+represents each by its head node and de-duplicates same-chain hits keeping the best score.
+"""
 from dual_mem.types import MemoryNode
 
 
 def _time_key(node: MemoryNode) -> int:
+    """Sort key for a node: memory_at, else gmt_created, else 0."""
     return node.memory_at or node.gmt_created or 0
 
 
 def _node_to_chain_item(node: MemoryNode) -> dict:
+    """Serialize a node into a compact evolution-chain entry."""
     return {
         "node_id": node.node_id,
         "content": node.content,
@@ -24,10 +25,7 @@ def _node_to_chain_item(node: MemoryNode) -> dict:
 
 
 def _trace_full_chain(vector, start_node: MemoryNode) -> list[MemoryNode]:
-    """从任意节点出发双向追溯整条链（向前 supersedes、向后 superseded_by）。
-
-    返回整条链，链头在 [0]。只有自身时返回 [start_node]。
-    """
+    """Bidirectionally trace the full chain from any node; head at index 0."""
     visited: dict[str, MemoryNode] = {start_node.node_id: start_node}
     to_fetch: list[str] = list(start_node.supersedes) + list(start_node.superseded_by)
 
@@ -60,6 +58,7 @@ def _trace_full_chain(vector, start_node: MemoryNode) -> list[MemoryNode]:
 
 
 def _expand_one_chain(vector, node: MemoryNode) -> dict | None:
+    """Expand a single node into its chain representation, or None if it is not chained."""
     if not node.supersedes and not node.superseded_by:
         return None
     chain = _trace_full_chain(vector, node)
@@ -74,12 +73,7 @@ def _expand_one_chain(vector, node: MemoryNode) -> dict | None:
 
 
 def expand_evolution_chains(*, vector, hits: list[MemoryNode]) -> list[dict]:
-    """展开一批 hits 中的演化链并去重。
-
-    输入 hits 已按 node_id 去重。输出每项形如
-    ``{"node": MemoryNode, "score": float, "is_evolved": bool,
-    "evolution_chain": list|None}``，可能比输入短（同链合并）。
-    """
+    """Expand evolution chains in a batch of hits and de-duplicate same-chain entries."""
     expanded_by_idx: dict[int, dict] = {}
     chain_dedup: dict[str, dict] = {}
     for i, node in enumerate(hits):

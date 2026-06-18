@@ -1,14 +1,9 @@
-"""两阶段 DBSCAN 事实聚类（System2 预处理的硬编码步骤，无 LLM）。
-
-算法忠实复现 hy-memory ``prepare_materials`` 的聚类逻辑：
-- Stage1：粗分，eps = 1 - 0.55，min_samples = 3。
-- Stage2：对 size > 12 的大簇细分，eps = 1 - 0.75，min_samples = 2，
-  noise 归入最近的子簇。
-- 簇内 cosine >= 0.92 去重，保留离质心最近的代表。
-
-用 cosine 预计算距离矩阵（distance = 1 - cosine）。
+# -*- coding: utf-8 -*-
 """
-
+@author:XuMing(xuming624@qq.com)
+@description: Two-stage DBSCAN clustering of facts (no LLM) used to prepare System2
+materials: coarse clustering, refinement of large clusters and intra-cluster dedup.
+"""
 import numpy as np
 from sklearn.cluster import DBSCAN
 from sklearn.metrics.pairwise import cosine_distances
@@ -27,6 +22,7 @@ def cluster_facts(
     stage1_sim: float = 0.55,
     stage2_sim: float = 0.75,
 ) -> list[dict]:
+    """Cluster fact nodes into deduped groups with a centroid representative; [] if too few."""
     pool = [f for f in facts if f.embedding]
     if len(pool) < _MIN_FACTS:
         return []
@@ -78,6 +74,7 @@ def cluster_facts(
 
 
 def _refine(matrix: np.ndarray, indices: list[int], stage2_eps: float) -> list[list[int]]:
+    """Sub-cluster an oversized cluster, assigning noise points to the nearest sub-cluster."""
     sub = matrix[indices]
     sub_labels = DBSCAN(
         eps=stage2_eps, min_samples=_STAGE2_MIN_SAMPLES, metric="precomputed"
@@ -109,6 +106,7 @@ def _refine(matrix: np.ndarray, indices: list[int], stage2_eps: float) -> list[l
 
 
 def _dedup(matrix: np.ndarray, indices: list[int]) -> list[int]:
+    """Drop near-duplicate members (cosine >= threshold), keeping the first seen."""
     kept: list[int] = []
     for i in indices:
         duplicate = any(

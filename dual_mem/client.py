@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+@author:XuMing(xuming624@qq.com)
+@description: Public async facade of the layered-memory SDK. MemoryClient wires the
+configured providers/stores together and exposes add/search/get/list/update/delete/digest.
+"""
 import json
 import time
 import uuid
@@ -13,6 +19,8 @@ from dual_mem.writer.memory_writer import MemoryWriter
 
 
 class MemoryClient:
+    """High-level entry point; pick lite/pro/ultra writer based on the resolved mode."""
+
     def __init__(
         self,
         *,
@@ -22,6 +30,7 @@ class MemoryClient:
         embed=None,
         llm=None,
     ):
+        # Build Settings from overrides when not supplied; inject fakes via embed/llm in tests.
         if settings is None:
             overrides = {}
             if storage_dir is not None:
@@ -60,6 +69,7 @@ class MemoryClient:
         session_id: str = "",
         memory_at: int | None = None,
     ) -> dict:
+        """Write one memory (raw text or message list) and run cognition per mode."""
         request_id = str(uuid.uuid4())
         start = time.perf_counter()
         text = content if content else json.dumps(messages, ensure_ascii=False)
@@ -94,6 +104,7 @@ class MemoryClient:
         intention_limit: int = 0,
         created_after: int | None = None,
     ) -> dict:
+        """Semantic search returning memories grouped as profile/proactive/normal."""
         request_id = str(uuid.uuid4())
         start = time.perf_counter()
         memories = self.reader.search(
@@ -117,6 +128,7 @@ class MemoryClient:
         }
 
     async def get(self, memory_id: str) -> dict | None:
+        """Fetch a single memory by id, or None if it does not exist."""
         node = self.factory.vector.get(memory_id)
         if node is None:
             return None
@@ -125,6 +137,7 @@ class MemoryClient:
     async def list(
         self, *, app_id: str, user_id: str, agent_id: str = "", limit: int = 100
     ) -> list[dict]:
+        """List ACTIVE memories under the given app/user (optionally agent) scope."""
         where = build_filter(
             app_ids=[app_id],
             user_id=user_id,
@@ -135,6 +148,7 @@ class MemoryClient:
         return [Reader._to_dict(node) for node in nodes]
 
     async def update(self, memory_id: str, content: str) -> dict:
+        """Replace a memory's content and re-embed it, logging the change to history."""
         node = self.factory.vector.get(memory_id)
         if node is None:
             return {"success": False, "error_code": 404}
@@ -153,6 +167,7 @@ class MemoryClient:
         return {"success": True, "memory_id": memory_id}
 
     async def delete(self, memory_id: str) -> dict:
+        """Physically remove a memory and append a DELETE history record."""
         node = self.factory.vector.get(memory_id)
         if node is None:
             return {"success": False, "error_code": 404}
@@ -174,6 +189,7 @@ class MemoryClient:
         agent_id: str | None = None,
         confirm: bool = False,
     ) -> dict:
+        """Delete every memory in a scope; requires confirm=True as a safety guard."""
         if confirm is not True:
             return {"success": False, "error_code": 400}
         where: dict = {"app_id": {"$in": [app_id]}}
@@ -195,6 +211,7 @@ class MemoryClient:
         return {"success": True, "deleted": len(node_ids)}
 
     async def digest(self) -> dict:
+        """Drain the System2 queue (ultra only): consolidate facts into schemas/intentions."""
         if not isinstance(self.writer, System2Writer):
             return {"success": True, "processed": 0}
         processed = await self.writer.run_system2_pending()

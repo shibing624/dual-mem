@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+@author:XuMing(xuming624@qq.com)
+@description: MCP server exposing dual-mem memory tools (add/search/get/list/delete) over
+FastMCP, backed by a MemoryClient, with a stdio entry point.
+"""
 from mcp.server.fastmcp import FastMCP
 
 from dual_mem.client import MemoryClient
@@ -12,6 +18,7 @@ _GROUP_DOC = (
 
 
 def build_mcp(*, client: MemoryClient | None = None) -> FastMCP:
+    """Build a FastMCP server registering the dual-mem memory tools."""
     if client is None:
         client = MemoryClient(settings=Settings())
 
@@ -86,6 +93,7 @@ def build_mcp(*, client: MemoryClient | None = None) -> FastMCP:
 
 
 def main() -> None:
+    """Run the MCP server over stdio."""
     build_mcp().run()
 
 

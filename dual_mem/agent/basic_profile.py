@@ -1,10 +1,9 @@
-"""L0_BASIC_INFO 工具：update_basic_user_profile。
-
-把用户稳定的结构化属性（name/age/location/occupation/employer）合并写入 L0 演化链。
-每次写入只记录与历史全量 KV 的 diff，diff 存入节点 custom["basic_info_kv"]，
-content 渲染为自然语言。旧 head 标 SUPERSEDED 并接入链。
+# -*- coding: utf-8 -*-
 """
-
+@author:XuMing(xuming624@qq.com)
+@description: L0_BASIC_INFO tool (update_basic_user_profile): merges stable structured
+user attributes into an evolution chain, storing only the KV diff and superseding the old head.
+"""
 from dual_mem.isolation import build_filter
 from dual_mem.providers.embedding import EmbedService
 from dual_mem.storage.vector_store import VectorStore
@@ -37,6 +36,7 @@ TOOL_PARAMETERS = {
 
 
 def openai_tool_schema() -> dict:
+    """Return the OpenAI function-calling schema for the basic-profile tool."""
     return {
         "type": "function",
         "function": {
@@ -48,6 +48,7 @@ def openai_tool_schema() -> dict:
 
 
 def render_content(kv: dict) -> str:
+    """Render a basic-info KV dict into a natural-language sentence (empty when no fields)."""
     parts = []
     for key in BASIC_FIELDS:
         value = kv.get(key)
@@ -63,6 +64,7 @@ def render_content(kv: dict) -> str:
 
 
 def _sanitize_arguments(arguments: dict) -> dict:
+    """Keep only valid basic fields, trimming strings and coercing age to int."""
     result: dict = {}
     for k in BASIC_FIELDS:
         if k not in arguments:
@@ -81,6 +83,8 @@ def _sanitize_arguments(arguments: dict) -> dict:
 
 
 class BasicProfileTool:
+    """Maintains the L0 basic-info evolution chain from tool-call arguments."""
+
     def __init__(self, *, vector: VectorStore, embed: EmbedService):
         self.vector = vector
         self.embed = embed
@@ -94,6 +98,7 @@ class BasicProfileTool:
         agent_id: str,
         session_id: str,
     ) -> str | None:
+        """Apply a profile update: write the diff as a new L0 head, supersede the old head."""
         new_kv = _sanitize_arguments(arguments)
         if not new_kv:
             return None

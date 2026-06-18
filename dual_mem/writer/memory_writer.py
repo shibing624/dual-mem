@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+@author:XuMing(xuming624@qq.com)
+@description: Synchronous write path (lite/pro): persists a raw memory node, logs it,
+and in full agent mode runs System1 cognition to derive extra memories.
+"""
 from dataclasses import dataclass, field
 
 from dual_mem.agent.mem_agent import MemAgent
@@ -7,11 +13,15 @@ from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
 @dataclass
 class WriteResult:
+    """Outcome of a write: the raw memory id plus any cognition-derived node ids."""
+
     memory_id: str
     extra_node_ids: list[str] = field(default_factory=list)
 
 
 class MemoryWriter:
+    """Lite/pro writer: persist the raw memory and optionally run System1 cognition."""
+
     def __init__(self, *, factory: ComponentFactory, agent_mode: str):
         self.factory = factory
         self.agent_mode = agent_mode
@@ -27,6 +37,7 @@ class MemoryWriter:
         request_id: str,
         memory_at: int | None = None,
     ) -> WriteResult:
+        """Persist content as a raw node and, in full mode, derive and link extra memories."""
         node = MemoryNode(
             content=content,
             layer=Layer.L1_RAW,
@@ -77,6 +88,7 @@ class MemoryWriter:
         request_id: str,
         memory_at: int | None,
     ) -> list[str]:
+        """Run the System1 MemAgent over the raw node and return derived node ids."""
         agent = MemAgent(factory=self.factory)
         return agent.run(
             raw_node=raw,

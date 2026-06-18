@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+@author:XuMing(xuming624@qq.com)
+@description: Reader implementing three-route semantic recall (profile/proactive/normal)
+with quota selection, evolution-chain expansion and hybrid reranking.
+"""
 import math
 
 from dual_mem.isolation import build_filter
@@ -28,11 +34,7 @@ def _profile_quota_select(
     identity_vals: set[str],
     schema_vals: set[str],
 ) -> list[dict]:
-    """从 profile 结果池按 identity(L0/L4) 40% / schema(L6) 40% / 自由竞争 20% 选取。
-
-    items 含 ``node`` / ``score``；返回按 score 降序。M4 无图，schema 池基本为空，
-    几乎全部进 identity 侧。
-    """
+    """Select profile items by quota: 40% identity, 40% schema, 20% free competition."""
     if total_limit <= 0 or not items:
         return items
 
@@ -71,6 +73,8 @@ def _profile_quota_select(
 
 
 class Reader:
+    """Read path: semantic search across three routes returning grouped memory dicts."""
+
     def __init__(self, *, factory: ComponentFactory):
         self.factory = factory
 
@@ -89,6 +93,7 @@ class Reader:
         intention_limit: int = 0,
         created_after: int | None = None,
     ) -> dict:
+        """Recall, expand and rerank memories, returning profile/proactive/normal groups."""
         embedding = self.factory.embed.embed(query)
         vector = self.factory.vector
 
@@ -212,6 +217,7 @@ class Reader:
 
     @staticmethod
     def _graph_to_node(g) -> MemoryNode:
+        """Adapt a GraphNode from the graph store into a scored MemoryNode."""
         node = MemoryNode(
             content=g.content,
             layer=Layer(g.layer),
@@ -227,6 +233,7 @@ class Reader:
 
     @staticmethod
     def _quota_nodes(nodes: list[MemoryNode], total_limit: int) -> list[MemoryNode]:
+        """Apply the profile identity/schema/free quota to a list of nodes."""
         items = [{"node": n, "score": n.score} for n in nodes]
         selected = _profile_quota_select(
             items, total_limit, _IDENTITY_VALS, _SCHEMA_VALS
@@ -235,6 +242,7 @@ class Reader:
 
     @staticmethod
     def _rerank_normal(query: str, items: list[dict]) -> list[dict]:
+        """Rerank normal-route items via intent-weighted RRF over vector and BM25 channels."""
         if len(items) <= 1:
             return items
         weights = INTENT_WEIGHTS_2CHANNEL[classify_intent(query)]
@@ -255,6 +263,7 @@ class Reader:
 
     @staticmethod
     def _item_to_dict(item: dict) -> dict:
+        """Convert an internal scored item (with chain) into the output dict shape."""
         return Reader._to_dict(
             item["node"],
             score=item["score"],
@@ -267,6 +276,7 @@ class Reader:
         score: float | None = None,
         evolution_chain: list | None = None,
     ) -> dict:
+        """Serialize a MemoryNode into the public API result dict."""
         result = {
             "memory_id": node.node_id,
             "content": node.content,

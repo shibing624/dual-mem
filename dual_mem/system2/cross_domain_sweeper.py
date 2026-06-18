@@ -1,12 +1,9 @@
-"""跨域升维扫描器（简化版）。
-
-源码 ``cross_domain_sweeper.py`` 用「行为升维 embed → 矩阵碰撞 + Union-Find 聚类 →
-LLM 突破性归纳」三部曲。我们按 plan 简化为：基础 L6 schema 数 >= 5 时触发，一次
-LLM 调用归纳出一条核心 schema，并对涉及的基础 schema 建 CROSS_ABSTRACTS_TO 边。
-
-核心 schema 用 GraphNode.custom={"sub_type": "core"} 标记，与基础 schema 区分。
+# -*- coding: utf-8 -*-
 """
-
+@author:XuMing(xuming624@qq.com)
+@description: Cross-domain abstraction sweeper: when enough basic L6 schemas exist, runs
+one LLM call to induce a higher-order core schema and links it via CROSS_ABSTRACTS_TO.
+"""
 import time
 import uuid
 
@@ -39,10 +36,13 @@ Output ONLY a JSON object, nothing else:
 
 
 class CrossDomainSweeper:
+    """Induces a higher-order core schema from multiple basic schemas across domains."""
+
     def __init__(self, *, factory: ComponentFactory):
         self.factory = factory
 
     def run(self, *, app_id: str, user_id: str, agent_id: str = "") -> dict:
+        """Create a core schema linking basic schemas when at least the minimum count exists."""
         graph = self.factory.graph
         all_schemas = graph.list_by_layer(
             layer=Layer.L6_SCHEMA.value, user_id=user_id, app_ids=[app_id]

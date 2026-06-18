@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+@author:XuMing(xuming624@qq.com)
+@description: ComponentFactory for dependency wiring; lazily constructs and caches
+providers and stores (embed/vector/cache/history/graph/llm) from Settings.
+"""
 from dual_mem.config import Settings
 from dual_mem.providers.embedding import EmbedService
 from dual_mem.providers.llm import LLMClient
@@ -10,6 +16,8 @@ _UNSET = object()
 
 
 class ComponentFactory:
+    """Lazily build and cache providers/stores; allows injecting fake embed/llm in tests."""
+
     def __init__(
         self,
         *,
@@ -27,6 +35,7 @@ class ComponentFactory:
 
     @property
     def embed(self) -> EmbedService:
+        """The embedding service, constructed from Settings on first access."""
         if self._embed is None:
             self._embed = EmbedService(
                 base_url=self.settings.embed_base_url,
@@ -38,24 +47,28 @@ class ComponentFactory:
 
     @property
     def vector(self) -> ChromaVectorStore:
+        """The Chroma vector store, constructed on first access."""
         if self._vector is None:
             self._vector = ChromaVectorStore(self.settings.storage_dir)
         return self._vector
 
     @property
     def cache(self) -> CacheStore:
+        """The cache store, constructed on first access."""
         if self._cache is None:
             self._cache = CacheStore(self.settings.storage_dir)
         return self._cache
 
     @property
     def history(self) -> HistoryStore:
+        """The history/audit store, constructed on first access."""
         if self._history is None:
             self._history = HistoryStore(self.settings.storage_dir)
         return self._history
 
     @property
     def graph(self) -> KuzuGraphStore | None:
+        """The graph store when graph is enabled (ultra), else None."""
         if self._graph is _UNSET:
             self._graph = (
                 KuzuGraphStore(self.settings.storage_dir)
@@ -66,6 +79,7 @@ class ComponentFactory:
 
     @property
     def llm(self) -> LLMClient | None:
+        """The LLM client for pro/ultra modes, else None (lite)."""
         if self._llm is _UNSET:
             self._llm = (
                 LLMClient(

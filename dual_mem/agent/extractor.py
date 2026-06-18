@@ -1,10 +1,9 @@
-"""Extractor：从对话提取 identity / facts，并通过 function-calling 工具更新 L0 basic profile。
-
-真实 OpenAI 兼容模型在决定调用工具时通常 ``message.content`` 为空（finish_reason=tool_calls），
-identity/facts 与 tool_calls 实际互斥。因此：先 ``chat_with_tools`` 处理 L0 工具调用，
-若该轮没拿到 identity/facts JSON，再补一次纯 ``chat_json`` 专门出 identity/facts。
+# -*- coding: utf-8 -*-
 """
-
+@author:XuMing(xuming624@qq.com)
+@description: Extractor that pulls identity/facts from a conversation and updates the L0
+basic profile via function-calling, falling back to a JSON-only call when needed.
+"""
 import json
 import re
 
@@ -14,6 +13,7 @@ from dual_mem.providers.llm import LLMClient
 
 
 def _parse_content_json(text: str) -> dict:
+    """Parse a JSON object from model content, tolerating code fences and surrounding text."""
     text = (text or "").strip()
     if not text:
         return {}
@@ -34,6 +34,8 @@ def _parse_content_json(text: str) -> dict:
 
 
 class Extractor:
+    """Extracts identity/fact memories and applies L0 basic-profile tool calls."""
+
     def __init__(self, *, llm: LLMClient, basic_profile_tool: BasicProfileTool):
         self.llm = llm
         self.basic_profile_tool = basic_profile_tool
@@ -48,6 +50,7 @@ class Extractor:
         agent_id: str,
         session_id: str,
     ) -> dict:
+        """Return extracted identity/facts plus any L0 node id created by the profile tool."""
         system = prompts.pick(prompts.EXTRACT_ZH, prompts.EXTRACT_EN, content).format(
             content=content, current_time=current_time
         )

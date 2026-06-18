@@ -1,13 +1,9 @@
-"""System2 认知加工 Agent（简化为单次 LLM 出 ops 数组）。
-
-源码 ``system2_agent.py`` Phase2 是 8 工具 ReAct 多轮循环（complete_messages +
-tool_call_id 回灌）。我们的 LLMClient 是单轮（system+user），按已批准 plan 采用简化
-方案：一次 LLM 调用输出 ops JSON 数组 → 程序串行执行（ToolExecutor）。这是有意偏离。
-
-Phase1 预处理（prepare_materials）硬编码无 LLM：取 fresh facts → 聚类 → 用簇质心
-反查已有 L6 schema → 汇总 existing_tags。
+# -*- coding: utf-8 -*-
 """
-
+@author:XuMing(xuming624@qq.com)
+@description: System2 cognitive-processing agent: prepares clustered fact materials, then
+runs a single LLM call to emit schema/intention ops executed by the ToolExecutor.
+"""
 from dual_mem.isolation import build_filter
 from dual_mem.providers.llm import is_chinese
 from dual_mem.registry import ComponentFactory
@@ -78,6 +74,7 @@ _GRAPH_TOPK = 8
 def prepare_materials(
     *, factory: ComponentFactory, app_id: str, user_id: str, agent_id: str
 ) -> dict:
+    """Cluster fresh facts and gather existing schemas/tags as System2 input materials."""
     where = build_filter(
         app_ids=[app_id],
         user_id=user_id,
@@ -138,6 +135,7 @@ def prepare_materials(
 
 
 def _build_user_message(materials: dict) -> str:
+    """Render prepared materials (clusters, existing schemas, tags) into the user prompt."""
     parts = ["## 聚类结果 / Cluster results"]
     for i, cluster in enumerate(materials["clusters"]):
         parts.append(f"### Cluster {i}（主题: {cluster['centroid_text']}）")
@@ -160,10 +158,13 @@ def _build_user_message(materials: dict) -> str:
 
 
 class System2Agent:
+    """Distills fresh facts into L6 schemas / L7 intentions via clustering and one LLM pass."""
+
     def __init__(self, *, factory: ComponentFactory):
         self.factory = factory
 
     def run(self, *, app_id: str, user_id: str, agent_id: str = "") -> dict:
+        """Process one app/user: prepare materials, generate ops, execute them, return stats."""
         materials = prepare_materials(
             factory=self.factory, app_id=app_id, user_id=user_id, agent_id=agent_id
         )
@@ -191,10 +192,7 @@ class System2Agent:
         return stats
 
     def _mark_clustered_processed(self, clusters: list[dict]) -> None:
-        """本轮参与聚类的 fact 全部标记为已加工，避免下次 digest 重复造 schema。
-
-        ToolExecutor 只对被引用为 evidence 的 fact +1，未被引用的仍为 0 会被反复消费。
-        """
+        """Mark all clustered facts as processed so unused ones are not re-consumed next digest."""
         for cluster in clusters:
             for fact in cluster["facts"]:
                 node = self.factory.vector.get(fact["node_id"])

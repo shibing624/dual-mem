@@ -1,15 +1,17 @@
-"""ultra 写侧：跑完 System1 后 fire-and-forget 入 System2 队列。
-
-write 内部持有一个 MemoryWriter 跑 S1（与 pro 一致），完成后仅把 (user_id, app_id)
-入队即返回，不阻塞写请求。System2 的实际加工由 run_system2_pending 在 digest 时消费。
+# -*- coding: utf-8 -*-
 """
-
+@author:XuMing(xuming624@qq.com)
+@description: Ultra-mode writer: runs System1 like pro, then fire-and-forget enqueues the
+(user, app) pair for later System2 distillation drained by run_system2_pending.
+"""
 from dual_mem.registry import ComponentFactory
 from dual_mem.system2.system2_agent import System2Agent
 from dual_mem.writer.memory_writer import MemoryWriter, WriteResult
 
 
 class System2Writer:
+    """Ultra writer wrapping the System1 writer and queuing async System2 distillation."""
+
     def __init__(self, *, factory: ComponentFactory, agent_mode: str):
         self.factory = factory
         self.inner = MemoryWriter(factory=factory, agent_mode=agent_mode)
@@ -26,6 +28,7 @@ class System2Writer:
         request_id: str,
         memory_at: int | None = None,
     ) -> WriteResult:
+        """Run the System1 write, enqueue the (user, app) pair for System2, and return."""
         result = await self.inner.write(
             content=content,
             app_id=app_id,
@@ -39,6 +42,7 @@ class System2Writer:
         return result
 
     async def run_system2_pending(self) -> int:
+        """Drain the System2 queue, running the agent per task; return tasks processed."""
         agent = System2Agent(factory=self.factory)
         self.processed_pairs = set()
         processed = 0

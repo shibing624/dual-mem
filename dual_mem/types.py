@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+@author:XuMing(xuming624@qq.com)
+@description: Core domain types: Layer/Category/MemoryStatus/ReconcileOp enums and the
+MemoryNode dataclass with its storage (de)serialization helpers.
+"""
 import json
 import time
 import uuid
@@ -54,10 +60,12 @@ LAYER_TO_CATEGORY: dict[Layer, Category] = {
 
 
 def _now() -> int:
+    """Return the current Unix timestamp in seconds."""
     return int(time.time())
 
 
 def _new_id() -> str:
+    """Generate a fresh random UUID4 string."""
     return str(uuid.uuid4())
 
 
@@ -86,9 +94,11 @@ class MemoryNode:
 
     @property
     def category(self) -> Category:
+        """Routing category derived from the node's layer."""
         return LAYER_TO_CATEGORY[self.layer]
 
     def to_metadata(self) -> dict:
+        """Flatten this node into a storage-friendly metadata dict (lists joined, None encoded)."""
         return {
             "layer": self.layer.value,
             "app_id": self.app_id,
@@ -113,6 +123,7 @@ class MemoryNode:
     def from_storage(
         cls, content: str, meta: dict, embedding: list[float] | None = None
     ) -> "MemoryNode":
+        """Reconstruct a MemoryNode from stored content/metadata (inverse of to_metadata)."""
         def _split(value: str) -> list[str]:
             return value.split(_LIST_SEP) if value else []
 

@@ -1,9 +1,9 @@
-"""MemAgent：System1 同步认知层编排。
-
-extract（含 L0 工具）→ collect new memories → reconcile → 应用 ops（ADD/EVOLVE/DELETE）
-→ summarize（长内容产 L3）。返回本次认知层写入的所有 node_id。
+# -*- coding: utf-8 -*-
 """
-
+@author:XuMing(xuming624@qq.com)
+@description: MemAgent orchestrating the synchronous System1 pipeline: extract -> collect
+-> reconcile -> apply ADD/SUPERSEDE/DELETE ops -> summarize, returning written node ids.
+"""
 from datetime import datetime
 
 from dual_mem.agent.basic_profile import BasicProfileTool
@@ -15,6 +15,8 @@ from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
 
 class MemAgent:
+    """Coordinates extractor, reconciler and summarizer to derive memories from one input."""
+
     def __init__(self, *, factory: ComponentFactory):
         self.factory = factory
         self.vector = factory.vector
@@ -37,6 +39,7 @@ class MemAgent:
         request_id: str,
         memory_at: int | None,
     ) -> list[str]:
+        """Run the full System1 cognition pipeline for one raw memory; return derived node ids."""
         current_time = (
             datetime.fromtimestamp(memory_at).isoformat(timespec="seconds") if memory_at else ""
         )
@@ -99,6 +102,7 @@ class MemAgent:
 
     @staticmethod
     def _collect_new_memories(extracted: dict) -> tuple[list[str], list[dict]]:
+        """Flatten extracted identity/fact items into parallel content and metadata lists."""
         texts: list[str] = []
         metas: list[dict] = []
         for item in extracted.get("identity") or []:
@@ -125,6 +129,7 @@ class MemAgent:
         session_id: str,
         memory_at: int | None,
     ) -> list[str]:
+        """Apply reconcile ops to the stores (soft-delete, add, supersede); return new node ids."""
         stored_ids: list[str] = []
         for op in ops:
             if op.op == "DELETE":
