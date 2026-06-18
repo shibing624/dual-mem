@@ -6,6 +6,7 @@ from dual_mem.config import Settings
 from dual_mem.isolation import build_filter
 from dual_mem.registry import ComponentFactory
 from dual_mem.retrieval.reader import Reader
+from dual_mem.system2.cross_domain_sweeper import CrossDomainSweeper
 from dual_mem.system2.system2_writer import System2Writer
 from dual_mem.types import MemoryStatus
 from dual_mem.writer.memory_writer import MemoryWriter
@@ -91,6 +92,7 @@ class MemoryClient:
         min_score: float = 0.4,
         profile_limit: int = -1,
         profile_min_score: float = 0.3,
+        intention_limit: int = 0,
         created_after: int | None = None,
     ) -> dict:
         request_id = str(uuid.uuid4())
@@ -105,6 +107,7 @@ class MemoryClient:
             min_score=min_score,
             profile_limit=profile_limit,
             profile_min_score=profile_min_score,
+            intention_limit=intention_limit,
             created_after=created_after,
         )
         return {
@@ -193,7 +196,13 @@ class MemoryClient:
         return {"success": True, "deleted": len(node_ids)}
 
     async def digest(self) -> dict:
-        if isinstance(self.writer, System2Writer):
-            processed = await self.writer.run_system2_pending()
-            return {"success": True, "processed": processed}
-        return {"success": True, "processed": 0}
+        if not isinstance(self.writer, System2Writer):
+            return {"success": True, "processed": 0}
+        processed = await self.writer.run_system2_pending()
+        sweeper = CrossDomainSweeper(factory=self.factory)
+        cores = 0
+        for app_id, user_id in self.writer.processed_pairs:
+            result = sweeper.run(app_id=app_id, user_id=user_id)
+            if result.get("core_id"):
+                cores += 1
+        return {"success": True, "processed": processed, "cores_created": cores}

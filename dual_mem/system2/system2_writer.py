@@ -13,6 +13,7 @@ class System2Writer:
     def __init__(self, *, factory: ComponentFactory, agent_mode: str):
         self.factory = factory
         self.inner = MemoryWriter(factory=factory, agent_mode=agent_mode)
+        self.processed_pairs: set[tuple[str, str]] = set()
 
     async def write(
         self,
@@ -39,11 +40,13 @@ class System2Writer:
 
     async def run_system2_pending(self) -> int:
         agent = System2Agent(factory=self.factory)
+        self.processed_pairs = set()
         processed = 0
         while True:
             task = self.factory.cache.dequeue_s2_task()
             if task is None:
                 break
             agent.run(app_id=task["app_id"], user_id=task["user_id"])
+            self.processed_pairs.add((task["app_id"], task["user_id"]))
             processed += 1
         return processed

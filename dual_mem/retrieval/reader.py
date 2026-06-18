@@ -86,6 +86,7 @@ class Reader:
         min_score: float = 0.4,
         profile_limit: int = -1,
         profile_min_score: float = 0.3,
+        intention_limit: int = 0,
         created_after: int | None = None,
     ) -> dict:
         embedding = self.factory.embed.embed(query)
@@ -132,8 +133,34 @@ class Reader:
             if n.score >= min_score
         ]
 
-        # proactive 路 = L7_INTENTION，存在图库中；M4 无图 → 恒空
+        # ── 图库召回（仅 ultra/enable_graph）：profile 路并入 L6_SCHEMA，
+        #    proactive 路召回 L7_INTENTION（intention_limit>0 才取）──
+        graph = self.factory.graph
         proactive_nodes: list[MemoryNode] = []
+        if graph is not None:
+            profile_nodes += [
+                self._graph_to_node(g)
+                for g in graph.query_by_embedding(
+                    layer=Layer.L6_SCHEMA.value,
+                    user_id=user_id,
+                    app_ids=app_ids,
+                    embedding=embedding,
+                    top_k=math.ceil(effective_profile_limit * _OVERFETCH),
+                )
+                if g.score >= profile_min_score
+            ]
+            if intention_limit > 0:
+                proactive_nodes = [
+                    self._graph_to_node(g)
+                    for g in graph.query_by_embedding(
+                        layer=Layer.L7_INTENTION.value,
+                        user_id=user_id,
+                        app_ids=app_ids,
+                        embedding=embedding,
+                        top_k=math.ceil(intention_limit * _OVERFETCH),
+                    )
+                    if g.score >= min_score
+                ]
 
         # profile 配额（identity/schema/自由）
         profile_nodes = self._quota_nodes(
@@ -152,8 +179,8 @@ class Reader:
         # ── 演化链展开 + 去重 ──
         deduped = expand_evolution_chains(vector=vector, hits=merged)
 
-        # ── 按层分回三组 ──
-        profile_set = {layer.value for layer in PROFILE_LAYERS}
+        # ── 按层分回三组（L6_SCHEMA 归 profile，L7_INTENTION 归 proactive）──
+        profile_set = _IDENTITY_VALS | _SCHEMA_VALS
         proactive_set = {layer.value for layer in PROACTIVE_LAYERS}
         profile_items: list[dict] = []
         proactive_items: list[dict] = []
@@ -174,7 +201,7 @@ class Reader:
         profile_items = _profile_quota_select(
             profile_items, effective_profile_limit, _IDENTITY_VALS, _SCHEMA_VALS
         )
-        proactive_items = []  # 无图，恒空
+        proactive_items = proactive_items[:intention_limit] if intention_limit > 0 else []
         normal_items = normal_items[:limit]
 
         return {
@@ -182,6 +209,21 @@ class Reader:
             "proactive": [self._item_to_dict(it) for it in proactive_items],
             "normal": [self._item_to_dict(it) for it in normal_items],
         }
+
+    @staticmethod
+    def _graph_to_node(g) -> MemoryNode:
+        node = MemoryNode(
+            content=g.content,
+            layer=Layer(g.layer),
+            app_id=g.app_id,
+            user_id=g.user_id,
+            agent_id=g.agent_id,
+            tags=g.tags,
+            node_id=g.node_id,
+            gmt_created=g.gmt_created,
+        )
+        node.score = g.score
+        return node
 
     @staticmethod
     def _quota_nodes(nodes: list[MemoryNode], total_limit: int) -> list[MemoryNode]:
