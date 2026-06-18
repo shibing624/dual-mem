@@ -1,0 +1,114 @@
+import asyncio
+import json
+
+import typer
+
+from dual_mem.client import MemoryClient
+from dual_mem.config import Settings
+from dual_mem.retrieval.formatter import format_memories
+
+app = typer.Typer(help="dual-mem 分层记忆 SDK 命令行")
+
+
+def make_client(mode: str | None = None) -> MemoryClient:
+    return MemoryClient(mode=mode)
+
+
+def _echo_json(data) -> None:
+    typer.echo(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+@app.command()
+def add(
+    content: str = typer.Option(..., "--content"),
+    app_id: str = typer.Option(..., "--app-id"),
+    user_id: str = typer.Option(..., "--user-id"),
+    agent_id: str = typer.Option("", "--agent-id"),
+    mode: str | None = typer.Option(None, "--mode"),
+):
+    """写入一条记忆。"""
+    client = make_client(mode)
+    result = asyncio.run(
+        client.add(content=content, app_id=app_id, user_id=user_id, agent_id=agent_id)
+    )
+    _echo_json(result)
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(...),
+    app_id: str = typer.Option(..., "--app-id"),
+    user_id: str = typer.Option(..., "--user-id"),
+    limit: int = typer.Option(10, "--limit"),
+    mode: str | None = typer.Option(None, "--mode"),
+):
+    """语义检索记忆并友好展示。"""
+    client = make_client(mode)
+    result = asyncio.run(
+        client.search(query=query, app_ids=[app_id], user_id=user_id, limit=limit)
+    )
+    typer.echo(format_memories(result["memories"]))
+
+
+@app.command(name="list")
+def list_memories(
+    app_id: str = typer.Option(..., "--app-id"),
+    user_id: str = typer.Option(..., "--user-id"),
+    agent_id: str = typer.Option("", "--agent-id"),
+    limit: int = typer.Option(100, "--limit"),
+):
+    """列出记忆。"""
+    client = make_client()
+    result = asyncio.run(
+        client.list(app_id=app_id, user_id=user_id, agent_id=agent_id, limit=limit)
+    )
+    _echo_json(result)
+
+
+@app.command()
+def get(memory_id: str = typer.Argument(...)):
+    """获取单条记忆。"""
+    client = make_client()
+    result = asyncio.run(client.get(memory_id))
+    _echo_json(result)
+
+
+@app.command()
+def delete(memory_id: str = typer.Argument(...)):
+    """删除单条记忆。"""
+    client = make_client()
+    result = asyncio.run(client.delete(memory_id))
+    _echo_json(result)
+
+
+@app.command()
+def digest():
+    """触发 System2 后台沉淀（ultra 模式）。"""
+    client = make_client()
+    result = asyncio.run(client.digest())
+    _echo_json(result)
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("0.0.0.0", "--host"),
+    port: int = typer.Option(8000, "--port"),
+):
+    """启动 REST API 服务。"""
+    import uvicorn
+
+    from dual_mem.api import create_app
+
+    uvicorn.run(create_app(settings=Settings()), host=host, port=port)
+
+
+@app.command()
+def mcp():
+    """启动 MCP 服务（stdio）。"""
+    from dual_mem.mcp.server import main
+
+    main()
+
+
+if __name__ == "__main__":
+    app()
