@@ -102,9 +102,12 @@ def test_roundtrip_from_storage():
         speculate="maybe",
         memory_at=123,
         gmt_modified=456,
+        custom={"basic_info_kv": {"name": "张三"}},
     )
     meta = n.to_metadata()
+    assert isinstance(meta["custom"], str)
     restored = MemoryNode.from_storage(n.content, meta, embedding=[0.1, 0.2])
+    assert restored.custom == {"basic_info_kv": {"name": "张三"}}
     assert restored.content == n.content
     assert restored.layer == n.layer
     assert restored.tags == ["a", "b"]
@@ -124,3 +127,4 @@ def test_roundtrip_none_fields():
     assert restored.gmt_modified is None
     assert restored.speculate is None
     assert restored.tags == []
+    assert restored.custom is None

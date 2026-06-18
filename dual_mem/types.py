@@ -1,3 +1,4 @@
+import json
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -80,6 +81,7 @@ class MemoryNode:
     gmt_modified: int | None = None
     embedding: list[float] | None = None
     s2_evidence_count: int = 0
+    custom: dict | None = None
     score: float = field(default=0.0, compare=False)
 
     @property
@@ -104,6 +106,7 @@ class MemoryNode:
             "gmt_created": self.gmt_created,
             "gmt_modified": self.gmt_modified if self.gmt_modified is not None else -1,
             "s2_evidence_count": self.s2_evidence_count,
+            "custom": json.dumps(self.custom or {}, ensure_ascii=False),
         }
 
     @classmethod
@@ -135,4 +138,5 @@ class MemoryNode:
             gmt_modified=gmt_modified if gmt_modified != -1 else None,
             embedding=embedding,
             s2_evidence_count=meta["s2_evidence_count"],
+            custom=json.loads(meta["custom"]) or None,
         )
