@@ -45,6 +45,36 @@ def test_extract_identity_facts_and_tool_call(store, fake_embed):
     assert l0.custom["basic_info_kv"] == {"name": "张三"}
 
 
+def test_extract_falls_back_to_chat_json_when_content_empty(store, fake_embed):
+    """真实模型走工具路径时 content 为空，应补一次 chat_json 拿 identity/facts。"""
+    llm = FakeLLMClient(
+        responses={
+            "extract": {
+                "content": "",
+                "tool_calls": [
+                    {"function": {"name": "update_basic_user_profile", "arguments": '{"name": "李四"}'}}
+                ],
+            },
+            "json": {"identity": [{"content": "用户是工程师", "tags": []}], "facts": []},
+        }
+    )
+    tool = BasicProfileTool(vector=store, embed=fake_embed)
+    extractor = Extractor(llm=llm, basic_profile_tool=tool)
+
+    out = extractor.extract(
+        content="我叫李四，是个工程师",
+        current_time="",
+        app_id="app",
+        user_id="u",
+        agent_id="ag",
+        session_id="se",
+    )
+
+    assert out["identity"] == [{"content": "用户是工程师", "tags": []}]
+    assert out["l0_node_id"] is not None
+    assert store.get(out["l0_node_id"]).custom["basic_info_kv"] == {"name": "李四"}
+
+
 def test_extract_no_tool_call(store, fake_embed):
     llm = FakeLLMClient(
         responses={"extract": {"content": '{"identity":[],"facts":[]}', "tool_calls": []}}

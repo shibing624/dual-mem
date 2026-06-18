@@ -18,7 +18,9 @@ class EmbedService:
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        resp = self.client.embeddings.create(model=self.model, input=texts)
+        resp = self.client.embeddings.create(
+            model=self.model, input=texts, dimensions=self.dim
+        )
         return [item.embedding for item in resp.data]
 
     def embed(self, text: str) -> list[float]:

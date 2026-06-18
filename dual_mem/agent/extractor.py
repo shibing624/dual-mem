@@ -1,9 +1,8 @@
-"""Extractor：单次 LLM 调用，从对话提取 identity / facts，并通过 function-calling
-工具更新 L0 basic profile。
+"""Extractor：从对话提取 identity / facts，并通过 function-calling 工具更新 L0 basic profile。
 
-与源码的差异（M3 简化）：源码用多轮 tool-loop（执行 tool 后把结果回灌 LLM 再出最终
-JSON）。我们的 LLMClient 是单轮 system+user，无 tool_call_id 回灌能力，因此采用单轮：
-一次 chat_with_tools 同时拿 content(JSON identity/facts) + tool_calls，分别处理。
+真实 OpenAI 兼容模型在决定调用工具时通常 ``message.content`` 为空（finish_reason=tool_calls），
+identity/facts 与 tool_calls 实际互斥。因此：先 ``chat_with_tools`` 处理 L0 工具调用，
+若该轮没拿到 identity/facts JSON，再补一次纯 ``chat_json`` 专门出 identity/facts。
 """
 
 import json
@@ -57,11 +56,17 @@ class Extractor:
         )
 
         parsed = _parse_content_json(result.get("content", ""))
+        tool_calls = result.get("tool_calls") or []
+
+        if not parsed:
+            reparsed = self.llm.chat_json(system=system, user=content)
+            parsed = reparsed if isinstance(reparsed, dict) else {}
+
         identity = parsed.get("identity") or []
         facts = parsed.get("facts") or []
 
         l0_node_id = None
-        for tc in result.get("tool_calls") or []:
+        for tc in tool_calls:
             fn = tc.get("function") or {}
             if fn.get("name") != TOOL_NAME:
                 continue

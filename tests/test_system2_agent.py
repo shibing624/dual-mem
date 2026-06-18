@@ -62,6 +62,42 @@ def test_system2_agent_creates_schema_with_evidence(ultra_factory):
         assert ultra_factory.vector.get(fid).s2_evidence_count == 1
 
 
+def test_tool_executor_skips_malformed_ops(tmp_storage, fake_embed):
+    """LLM 输出畸形 ops（缺字段/非法 rel/非 dict）不应让 digest 崩溃。"""
+    settings = Settings(mode="ultra", storage_dir=tmp_storage)
+    bad_ops = [
+        {"op": "create_schema"},  # 缺 content
+        {"op": "add_evidence", "evidence": ["a1"]},  # 缺 schema_id
+        {"op": "add_edge", "from_id": "a1"},  # 缺 to_id
+        "not-a-dict",  # 非 dict
+        {"op": "create_schema", "content": "当X时用户Y——反映Z。", "tags": [], "evidence": ["a1", "a2", "a3"]},
+    ]
+    llm = FakeLLMClient(responses={"json": bad_ops})
+    factory = ComponentFactory(settings=settings, embed=fake_embed, llm=llm)
+    _seed_fresh_facts(factory)
+
+    result = System2Agent(factory=factory).run(app_id="app", user_id="u")
+    assert result["created_schemas"] == 1
+    assert result["evidence_added"] == 3
+
+
+def test_system2_marks_clustered_facts_processed(ultra_factory):
+    """聚类中未被引用为 evidence 的 fact 也应标记已加工，避免重复消费。"""
+    _seed_fresh_facts(ultra_factory)
+    # ops 只引用 a1，a2/a3 未被引用但参与了聚类
+    ultra_factory.llm.responses["json"] = [
+        {"op": "create_schema", "content": "当做饭时用户精确称量——反映控制欲。", "tags": [], "evidence": ["a1"]}
+    ]
+
+    System2Agent(factory=ultra_factory).run(app_id="app", user_id="u")
+    for fid in ("a1", "a2", "a3"):
+        assert ultra_factory.vector.get(fid).s2_evidence_count >= 1
+
+    # 第二次 digest 不应再有 fresh fact → 不再造 schema
+    result2 = System2Agent(factory=ultra_factory).run(app_id="app", user_id="u")
+    assert result2["created_schemas"] == 0
+
+
 def test_system2_agent_no_clusters_no_ops(ultra_factory):
     # 只有 2 条 fact，不足以成簇 → 空 ops
     node = MemoryNode(

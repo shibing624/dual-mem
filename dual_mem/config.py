@@ -42,6 +42,12 @@ class Settings(BaseSettings):
 
     system2_trigger_mode: Literal["per_write", "manual", "scheduled"] = "per_write"
 
+    # System2 聚类的相似度阈值（cosine）。低于该相似度的事实不归为一簇。
+    # 默认值适配出厂的 text-embedding-3-small（其同主题事实 cosine 普遍偏低）；
+    # 若改用相似度更集中的中文 embedding（如 bge/Qwen），可调高到 0.55/0.75。
+    cluster_stage1_sim: float = 0.42
+    cluster_stage2_sim: float = 0.55
+
     @field_validator("app_whitelist", mode="before")
     @classmethod
     def _split_whitelist(cls, v):

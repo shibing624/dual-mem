@@ -59,7 +59,6 @@ class MemoryClient:
         agent_id: str = "",
         session_id: str = "",
         memory_at: int | None = None,
-        mode: str | None = None,
     ) -> dict:
         request_id = str(uuid.uuid4())
         start = time.perf_counter()

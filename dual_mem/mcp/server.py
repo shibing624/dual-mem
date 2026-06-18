@@ -51,6 +51,7 @@ def build_mcp(*, client: MemoryClient | None = None) -> FastMCP:
         agent_ids: list[str] | None = None,
         limit: int = 10,
         min_score: float = 0.4,
+        intention_limit: int = 0,
     ) -> dict:
         return await client.search(
             query=query,
@@ -59,6 +60,7 @@ def build_mcp(*, client: MemoryClient | None = None) -> FastMCP:
             agent_ids=agent_ids,
             limit=limit,
             min_score=min_score,
+            intention_limit=intention_limit,
         )
 
     @mcp.tool(description="按 memory_id 获取单条记忆，不存在返回 null。")

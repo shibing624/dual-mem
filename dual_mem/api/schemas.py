@@ -8,7 +8,6 @@ class AddRequest(BaseModel):
     user_id: str
     agent_id: str = ""
     session_id: str = ""
-    mode: str | None = None
     memory_at: int | None = None
 
 
@@ -29,6 +28,7 @@ class SearchRequest(BaseModel):
     min_score: float = 0.0
     profile_limit: int = -1
     profile_min_score: float = 0.3
+    intention_limit: int = 0
     created_after: int | None = None
 
 

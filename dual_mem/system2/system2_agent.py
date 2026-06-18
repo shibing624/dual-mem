@@ -94,7 +94,11 @@ def prepare_materials(
             if full is not None and full.embedding:
                 fresh.append(full)
 
-    clusters = cluster_facts(fresh)
+    clusters = cluster_facts(
+        fresh,
+        stage1_sim=factory.settings.cluster_stage1_sim,
+        stage2_sim=factory.settings.cluster_stage2_sim,
+    )
 
     graph = factory.graph
     graph_forward: list[dict] = []
@@ -180,6 +184,20 @@ class System2Agent:
         raw = self.factory.llm.chat_json(system=system, user=_build_user_message(materials))
         ops = raw if isinstance(raw, list) else []
 
-        return ToolExecutor(factory=self.factory).apply(
+        stats = ToolExecutor(factory=self.factory).apply(
             ops=ops, app_id=app_id, user_id=user_id, agent_id=agent_id
         )
+        self._mark_clustered_processed(materials["clusters"])
+        return stats
+
+    def _mark_clustered_processed(self, clusters: list[dict]) -> None:
+        """本轮参与聚类的 fact 全部标记为已加工，避免下次 digest 重复造 schema。
+
+        ToolExecutor 只对被引用为 evidence 的 fact +1，未被引用的仍为 0 会被反复消费。
+        """
+        for cluster in clusters:
+            for fact in cluster["facts"]:
+                node = self.factory.vector.get(fact["node_id"])
+                if node is not None and node.s2_evidence_count == 0:
+                    node.s2_evidence_count = 1
+                    self.factory.vector.upsert([node])

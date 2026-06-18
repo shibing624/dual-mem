@@ -14,6 +14,14 @@ from dual_mem.registry import ComponentFactory
 from dual_mem.storage.graph_store import GraphNode
 from dual_mem.types import Layer
 
+_ALLOWED_RELS = {"RELATED_TO", "CROSS_ABSTRACTS_TO"}
+
+
+def _str_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [v for v in value if isinstance(v, str) and v.strip()]
+
 
 class ToolExecutor:
     def __init__(self, *, factory: ComponentFactory):
@@ -27,25 +35,36 @@ class ToolExecutor:
         edges_added = 0
 
         for op in ops:
+            if not isinstance(op, dict):
+                continue
             kind = op.get("op")
-            if kind == "create_schema":
-                node_id = self._create_node(Layer.L6_SCHEMA, op, app_id, user_id, agent_id)
-                evidence_added += self._link_evidence(node_id, op.get("evidence") or [])
-                created_schemas += 1
-            elif kind == "create_intention":
-                node_id = self._create_node(Layer.L7_INTENTION, op, app_id, user_id, agent_id)
-                evidence_added += self._link_evidence(node_id, op.get("evidence") or [])
-                created_intentions += 1
+            if kind in ("create_schema", "create_intention"):
+                content = op.get("content")
+                if not isinstance(content, str) or not content.strip():
+                    continue
+                layer = Layer.L6_SCHEMA if kind == "create_schema" else Layer.L7_INTENTION
+                node_id = self._create_node(layer, op, app_id, user_id, agent_id)
+                evidence_added += self._link_evidence(node_id, _str_list(op.get("evidence")))
+                if kind == "create_schema":
+                    created_schemas += 1
+                else:
+                    created_intentions += 1
             elif kind == "add_evidence":
-                evidence_added += self._link_evidence(
-                    op["schema_id"], op.get("evidence") or []
-                )
+                schema_id = op.get("schema_id")
+                if not isinstance(schema_id, str) or not schema_id.strip():
+                    continue
+                evidence_added += self._link_evidence(schema_id, _str_list(op.get("evidence")))
             elif kind == "add_edge":
-                graph.add_edge(
-                    from_id=op["from_id"],
-                    to_id=op["to_id"],
-                    rel=op.get("rel", "RELATED_TO"),
-                )
+                from_id = op.get("from_id")
+                to_id = op.get("to_id")
+                if not isinstance(from_id, str) or not isinstance(to_id, str):
+                    continue
+                if not from_id.strip() or not to_id.strip():
+                    continue
+                rel = op.get("rel", "RELATED_TO")
+                if rel not in _ALLOWED_RELS:
+                    rel = "RELATED_TO"
+                graph.add_edge(from_id=from_id, to_id=to_id, rel=rel)
                 edges_added += 1
 
         return {

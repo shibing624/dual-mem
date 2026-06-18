@@ -16,21 +16,27 @@ from sklearn.metrics.pairwise import cosine_distances
 from dual_mem.types import MemoryNode
 
 _MIN_FACTS = 3
-_STAGE1_EPS = 1.0 - 0.55
-_STAGE2_EPS = 1.0 - 0.75
 _STAGE2_MIN_SAMPLES = 2
 _MAX_CLUSTER_SIZE = 12
 _DEDUP_COSINE = 0.92
 
 
-def cluster_facts(facts: list[MemoryNode]) -> list[dict]:
+def cluster_facts(
+    facts: list[MemoryNode],
+    *,
+    stage1_sim: float = 0.55,
+    stage2_sim: float = 0.75,
+) -> list[dict]:
     pool = [f for f in facts if f.embedding]
     if len(pool) < _MIN_FACTS:
         return []
 
+    stage1_eps = 1.0 - stage1_sim
+    stage2_eps = 1.0 - stage2_sim
+
     matrix = np.array([f.embedding for f in pool])
     labels = DBSCAN(
-        eps=_STAGE1_EPS, min_samples=_MIN_FACTS, metric="precomputed"
+        eps=stage1_eps, min_samples=_MIN_FACTS, metric="precomputed"
     ).fit_predict(cosine_distances(matrix))
 
     stage1: dict[int, list[int]] = {}
@@ -44,7 +50,7 @@ def cluster_facts(facts: list[MemoryNode]) -> list[dict]:
         if len(indices) <= _MAX_CLUSTER_SIZE:
             groups.append(indices)
         else:
-            groups.extend(_refine(matrix, indices))
+            groups.extend(_refine(matrix, indices, stage2_eps))
 
     clusters: list[dict] = []
     for indices in groups:
@@ -71,10 +77,10 @@ def cluster_facts(facts: list[MemoryNode]) -> list[dict]:
     return clusters
 
 
-def _refine(matrix: np.ndarray, indices: list[int]) -> list[list[int]]:
+def _refine(matrix: np.ndarray, indices: list[int], stage2_eps: float) -> list[list[int]]:
     sub = matrix[indices]
     sub_labels = DBSCAN(
-        eps=_STAGE2_EPS, min_samples=_STAGE2_MIN_SAMPLES, metric="precomputed"
+        eps=stage2_eps, min_samples=_STAGE2_MIN_SAMPLES, metric="precomputed"
     ).fit_predict(cosine_distances(sub))
 
     sub_groups: dict[int, list[int]] = {}

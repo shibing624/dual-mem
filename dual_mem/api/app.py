@@ -103,7 +103,6 @@ def create_app(
             agent_id=body.agent_id,
             session_id=body.session_id,
             memory_at=body.memory_at,
-            mode=body.mode,
         )
 
     @app.post(
@@ -127,6 +126,7 @@ def create_app(
             min_score=body.min_score,
             profile_limit=body.profile_limit,
             profile_min_score=body.profile_min_score,
+            intention_limit=body.intention_limit,
             created_after=body.created_after,
         )
 
