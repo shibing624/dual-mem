@@ -35,6 +35,7 @@ dev = [
 
 [project.scripts]
 dual-mem = "dual_mem.cli.main:app"
+dual-mem-mcp = "dual_mem.mcp.server:main"
 
 [tool.setuptools.packages.find]
 include = ["dual_mem*"]

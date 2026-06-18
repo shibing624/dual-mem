@@ -127,13 +127,22 @@ curl -X POST http://localhost:8000/v1/memories/ \
   -d '{"content": "用户喜欢喝咖啡", "app_id": "default", "user_id": "u1"}'
 ```
 
-### 3. MCP（`dual-mem mcp`）
+### 3. MCP（`dual-mem-mcp`）
 
 ```bash
-dual-mem mcp   # 通过 stdio 暴露 MCP server
+dual-mem-mcp                                            # stdio（供 Cursor/Claude Desktop 经 uvx 拉起）
+dual-mem-mcp --transport streamable-http --port 8765   # HTTP，暴露 /mcp 端点
 ```
 
 暴露工具：`memory_add / memory_search / memory_get / memory_list / memory_delete`，可直接接入支持 MCP 的 Agent 客户端。`memory_search` 返回结果按 profile/proactive/normal 三路分组，演化过的记忆带 `evolution_chain`。
+
+Cursor `mcp.json` 最小配置：
+
+```json
+{ "mcpServers": { "dual-mem": { "command": "uvx", "args": ["dual-mem-mcp"] } } }
+```
+
+更多传输模式、uvx、Cursor/Claude Desktop 配置见 [`docs/mcp_integration.md`](docs/mcp_integration.md)；整体分层见 [`docs/architecture.md`](docs/architecture.md)。
 
 ### 4. CLI
 

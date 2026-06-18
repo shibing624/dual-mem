@@ -111,11 +111,15 @@ def serve(
 
 
 @app.command()
-def mcp():
-    """启动 MCP 服务（stdio）。"""
-    from dual_mem.mcp.server import main
+def mcp(
+    transport: str = typer.Option("stdio", "--transport", help="stdio | streamable-http"),
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8765, "--port"),
+):
+    """启动 MCP 服务（stdio 或 streamable-http，后者暴露 /mcp 端点）。"""
+    from dual_mem.mcp.server import run_server
 
-    main()
+    run_server(transport=transport, host=host, port=port)
 
 
 if __name__ == "__main__":

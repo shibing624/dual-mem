@@ -2,12 +2,18 @@
 """
 @author:XuMing(xuming624@qq.com)
 @description: MCP server exposing dual-mem memory tools (add/search/get/list/delete) over
-FastMCP, backed by a MemoryClient, with a stdio entry point.
+FastMCP, backed by a MemoryClient. Supports stdio and Streamable HTTP transports and ships a
+console entry point (dual-mem-mcp) for uvx.
 """
+import argparse
+
 from mcp.server.fastmcp import FastMCP
 
 from dual_mem.client import MemoryClient
 from dual_mem.config import Settings
+
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8765
 
 _GROUP_DOC = (
     "搜索结果按三路分组返回：profile 是稳定的用户画像/身份/模式记忆；"
@@ -17,12 +23,17 @@ _GROUP_DOC = (
 )
 
 
-def build_mcp(*, client: MemoryClient | None = None) -> FastMCP:
-    """Build a FastMCP server registering the dual-mem memory tools."""
+def build_mcp(
+    *, client: MemoryClient | None = None, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT
+) -> FastMCP:
+    """Build a FastMCP server registering the dual-mem memory tools.
+
+    host/port only take effect for the Streamable HTTP transport (path defaults to /mcp).
+    """
     if client is None:
         client = MemoryClient(settings=Settings())
 
-    mcp = FastMCP("dual-mem")
+    mcp = FastMCP("dual-mem", host=host, port=port)
 
     @mcp.tool(
         description=(
@@ -92,9 +103,29 @@ def build_mcp(*, client: MemoryClient | None = None) -> FastMCP:
     return mcp
 
 
+def run_server(
+    *, transport: str = "stdio", host: str = DEFAULT_HOST, port: int = DEFAULT_PORT
+) -> None:
+    """Run the MCP server with the given transport (stdio or streamable-http)."""
+    mcp = build_mcp(host=host, port=port)
+    mcp.run(transport=transport)
+
+
 def main() -> None:
-    """Run the MCP server over stdio."""
-    build_mcp().run()
+    """Console entry point (dual-mem-mcp): parse transport flags and run the server."""
+    parser = argparse.ArgumentParser(
+        prog="dual-mem-mcp", description="dual-mem MCP server (stdio / Streamable HTTP)"
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "streamable-http"],
+        default="stdio",
+        help="传输方式：stdio（默认，供 Cursor/Claude Desktop 本地拉起）或 streamable-http（暴露 /mcp）",
+    )
+    parser.add_argument("--host", default=DEFAULT_HOST, help="streamable-http 监听地址")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="streamable-http 监听端口")
+    args = parser.parse_args()
+    run_server(transport=args.transport, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

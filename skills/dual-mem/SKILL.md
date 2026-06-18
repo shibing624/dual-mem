@@ -45,7 +45,9 @@ dual-mem search "用户做什么工作" --app-id myapp --user-id user_001 --limi
 其它：`dual-mem list --app-id myapp --user-id user_001`、
 `dual-mem get <memory_id>`、`dual-mem delete <memory_id>`、
 `dual-mem digest`（ultra 模式触发后台沉淀）。
-启动服务：`dual-mem serve --host 0.0.0.0 --port 8000`（REST）、`dual-mem mcp`（MCP stdio）。
+启动服务：`dual-mem serve --host 0.0.0.0 --port 8000`（REST）、
+`dual-mem-mcp`（MCP stdio，供 Cursor/Claude Desktop 经 uvx 拉起）、
+`dual-mem-mcp --transport streamable-http --port 8765`（MCP over HTTP，暴露 `/mcp`）。
 
 ## MCP 工具范式
 
