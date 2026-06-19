@@ -61,6 +61,15 @@ def ensure_config_file() -> Path:
     return path
 
 
+def ensure_storage_dir(storage_dir: str) -> Path:
+    """Create the on-disk data root if missing (SQLite/Chroma/Kuzu need the parent dir)."""
+    path = Path(storage_dir).expanduser()
+    if not path.is_absolute():
+        path = path.resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="DUAL_MEM_",
@@ -118,6 +127,10 @@ class Settings(BaseSettings):
     # Embedding write-side batching window for embed_queued (does not affect search-side embed).
     embed_queue_batch_size: int = 32
     embed_queue_window_ms: float = 200.0
+    # Merge L1 dialogue + Gate user-turn embeds into one API call on add(messages=...).
+    # Saves ~1 RTT + queue window; bypasses embed_queued coalescing — keep false for
+    # high-concurrency write throughput (default).
+    embed_merge_l1_gate: bool = False
 
     # Cross-domain Sweeper: behavior abstraction + cosine collision + Union-Find induction.
     cross_domain_enable: bool = False

@@ -7,45 +7,69 @@
 [![GitHub issues](https://img.shields.io/github/issues/shibing624/dual-mem.svg)](https://github.com/shibing624/dual-mem/issues)
 [![Wechat Group](https://img.shields.io/badge/wechat-group-green.svg?logo=wechat)](#社区与支持)
 
-**dual-mem** 是面向 LLM 应用与 Agent 的**双系统分层记忆 SDK**。它把零散对话沉淀为结构化、可演化、可检索的长期记忆，并通过 **SDK / REST / MCP / CLI / Skill** 五种方式对外提供能力。
+**dual-mem** 让 Agent **真正记住用户**——不是堆聊天记录，而是像人一样：**先快速记下今天说了什么，再慢慢整理成用户画像、习惯和未来打算**。分层存储、偏好会变就更新、检索时自动带出相关记忆。通过 **SDK / REST / MCP / CLI / Skill** 即插即用。
 
-| 能力 | 说明 |
-|------|------|
-| **演化链** | 偏好/事实变更时显式 `supersedes` 指针；读侧自动展开历史（最新→最旧） |
-| **System1 写路径** | Gate（LLM）→ Extract → fast-write L2/L4 → 异步 Reconcile 合并演化链 |
-| **System2 沉淀** | dual 模式：DBSCAN 聚类 + 8 工具 ReAct → L6 Schema / L7 Intention |
-| **三路召回** | profile / proactive / normal；默认 `hybrid` 读路径（无 LLM，有 embedding） |
-| **多入口** | 五种 frontend 共享同一 `MemoryClient` 内核，extras 按需安装 |
+## 记忆架构（L0–L7）
+
+dual-mem 的核心是一套 **八层记忆模型**——借鉴人脑「先感知、再编码、再巩固、再抽象」的分层过程，从原始对话一路沉淀到画像、习惯与打算，并带 **演化链**（偏好变了留历史，不粗暴覆盖）：
+
+| 层 | 存什么 | 举例 |
+|---|---|---|
+| **L0 基础画像** | 结构化档案 | 姓名、年龄、城市 |
+| **L1 原始对话** | 完整交互记录 | 多轮 chat 原文（提炼后归档） |
+| **L2 事实** | 可核对的具体信息 | 「下周去北京出差」 |
+| **L3 摘要** | 长文压缩 | 一篇长笔记的要点 |
+| **L4 身份与偏好** | 稳定的「你是谁、喜欢什么」 | 「主力语言是 Python」 |
+| **L5 知识** | 领域知识片段 | 用户教给你的专有概念 |
+| **L6 行为模式** | 跨多条事实归纳的习惯 | 「做事前爱列清单、爱分类整理」 |
+| **L7 意图** | 未来计划与目标 | 「准备跑马拉松」 |
+
+偏好变了（Java → Python）不会覆盖旧记录，而是 **演化链** 保留历史，读的时候给你 **最新版 + 变更轨迹**。
+
+## 双系统：短期记忆 × 深度记忆
+
+| | **System1 · 短期记忆** | **System2 · 深度记忆** |
+|---|---|---|
+| **像什么** | 当场听懂并记下来 | 睡后整理、越聊越懂你 |
+| **什么时候** | 每次 `add` 立刻完成 | `dual` 模式后台异步（也可定时批量） |
+| **产出** | L0–L4：事实、偏好、画像 | L6 行为模式、L7 意图、知识关联 |
+| **怎么用** | `mode="system1"`（默认） | `mode="dual"` |
+
+```
+对话 add ──▶ System1 短期记忆（秒级可用）
+                │
+                └──▶ System2 深度记忆（dual：后台巩固，越用越准）
+```
+
+检索侧按 **画像 / 主动推荐 / 常规记忆** 三路分组，语义 + 关键词混合召回，**读记忆不额外调 LLM**（只需 embedding）。
+
+## 为什么选 dual-mem
+
+| | |
+|---|---|
+| **开箱即用** | `SyncMemoryClient` 三行写入 + 搜索；配置首次启动自动生成 |
+| **Agent 友好** | 多轮 `messages` 一次写入；与 Agentica 等框架对接见 [Quickstart](docs/getting-started/quickstart.md) |
+| **会进化** | 偏好更新走演化链，不是粗暴覆盖 |
+| **五种接入** | 同一套 `MemoryClient`，按需装 REST / MCP / CLI |
 
 ## 🔥 News
 
+- [2026/06/20] **v0.1.2**：MemoryOperations 统一 REST/MCP；SyncMemoryClient；CLI `messages`；post-extract embed 合并；MCP 启动修复与文档。
 - [2026/06/19] **v0.1.1**：Attentional Gate 改为 **LLM 主路径**（失败降级启发式）；依赖拆分为 `[api]` / `[cli]` / `[mcp]` extras；默认 `hybrid` 读路径。
 - [2026/06/18] **v0.1.0**：首版开源 — system1 / dual 两档、演化链、REST `/v1/memories/` 契约、MCP 工具集。
 
-## 架构
-
-dual-mem 采用「**核心 SDK + 并列接入层**」设计：`MemoryClient` 承载全部业务逻辑，CLI / REST / MCP / Skill 只做协议转换。
+## 架构一览
 
 ```
-        Agent / Cursor / 你的应用
-              │
-    ┌─────────┼─────────┬─────────┐
-    │  Skill  │   MCP   │  REST   │  CLI     ← 接入层（extras 可选）
-    └─────────┼─────────┴─────────┘
-              ▼
-       dual_mem.MemoryClient          ← 核心 SDK
-              │
-    Chroma (向量) + Kuzu (图) + SQLite (缓存/队列)
+  你的 Agent / 应用
+        │  SDK · REST · MCP · CLI · Skill
+        ▼
+   MemoryClient（写入 System1 / 检索 / 演化链）
+        │
+   向量 + 图 + 本地存储
 ```
 
-写侧与读侧概要：
-
-```
-写: Gate(1×LLM) → Extract(1×LLM) → fast-write L2/L4 → [async Reconcile / System2]
-读: QueryUnderstanding → AnchorSearch(5路) → GraphExpander → FusionScorer → 三路分组
-```
-
-详细分层、八层记忆模型与模式对照见 [架构文档](docs/architecture.md) 与在线文档 [Architecture](https://shibing624.github.io/dual-mem/architecture/)。
+实现细节（Gate、Reconcile、混合检索管线等）见 [架构文档](docs/architecture.md) · [在线文档](https://shibing624.github.io/dual-mem/architecture/)。
 
 ## 安装
 
@@ -73,6 +97,28 @@ pip install -e ".[dev]"
 
 ## 快速开始
 
+脚本 / 同步应用（推荐入门）：
+
+```python
+from dual_mem import SyncMemoryClient
+
+with SyncMemoryClient(mode="system1", storage_dir="./.dual_mem_data") as client:
+    client.add(
+        content="我最爱的编程语言是 Java，已经用了5年。",
+        app_id="my_app",
+        user_id="alice",
+    )
+    res = client.search(
+        query="用户的编程语言偏好",
+        app_ids=["my_app"],
+        user_id="alice",
+    )
+    for m in res.memories.profile:
+        print(m.content)
+```
+
+FastAPI / asyncio Agent 用异步客户端（同一内核，可 `await`）：
+
 ```python
 import asyncio
 from dual_mem import MemoryClient
@@ -80,56 +126,35 @@ from dual_mem import MemoryClient
 
 async def main():
     client = MemoryClient(mode="system1", storage_dir="./.dual_mem_data")
-
-    await client.add(
-        content="我最爱的编程语言是 Java，已经用了5年。",
-        app_id="my_app",
-        user_id="alice",
-    )
-
-    res = await client.search(
-        query="用户的编程语言偏好",
-        app_ids=["my_app"],
-        user_id="alice",
-    )
-    for m in res.memories.profile:
-        print(m.content)
-
+    await client.add(content="...", app_id="my_app", user_id="alice")
     await client.aclose()
 
 
 asyncio.run(main())
 ```
 
-配置位于 `~/.dual_mem/config.yaml`（**首次启动自动创建**，参考 `config.example.yaml`）。**LLM 与 Embedding 两套 API key 均必填**。
+配置位于 `~/.dual_mem/config.yaml`（**首次启动自动创建**）。**LLM 与 Embedding 两套 API key 均必填**。
 
-```yaml
-mode: system1
-llm_api_key: sk-...
-embed_api_key: sk-...
-embed_model: text-embedding-3-small
-embed_dim: 1536
-```
+→ 参数详解、多轮对话、`aclose()`、Agent 集成最佳实践见 **[Quickstart 文档](docs/getting-started/quickstart.md)**（在线：[Quickstart](https://shibing624.github.io/dual-mem/getting-started/quickstart/)）。
 
 ## 功能特性
 
-- **Async-First** — `MemoryClient` 全异步；CLI/REST 内部 `asyncio.run` 包装
-- **Attentional Gate** — LLM 三维度打分（novelty / relevance / arousal），失败降级启发式
-- **Fast-write + 异步 Reconcile** — 写路径低延迟；`reconcile_sync=true` 可切强一致
-- **演化链** — 层内 `supersedes` 指针，软删保留历史；读侧 `evolution_chain` 展开
-- **Hybrid 读路径（默认）** — 5 路 anchor 并行 + 图 1-hop + FusionScorer；中文时间词解析
-- **System2 ReAct（dual）** — 8 工具 function-calling 循环，产出 L6/L7 与图边
-- **OpenAI 兼容** — LLM / Embed 任意兼容端点（OpenAI、DashScope、智谱、本地 vLLM 等）
-- **多租户隔离** — `app_id` + `user_id` + 可选 `agent_id` / `session_id`
+- **八层记忆 + 演化链** — 从 raw 对话到行为模式、意图，偏好变更可追溯
+- **System1 短期记忆** — 写入即结构化；过滤寒暄，只记有价值的信息
+- **System2 深度记忆**（dual）— 后台归纳 L6/L7，越聊越懂用户
+- **混合检索** — 语义 + 关键词；画像 / 主动 / 常规三路召回
+- **同步 & 异步 SDK** — `SyncMemoryClient` 给脚本；`MemoryClient` 给 FastAPI / Agent
+- **OpenAI 兼容** — 任意 LLM / Embedding 端点
+- **多租户** — `app_id` + `user_id` 隔离
 
 ## 两档模式
 
-| 维度 | system1（默认） | dual |
+| | **system1**（默认） | **dual** |
 |---|---|---|
-| 每次 `add` LLM（fast-write） | ~2（Gate + Extract；长文本 +1 summarize） | 同 system1 + 异步 1~N |
-| 写入层 | L0 / L1(SHADOW) / L2 / L3 / L4 | + L5 / L6 / L7 |
-| 图库（Kuzu） | 关 | 开 |
-| System2 | 否 | ReconcileWorker + ReAct Agent + Sweeper |
+| 短期记忆 | ✓ | ✓ |
+| 深度记忆 | — | ✓（后台自动或定时巩固） |
+| 适合 | 个人助手、客服、快速接入 | 需要行为画像、意图推断的深度场景 |
+| 图关联 | 关 | 开（记忆之间可关联） |
 
 ## REST / MCP / CLI
 
@@ -144,7 +169,7 @@ dual-mem search "饮品偏好" --app-id default --user-id u1
 dual-mem digest   # dual：触发 System2
 ```
 
-REST 契约：`POST /v1/memories/`、`POST /v1/memories/search`、`GET|DELETE /v1/memories/{id}` 等。详见 [MCP 接入](docs/mcp_integration.md)。
+REST 契约：`POST /v1/memories/`、`POST /v1/memories/search`、`GET|DELETE /v1/memories/{id}` 等。MCP 分 **本地 uvx**（已实现）与 **云端 HTTP**（REST 底座已就绪，HTTP MCP 待封装）两条路径，详见 [MCP 接入](docs/mcp_integration.md)。
 
 ## 示例
 
@@ -152,8 +177,8 @@ REST 契约：`POST /v1/memories/`、`POST /v1/memories/search`、`GET|DELETE /v
 
 | 类别 | 内容 |
 |------|------|
-| **SDK 基础** | system1 写入、演化链、多轮 `messages` 输入 |
-| **System2** | dual 模式 `digest`、ReAct 蒸馏、跨域 Schema |
+| **SDK 基础** | 短期记忆写入、演化链、多轮 `messages` |
+| **深度记忆** | dual 模式、定时巩固（scheduled） |
 | **REST** | FastAPI TestClient 走 `/v1/memories/` 全契约 |
 | **CLI** | `dual-mem` 子命令 add / search / list / delete |
 
@@ -206,4 +231,4 @@ mkdocs serve
 - [kuzudb/kuzu](https://github.com/kuzudb/kuzu) — 图存储
 - [tiangolo/fastapi](https://github.com/tiangolo/fastapi) — REST 层
 - [modelcontextprotocol/python-sdk](https://github.com/modelcontextprotocol/python-sdk) — MCP 集成
-- [mem0ai/mem0](https://github.com/mem0ai/mem0) — 分层记忆 SDK 生态的先行探索
+- [mem0ai/mem0](https://github.com/mem0ai/mem0) — 记忆 SDK 生态

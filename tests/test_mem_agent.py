@@ -60,6 +60,33 @@ async def test_run_produces_l2_l4(tmp_storage, fake_embed):
         assert node.is_latest is True
 
 
+async def test_fast_write_batches_l0_with_l2_l4(tmp_storage, fake_embed):
+    response = {
+        **EXTRACT_RESPONSE,
+        "basic_info": {"name": "张三"},
+    }
+    factory = _factory(tmp_storage, fake_embed, {"extract": response, "search_query": []})
+    agent = MemAgent(factory=factory)
+    raw = _raw(fake_embed, "我叫张三，喜欢咖啡")
+    factory.vector.upsert([raw])
+
+    stored_ids, _, _ = await agent.run(
+        raw_node=raw,
+        content="我叫张三，喜欢咖啡",
+        embedding=raw.embedding,
+        app_id="app",
+        user_id="u",
+        agent_id="ag",
+        session_id="se",
+        request_id="req-l0",
+        memory_at=None,
+    )
+
+    assert len(stored_ids) == 3
+    layers = {factory.vector.get(nid).layer for nid in stored_ids}
+    assert layers == {Layer.L4_IDENTITY, Layer.L2_FACT, Layer.L0_BASIC_INFO}
+
+
 async def test_run_long_content_adds_l3(tmp_storage, fake_embed):
     long_text = "用户" + "聊了很多关于旅行和美食的事情。" * 60
     assert len(long_text) >= 500

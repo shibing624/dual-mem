@@ -62,7 +62,19 @@ class MemoryWriter:
             status=MemoryStatus.ACTIVE,
             memory_at=memory_at,
         )
-        embedding = await self.factory.embed.embed_queued(content)
+
+        gate_turn_embeddings: list[list[float]] | None = None
+        settings = self.factory.settings
+        if user_queries and settings.embed_merge_l1_gate:
+            # One embed RTT for L1 + Gate user turns; bypasses embed_queued coalescing — enable
+            # only when single-write latency matters more than concurrent write throughput.
+            batch_texts = [content, *user_queries]
+            vectors = await self.factory.embed.embed_batch(batch_texts)
+            embedding = vectors[0]
+            gate_turn_embeddings = vectors[1:]
+        else:
+            embedding = await self.factory.embed.embed_queued(content)
+
         node.embedding = embedding
         self.factory.vector.upsert([node])
         self.factory.history.append(
@@ -90,6 +102,7 @@ class MemoryWriter:
             memory_at=memory_at,
             user_queries=user_queries,
             agent_context=agent_context,
+            gate_turn_embeddings=gate_turn_embeddings,
         )
 
         if extra_node_ids:

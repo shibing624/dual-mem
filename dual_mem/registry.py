@@ -6,7 +6,7 @@ providers and stores (embed/vector/cache/history/graph/llm) from Settings. dual-
 both LLM and embedding API keys; the factory always materializes an LLM client and never
 operates in an embedding-only / no-LLM state.
 """
-from dual_mem.config import Settings
+from dual_mem.config import Settings, ensure_storage_dir
 from dual_mem.providers.embedding import EmbedService
 from dual_mem.providers.llm import LLMClient
 from dual_mem.storage.cache_store import CacheStore
@@ -28,6 +28,7 @@ class ComponentFactory:
         llm=_UNSET,
     ):
         self.settings = settings
+        ensure_storage_dir(settings.storage_dir)
         self._embed: EmbedService | None = embed
         self._vector: ChromaVectorStore | None = None
         self._cache: CacheStore | None = None

@@ -1,5 +1,5 @@
 # dual-mem 默认配置（首次启动 MemoryClient 时自动写入 ~/.dual_mem/config.yaml）
-# 按需修改 llm_api_key / embed_api_key；也可用 DUAL_MEM_* 环境变量临时覆盖。
+# 按需修改 llm_api_key / embed_api_key / base_url。
 
 mode: system1
 storage_dir: ./.dual_mem_data
@@ -34,6 +34,8 @@ reader_mode: hybrid
 
 embed_queue_batch_size: 32
 embed_queue_window_ms: 200.0
+# messages 写入：true = L1+Gate user 轮一次 embed_batch（低延迟，绕过攒批）；false = 默认，高并发友好
+embed_merge_l1_gate: false
 
 cross_domain_enable: false
 cross_domain_min_basics: 5

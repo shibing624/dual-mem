@@ -14,7 +14,7 @@ def app_client(tmp_storage, fake_embed, fake_llm):
     return TestClient(app)
 
 
-def test_add_search_get_list_delete_flow(app_client):
+def test_add_search_get_list_update_delete_flow(app_client):
     added = app_client.post(
         "/v1/memories/",
         json={"content": "用户喜欢喝咖啡", "app_id": "app", "user_id": "u"},
@@ -37,6 +37,13 @@ def test_add_search_get_list_delete_flow(app_client):
     assert got.status_code == 200
     assert got.json()["content"] == "用户喜欢喝咖啡"
 
+    updated = app_client.put(
+        f"/v1/memories/{memory_id}",
+        json={"content": "用户喜欢喝茶"},
+    )
+    assert updated.status_code == 200
+    assert app_client.get(f"/v1/memories/{memory_id}").json()["content"] == "用户喜欢喝茶"
+
     listed = app_client.get("/v1/memories/", params={"app_id": "app", "user_id": "u"})
     assert listed.status_code == 200
     assert any(m["memory_id"] == memory_id for m in listed.json())
@@ -44,6 +51,32 @@ def test_add_search_get_list_delete_flow(app_client):
     deleted = app_client.delete(f"/v1/memories/{memory_id}")
     assert deleted.status_code == 200
     assert deleted.json()["success"] is True
+
+
+def test_list_scopes_and_capabilities(app_client):
+    app_client.post(
+        "/v1/memories/", json={"content": "scope", "app_id": "app", "user_id": "u2"}
+    )
+    scopes = app_client.get("/v1/scopes/", params={"app_id": "app"})
+    assert scopes.status_code == 200
+    assert any(s["user_id"] == "u2" for s in scopes.json())
+
+    caps = app_client.get("/v1/capabilities")
+    assert caps.status_code == 200
+    names = {t["name"] for t in caps.json()["tools"]}
+    assert "memory_add" in names
+    assert "memory_digest" in names
+
+
+def test_digest_endpoint(app_client):
+    resp = app_client.post("/v1/digest/")
+    assert resp.status_code == 200
+    assert resp.json()["success"] is True
+
+
+def test_update_missing_404(app_client):
+    resp = app_client.put("/v1/memories/no-such-id", json={"content": "x"})
+    assert resp.status_code == 404
 
 
 def test_add_requires_content_or_messages(app_client):

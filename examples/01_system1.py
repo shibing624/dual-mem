@@ -30,7 +30,8 @@ async def main() -> None:
             res = await client.add(content=text, app_id=app, user_id=user)
             print(
                 f"  + {text}\n    -> id={res.memory_id[:8]}  "
-                f"gate={res.gate_passed}/{res.gate_score}  ({res.processing_time_ms}ms)"
+                f"gate={res.gate_passed}/{res.gate_score}  "
+                f"({res.processing_time_ms / 1000:.2f}s)"
             )
 
         section("第 2 轮：多轮 messages 写入（偏好变化 + 搬家，触发演化链）")
@@ -43,7 +44,8 @@ async def main() -> None:
         res = await client.add(messages=dialogue, app_id=app, user_id=user)
         print(
             f"  -> id={res.memory_id[:8]}  extracted={res.extracted_count}  "
-            f"gate={res.gate_passed}/{res.gate_score}  ({res.processing_time_ms}ms)"
+            f"gate={res.gate_passed}/{res.gate_score}  "
+            f"({res.processing_time_ms / 1000:.2f}s)"
         )
 
         section("检索：现在的编程语言（期望 Python，并带 Java→Python 演化链）")

@@ -5,6 +5,7 @@
 evolution chain, storing only the KV diff and superseding the old head.
 """
 import logging
+from dataclasses import dataclass
 
 from dual_mem.isolation import build_filter
 from dual_mem.providers.embedding import EmbedService
@@ -51,6 +52,14 @@ def _sanitize_arguments(arguments: dict) -> dict:
     return result
 
 
+@dataclass
+class PreparedL0:
+    """L0 node ready to persist once an embedding vector is available."""
+
+    node: MemoryNode
+    head: MemoryNode | None
+
+
 class BasicProfileTool:
     """Maintains the L0 basic-info evolution chain from extracted profile attributes."""
 
@@ -58,7 +67,7 @@ class BasicProfileTool:
         self.vector = vector
         self.embed = embed
 
-    async def apply(
+    def prepare(
         self,
         *,
         arguments: dict,
@@ -66,8 +75,8 @@ class BasicProfileTool:
         user_id: str,
         agent_id: str,
         session_id: str,
-    ) -> str | None:
-        """Apply a profile update: write the diff as a new L0 head, supersede the old head."""
+    ) -> PreparedL0 | None:
+        """Build an L0 head candidate without embedding or upsert (for post-extract batching)."""
         new_kv = _sanitize_arguments(arguments)
         if not new_kv:
             return None
@@ -98,7 +107,6 @@ class BasicProfileTool:
             return None
 
         head = next((n for n in l0_nodes if n.is_latest), None)
-
         content = render_content(diff_kv)
         new_node = MemoryNode(
             content=content,
@@ -113,10 +121,16 @@ class BasicProfileTool:
             supersedes=[head.node_id] if head else [],
             custom={"basic_info_kv": diff_kv},
         )
-        new_node.embedding = await self.embed.embed(content)
+        return PreparedL0(node=new_node, head=head)
+
+    def commit(self, prepared: PreparedL0, embedding: list[float]) -> str:
+        """Persist a prepared L0 node with a precomputed embedding."""
+        new_node = prepared.node
+        new_node.embedding = embedding
         self.vector.upsert([new_node])
 
-        if head:
+        head = prepared.head
+        if head is not None:
             old = self.vector.get(head.node_id)
             if old is not None:
                 old.is_latest = False
@@ -126,7 +140,31 @@ class BasicProfileTool:
                 self.vector.upsert([old])
 
         logger.debug(
-            "basic_profile applied user=%s diff_keys=%s superseded=%s",
-            user_id, list(diff_kv.keys()), bool(head),
+            "basic_profile committed user=%s diff_keys=%s superseded=%s",
+            new_node.user_id,
+            list((new_node.custom or {}).get("basic_info_kv", {}).keys()),
+            head is not None,
         )
         return new_node.node_id
+
+    async def apply(
+        self,
+        *,
+        arguments: dict,
+        app_id: str,
+        user_id: str,
+        agent_id: str,
+        session_id: str,
+    ) -> str | None:
+        """Apply a profile update: write the diff as a new L0 head, supersede the old head."""
+        prepared = self.prepare(
+            arguments=arguments,
+            app_id=app_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+        )
+        if prepared is None:
+            return None
+        embedding = await self.embed.embed(prepared.node.content)
+        return self.commit(prepared, embedding)

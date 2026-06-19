@@ -11,7 +11,7 @@ CLI / REST / MCP / Skill 都是围绕它的并列接入方式（frontends），�
         ┌─────────────┬───┴────────┬──────────────┐
         │             │            │              │
      Skill          MCP          REST            CLI          ← 生态接入层（并列）
-   (使用说明)   (stdio/HTTP)   (FastAPI)    (dual-mem 命令)
+   (使用说明)  (本地/云端*)    (FastAPI)    (dual-mem 命令)
         └─────────────┴───┬────────┴──────────────┘
                           │  都调用同一套 Python API
                 ┌─────────▼─────────┐
@@ -31,7 +31,7 @@ Agent / Cursor  ──MCP──▶  MCP Server（受 Skill 指导）  ──▶ 
 ```
 
 - **Skill** 不是代码层，而是给 agent 的「何时调用、如何解读结果」说明书，引导 agent 正确使用 MCP/CLI。
-- **MCP** 是面向 agent 的标准协议接入，把 SDK 能力暴露为工具。
+- **MCP** 是面向 agent 的标准协议接入，把 SDK 能力暴露为工具。*本地 uvx MCP 已实现；云端 HTTP MCP 规划走 REST 同一契约，见 [`mcp_integration.md`](./mcp_integration.md)。
 - **SDK** 是全部业务逻辑所在；REST/CLI/MCP 都只是薄封装。
 
 ## 各层职责
@@ -41,7 +41,7 @@ Agent / Cursor  ──MCP──▶  MCP Server（受 Skill 指导）  ──▶ 
 | 核心 SDK | `dual_mem.client.MemoryClient` | 写入/检索/演化/System2 全部逻辑，全 async | 仅依赖存储与 provider |
 | CLI（SDK 前端） | `dual_mem.cli`（`dual-mem`） | SDK 的命令行外壳，`asyncio.run` 包装 | → SDK |
 | REST | `dual_mem.api`（FastAPI） | HTTP 接口，鉴权 + 统一错误，契约见 `docs/architecture.md` | → SDK |
-| MCP（生态） | `dual_mem.mcp`（`dual-mem-mcp`） | 面向 agent 的工具协议，支持 stdio / streamable-http | → SDK |
+| MCP（生态） | `dual_mem.mcp`（`dual-mem-mcp`） | 面向 agent 的工具协议；**本地** stdio / streamable-http 已实现；**云端** HTTP MCP 规划走 REST 同一契约 | → SDK（云端经 REST → SDK） |
 | Skill（生态） | `skills/dual-mem/SKILL.md` | 指导 agent 何时/如何调用 MCP/CLI | → MCP/CLI |
 | 存储 | `dual_mem.storage` | Chroma 向量 / Kuzu 图 / SQLite 缓存与历史 | — |
 

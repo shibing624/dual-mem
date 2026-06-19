@@ -38,7 +38,7 @@ class MemAgent:
         llm = factory.llm
         assert llm is not None, "MemAgent requires factory.llm (system1/dual mode)"
         self.basic_profile_tool = BasicProfileTool(vector=self.vector, embed=self.embed)
-        self.extractor = Extractor(llm=llm, basic_profile_tool=self.basic_profile_tool)
+        self.extractor = Extractor(llm=llm)
         self.summarizer = Summarizer(llm=llm)
         self.reconciler = Reconciler(
             llm=llm,
@@ -65,6 +65,7 @@ class MemAgent:
         memory_at: int | None,
         user_queries: list[str] | None = None,
         agent_context: str | None = None,
+        gate_turn_embeddings: list[list[float]] | None = None,
     ) -> tuple[list[str], GateResult, bool]:
         """Run the System1 pipeline for one raw memory.
 
@@ -88,6 +89,7 @@ class MemAgent:
             agent_id=agent_id,
             user_queries=user_queries,
             agent_context=agent_context,
+            gate_turn_embeddings=gate_turn_embeddings,
         )
         try:
             self.cache.log_pipeline(
@@ -144,22 +146,21 @@ class MemAgent:
 
         emotion = extracted.get("emotion") or {}
         new_memories, new_meta = self._collect_new_memories(extracted)
+        basic_info_present = isinstance(extracted.get("basic_info"), dict) and bool(
+            extracted["basic_info"]
+        )
 
         stored_ids: list[str] = []
 
-        # ---- Step 3: Persist L2/L4 nodes ---------------------------------------------
-        if new_memories:
+        # ---- Step 3: Persist L0/L2/L4 nodes ---------------------------------------------
+        # reconcile_sync writes L0/L2/L4 first then reconciles inline (strong consistency);
+        # the default path fast-writes and hands only the L2/L4 nodes to the async reconcile
+        # worker (L0 evolves via its own supersede chain and never enters that queue).
+        if new_memories or basic_info_present:
             if self.settings.reconcile_sync:
-                ops = await self.reconciler.reconcile(
-                    new_memories=new_memories,
-                    new_memories_meta=new_meta,
-                    app_id=app_id,
-                    user_id=user_id,
-                    agent_id=agent_id,
-                    current_time=current_time,
-                )
-                stored_ids = await self._apply_ops(
-                    ops,
+                l0_ids, _ = await self._fast_write(
+                    extracted,
+                    [],
                     app_id=app_id,
                     user_id=user_id,
                     agent_id=agent_id,
@@ -167,8 +168,30 @@ class MemAgent:
                     memory_at=memory_at,
                     emotion=emotion,
                 )
+                if new_memories:
+                    ops = await self.reconciler.reconcile(
+                        new_memories=new_memories,
+                        new_memories_meta=new_meta,
+                        app_id=app_id,
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        current_time=current_time,
+                    )
+                    l2l4_ids = await self._apply_ops(
+                        ops,
+                        app_id=app_id,
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        session_id=session_id,
+                        memory_at=memory_at,
+                        emotion=emotion,
+                    )
+                else:
+                    l2l4_ids = []
+                stored_ids = l0_ids + l2l4_ids
             else:
-                stored_ids = await self._fast_write(
+                l0_ids, l2l4_ids = await self._fast_write(
+                    extracted,
                     new_meta,
                     app_id=app_id,
                     user_id=user_id,
@@ -177,10 +200,15 @@ class MemAgent:
                     memory_at=memory_at,
                     emotion=emotion,
                 )
-                # Hand the freshly written nodes off to the System2 reconcile worker.
-                self.cache.enqueue_reconcile_task(
-                    app_id=app_id, user_id=user_id, agent_id=agent_id, node_ids=stored_ids
-                )
+                stored_ids = l0_ids + l2l4_ids
+                if l2l4_ids:
+                    self.cache.enqueue_reconcile_task(
+                        app_id=app_id,
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        node_ids=l2l4_ids,
+                    )
+        if stored_ids:
             try:
                 self.cache.log_pipeline(
                     request_id=request_id,
@@ -243,6 +271,7 @@ class MemAgent:
         agent_id: str,
         user_queries: list[str] | None = None,
         agent_context: str | None = None,
+        gate_turn_embeddings: list[list[float]] | None = None,
     ) -> GateResult:
         """Evaluate the attentional gate using existing L2 hits as similarity context.
 
@@ -273,13 +302,13 @@ class MemAgent:
         )
 
         if user_queries:
-            # Multi-turn: embed each user turn, look it up separately, hand list[list[dict]]
-            # to the gate so novelty = max-across-turns. Assistant content does NOT appear here
-            # — it's conversation context, not new user information.
-            try:
-                turn_embs = await self.embed.embed_batch(user_queries)
-            except Exception:
-                turn_embs = [embedding]
+            if gate_turn_embeddings is not None:
+                turn_embs = gate_turn_embeddings
+            else:
+                try:
+                    turn_embs = await self.embed.embed_batch(user_queries)
+                except Exception:
+                    turn_embs = [embedding]
             per_turn_sims: list[list[dict]] = []
             for emb in turn_embs:
                 try:
@@ -342,6 +371,7 @@ class MemAgent:
 
     async def _fast_write(
         self,
+        extracted: dict,
         metas: list[dict],
         *,
         app_id: str,
@@ -350,52 +380,94 @@ class MemAgent:
         session_id: str,
         memory_at: int | None,
         emotion: dict,
-    ) -> list[str]:
-        """Persist extracted L2/L4 nodes directly without reconciliation (async path)."""
-        stored_ids: list[str] = []
-        nodes: list[MemoryNode] = []
+    ) -> tuple[list[str], list[str]]:
+        """Persist L0 (if any) + extracted L2/L4 in one embed_batch call.
+
+        Returns ``(l0_ids, l2l4_ids)`` so the caller can enqueue only the L2/L4 nodes for
+        reconcile without re-querying the store (L0 evolves via its own supersede chain and
+        must never enter the reconcile queue).
+        """
+        l0_ids: list[str] = []
+        l2l4_ids: list[str] = []
+        prepared_l0 = None
+        basic_info = extracted.get("basic_info")
+        if isinstance(basic_info, dict) and basic_info:
+            prepared_l0 = self.basic_profile_tool.prepare(
+                arguments=basic_info,
+                app_id=app_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                session_id=session_id,
+            )
+
+        l2l4_nodes: list[MemoryNode] = []
         for meta in metas:
             layer_str = meta.get("layer") or "L2_FACT"
             try:
                 layer = Layer(layer_str.upper())
             except ValueError:
                 layer = Layer.L2_FACT
-            node = MemoryNode(
-                content=meta.get("content", ""),
-                layer=layer,
-                app_id=app_id,
-                user_id=user_id,
-                agent_id=agent_id,
-                session_id=session_id,
-                tags=list(meta.get("tags") or []),
-                status=MemoryStatus.ACTIVE,
-                is_latest=True,
-                speculate=meta.get("speculate"),
-                memory_at=memory_at,
-                custom=_emotion_custom(emotion) or None,
-            )
-            nodes.append(node)
-
-        # Embed all node contents in a single batch call instead of N sequential
-        # embed_queued awaits (each of which would otherwise block for the full
-        # batch window on the serialized write path).
-        if nodes:
-            embeddings = await self.embed.embed_batch([n.content for n in nodes])
-            for node, embedding in zip(nodes, embeddings):
-                node.embedding = embedding
-                self.vector.upsert([node])
-                stored_ids.append(node.node_id)
-                self.history.append(
-                    event="ADD",
-                    node_id=node.node_id,
+            l2l4_nodes.append(
+                MemoryNode(
+                    content=meta.get("content", ""),
+                    layer=layer,
+                    app_id=app_id,
                     user_id=user_id,
-                    old=None,
-                    new=node.to_metadata(),
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    tags=list(meta.get("tags") or []),
+                    status=MemoryStatus.ACTIVE,
+                    is_latest=True,
+                    speculate=meta.get("speculate"),
+                    memory_at=memory_at,
+                    custom=_emotion_custom(emotion) or None,
                 )
+            )
+
+        texts: list[str] = []
+        if prepared_l0 is not None:
+            texts.append(prepared_l0.node.content)
+        texts.extend(n.content for n in l2l4_nodes)
+
+        if not texts:
+            return l0_ids, l2l4_ids
+
+        embeddings = await self.embed.embed_batch(texts)
+        idx = 0
+        if prepared_l0 is not None:
+            l0_id = self.basic_profile_tool.commit(prepared_l0, embeddings[idx])
+            l0_ids.append(l0_id)
+            self.history.append(
+                event="ADD",
+                node_id=l0_id,
+                user_id=user_id,
+                old=None,
+                new=prepared_l0.node.to_metadata(),
+            )
+            idx += 1
+
+        for node in l2l4_nodes:
+            node.embedding = embeddings[idx]
+            idx += 1
+            self.vector.upsert([node])
+            l2l4_ids.append(node.node_id)
+            self.history.append(
+                event="ADD",
+                node_id=node.node_id,
+                user_id=user_id,
+                old=None,
+                new=node.to_metadata(),
+            )
+
         logger.info(
-            "fast_write app=%s user=%s n_nodes=%d", app_id, user_id, len(stored_ids)
+            "fast_write app=%s user=%s n_nodes=%d (l0=%d l2l4=%d)",
+            app_id,
+            user_id,
+            len(l0_ids) + len(l2l4_ids),
+            len(l0_ids),
+            len(l2l4_ids),
         )
-        return stored_ids
+        return l0_ids, l2l4_ids
 
     async def _apply_ops(
         self,

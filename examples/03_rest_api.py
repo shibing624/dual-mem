@@ -74,6 +74,19 @@ def main() -> None:
         section(f"GET /v1/memories/{{id}}  单条")
         print(" ", http.get(f"/v1/memories/{first_id}").json()["content"])
 
+        section(f"PUT /v1/memories/{{id}}  更新")
+        print(" ", http.put(
+            f"/v1/memories/{first_id}",
+            json={"content": "用户偏好浅色主题界面"},
+        ).json())
+
+        section("GET /v1/scopes/  列出租户 scope")
+        print(" ", http.get("/v1/scopes/", params={"app_id": "default"}).json())
+
+        section("GET /v1/capabilities  工具清单（npm MCP codegen）")
+        caps = http.get("/v1/capabilities").json()
+        print("  tools:", [t["name"] for t in caps["tools"]])
+
         section(f"DELETE /v1/memories/{{id}}")
         print(" ", http.delete(f"/v1/memories/{first_id}").json())
 

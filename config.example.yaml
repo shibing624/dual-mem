@@ -73,6 +73,9 @@ reader_mode: hybrid
 # 高并发写入时，embed_queued 把多个并发请求攒成一次 batch（窗口期到或攒满即发）。
 embed_queue_batch_size: 32
 embed_queue_window_ms: 200.0
+# messages 写入：true = L1+Gate user 轮合并为一次 embed API（省 ~1 RTT，但绕过 embed_queued 攒批）；
+# false（默认）= 走 embed_queued，更适合高并发多路并发 write。
+embed_merge_l1_gate: false
 
 # ───── Cross-Domain Sweeper（行为升维）─────
 # 默认关闭：开启后 digest 末尾会跑一次跨域归纳（行为抽象 + 矩阵碰撞 + UnionFind +

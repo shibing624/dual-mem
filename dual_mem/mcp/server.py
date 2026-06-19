@@ -1,33 +1,31 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: MCP server exposing dual-mem memory tools (add/search/get/list/delete) over
-FastMCP, backed by a MemoryClient. Supports stdio and Streamable HTTP transports and ships a
-console entry point (dual-mem-mcp) for uvx. SDK dataclasses are .to_dict()'d at this boundary.
+@description: MCP server — registers the same memory_* tools as REST (MemoryOperations).
 """
 import argparse
 
+from dual_mem.api.operations import MemoryOperations
 from dual_mem.client import MemoryClient
 from dual_mem.config import Settings
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 
-_GROUP_DOC = (
-    "搜索结果按三路分组返回：profile 是稳定的用户画像/身份/模式记忆；"
-    "proactive 是推断出的用户意图（仅 dual 模式非空）；normal 是普通事实与知识记忆。"
-    "若某条记忆经历过演化更新，会带 evolution_chain 字段（按 最新→最旧 排序），"
-    "代表同一记忆的多个历史版本。"
+_SEARCH_DOC = (
+    "语义检索，结果按 profile / proactive / normal 三路分组；"
+    "有演化历史的记忆带 evolution_chain（最新→最旧）。"
 )
 
 
 def build_mcp(
-    *, client: MemoryClient | None = None, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT
+    *,
+    client: MemoryClient | None = None,
+    ops: MemoryOperations | None = None,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
 ):
-    """Build a FastMCP server registering the dual-mem memory tools.
-
-    host/port only take effect for the Streamable HTTP transport (path defaults to /mcp).
-    """
+    """Register dual-mem memory tools on a FastMCP instance."""
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError as exc:
@@ -35,39 +33,37 @@ def build_mcp(
             "MCP support requires the optional dependency. Install with: pip install dual-mem[mcp]"
         ) from exc
 
-    if client is None:
-        client = MemoryClient(settings=Settings())
+    if ops is None:
+        if client is None:
+            client = MemoryClient(settings=Settings())
+        ops = MemoryOperations(client)
 
     mcp = FastMCP("dual-mem", host=host, port=port)
 
     @mcp.tool(
         description=(
-            "写入一条记忆。content 为纯文本内容（与 messages 二选一）；"
-            "app_id+user_id 是必填的归属标识。返回 memory_id。"
+            "写入记忆。content 与 messages 二选一；"
+            "messages 为 [{role, content}, ...] 多轮对话。必填 app_id + user_id。"
         )
     )
     async def memory_add(
-        content: str,
         app_id: str,
         user_id: str,
+        content: str = "",
+        messages: list[dict] | None = None,
         agent_id: str = "",
         session_id: str = "",
     ) -> dict:
-        result = await client.add(
-            content=content,
+        return await ops.memory_add(
             app_id=app_id,
             user_id=user_id,
+            content=content,
+            messages=messages,
             agent_id=agent_id,
             session_id=session_id,
         )
-        return result.to_dict()
 
-    @mcp.tool(
-        description=(
-            "语义检索记忆。" + _GROUP_DOC + " 用 query 描述你想回忆的信息，"
-            "app_ids+user_id 限定检索范围。"
-        )
-    )
+    @mcp.tool(description=f"语义检索。{_SEARCH_DOC}")
     async def memory_search(
         query: str,
         app_ids: list[str],
@@ -77,7 +73,7 @@ def build_mcp(
         min_score: float = 0.4,
         intention_limit: int = 0,
     ) -> dict:
-        result = await client.search(
+        return await ops.memory_search(
             query=query,
             app_ids=app_ids,
             user_id=user_id,
@@ -86,29 +82,56 @@ def build_mcp(
             min_score=min_score,
             intention_limit=intention_limit,
         )
-        return result.to_dict()
 
-    @mcp.tool(description="按 memory_id 获取单条记忆，不存在返回 null。")
-    async def memory_get(memory_id: str) -> dict | None:
-        item = await client.get(memory_id)
-        return item.to_dict() if item is not None else None
-
-    @mcp.tool(description="列出某 app_id+user_id（可选 agent_id）下的记忆。")
+    @mcp.tool(description="列出某 scope 下 ACTIVE 记忆。")
     async def memory_list(
         app_id: str,
         user_id: str,
         agent_id: str = "",
         limit: int = 100,
     ) -> list[dict]:
-        items = await client.list(
+        return await ops.memory_list(
             app_id=app_id, user_id=user_id, agent_id=agent_id, limit=limit
         )
-        return [item.to_dict() for item in items]
 
-    @mcp.tool(description="按 memory_id 删除单条记忆（幂等）。")
+    @mcp.tool(description="按 memory_id 获取单条；不存在返回 null。")
+    async def memory_get(memory_id: str) -> dict | None:
+        return await ops.memory_get(memory_id)
+
+    @mcp.tool(description="更新记忆正文并重新 embedding。")
+    async def memory_update(memory_id: str, content: str) -> dict:
+        return await ops.memory_update(memory_id, content)
+
+    @mcp.tool(description="删除单条记忆。")
     async def memory_delete(memory_id: str) -> dict:
-        result = await client.delete(memory_id)
-        return result.to_dict()
+        return await ops.memory_delete(memory_id)
+
+    @mcp.tool(
+        description="按 scope 批量删除。必填 app_id；confirm 必须为 true。"
+    )
+    async def memory_delete_scope(
+        app_id: str,
+        confirm: bool,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> dict:
+        return await ops.memory_delete_scope(
+            app_id=app_id,
+            confirm=confirm,
+            user_id=user_id,
+            agent_id=agent_id,
+        )
+
+    @mcp.tool(description="列出存储中已有的记忆 scope（app_id + user_id + agent_id）。")
+    async def memory_list_scopes(
+        app_id: str | None = None,
+        limit: int = 5000,
+    ) -> list[dict]:
+        return await ops.memory_list_scopes(app_id=app_id, limit=limit)
+
+    @mcp.tool(description="触发 System2 深度记忆巩固（dual 模式）。")
+    async def memory_digest() -> dict:
+        return await ops.memory_digest()
 
     return mcp
 
@@ -117,14 +140,28 @@ def run_server(
     *, transport: str = "stdio", host: str = DEFAULT_HOST, port: int = DEFAULT_PORT
 ) -> None:
     """Run the MCP server with the given transport (stdio or streamable-http)."""
+    import sys
     from typing import Literal, cast
+
+    if transport == "stdio":
+        # stdio MCP uses stdout for JSON-RPC — never log there; one stderr line only.
+        print(
+            "dual-mem MCP (stdio): ready, waiting for client on stdin "
+            "(no further console output — normal)",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"dual-mem MCP ({transport}): starting http://{host}:{port}",
+            file=sys.stderr,
+        )
 
     mcp = build_mcp(host=host, port=port)
     mcp.run(transport=cast(Literal["stdio", "sse", "streamable-http"], transport))
 
 
 def main() -> None:
-    """Console entry point (dual-mem-mcp): parse transport flags and run the server."""
+    """Console entry point (dual-mem-mcp)."""
     parser = argparse.ArgumentParser(
         prog="dual-mem-mcp", description="dual-mem MCP server (stdio / Streamable HTTP)"
     )
@@ -132,10 +169,9 @@ def main() -> None:
         "--transport",
         choices=["stdio", "streamable-http"],
         default="stdio",
-        help="传输方式：stdio（默认，供 Cursor/Claude Desktop 本地拉起）或 streamable-http（暴露 /mcp）",
     )
-    parser.add_argument("--host", default=DEFAULT_HOST, help="streamable-http 监听地址")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="streamable-http 监听端口")
+    parser.add_argument("--host", default=DEFAULT_HOST)
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args()
     run_server(transport=args.transport, host=args.host, port=args.port)
 

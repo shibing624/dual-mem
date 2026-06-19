@@ -1,78 +1,122 @@
 ---
 name: dual-mem
 description: >
-  通过 dual-mem 分层记忆 SDK 为 agent 写入与检索长期记忆。
-  触发场景：用户透露了稳定的个人信息/偏好/身份（"我在深圳做 ML"、"我不吃辣"）、
-  陈述了值得长期记住的事实或计划，或当前对话需要回忆该用户过去说过的内容
-  （"我之前提过的那个项目"、"按我的习惯来"）时。用 CLI（`dual-mem`）或 MCP 工具
-  （memory_add / memory_search 等）写入与检索，返回结果按 profile/proactive/normal
-  三路分组，演化记忆带 evolution_chain 历史版本链。
+  通过 dual-mem 为 agent 管理长期记忆：写入、检索、更新、删除与 scope 管理。
+  触发场景：用户透露稳定个人信息/偏好、陈述值得长期记住的事实或计划，或对话需要
+  回忆该用户过去说过什么时。使用 MCP 工具或 CLI（dual-mem）调用 MemoryClient 方法。
 ---
 
 # dual-mem 记忆技能
 
-dual-mem 是分层记忆 SDK：把对话中值得长期保留的信息抽取、去重、演化后存起来，
-之后用语义检索召回。它**不是**临时草稿纸——只存对未来对话有用的稳定信息。
+dual-mem 把对话沉淀为**分层长期记忆**（L0–L7），检索时按 profile / proactive / normal 三路返回。
+它管**跨会话记忆**，不能替代 Agent 自己的当前窗口（WorkingMemory）。
 
-## 何时写入（add）
+## 工具 ↔ SDK 对照
 
-- 用户透露稳定画像：身份、职业、所在地、长期偏好、过敏/禁忌、家庭情况。
-- 用户陈述值得记住的事实或计划："我下个月要去新西兰自驾"。
-- 用户纠正了之前的信息（会自动形成演化链，不要怕覆盖）。
+| MCP 工具 | CLI | REST | MemoryClient |
+|---|---|---|---|
+| `memory_add` | `dual-mem add` | `POST /v1/memories/` | `add` |
+| `memory_search` | `dual-mem search` | `POST /v1/memories/search` | `search` |
+| `memory_list` | `dual-mem list` | `GET /v1/memories/` | `list` |
+| `memory_get` | `dual-mem get <id>` | `GET /v1/memories/{id}` | `get` |
+| `memory_update` | `dual-mem update` | `PUT /v1/memories/{id}` | `update` |
+| `memory_delete` | `dual-mem delete` | `DELETE /v1/memories/{id}` | `delete` |
+| `memory_delete_scope` | `dual-mem delete-scope` | `DELETE /v1/memories/?confirm=true` | `delete_bulk` |
+| `memory_list_scopes` | `dual-mem list-scopes` | `GET /v1/scopes/` | `list_scopes` |
+| `memory_digest` | `dual-mem digest` | `POST /v1/digest/` | `digest` |
 
-不要写入：一次性闲聊、当前任务里的临时上下文、可由当前对话直接得到的信息。
+发现：`GET /v1/capabilities` 返回完整 HTTP 映射（供 npm MCP codegen）。
 
-## 何时检索（search）
+## 归属标识（scope）
 
-- 回答前需要个性化背景时（"按我习惯推荐"）。
-- 用户引用过去的内容（"我之前说的那个"）。
-- 想确认是否已知某用户的某项信息。
+每次读写必须一致：
 
-## CLI 调用范式
+- **`app_id`** — 应用/产品命名空间（如 `"agentica"`）
+- **`user_id`** — 终端用户 ID
+- 可选 **`agent_id`** / **`session_id`** — 多 Bot 或会话级隔离
 
-写入：
+## 写入方式（用户自选，SDK 不强制）
+
+| 方式 | API | 适用 | 代价 |
+|------|-----|------|------|
+| 单条实时 | `add(content=...)` | 合规/关键事实需立刻落库 | 每次 ~2 次 LLM + 若干 embed（约 10–15s） |
+| 多轮批量 | `add(messages=[...])` | 普通助手、示例默认、会话末沉淀 | 同上但 **1 次** pipeline，上下文更完整 |
+
+**建议（非约束）**：Agent 集成可「每轮 search、会话结束 add(messages)」以省成本；用户若需 mid-session 单条写入，完全合法。
+
+CLI：`--content` 或 `--messages-file` / `--messages-json` 二选一。
+
+## 何时写入（memory_add）
+
+- 稳定画像：身份、职业、所在地、长期偏好
+- 值得记住的事实或计划
+- 用户纠正旧信息（会形成演化链）
+
+不要写：纯寒暄、仅当前任务用的临时上下文。
+
+## 何时检索（memory_search）
+
+- 需要个性化背景（「按我习惯推荐」）
+- 用户引用过去（「我之前说的那个项目」）
+
+## CLI 示例
+
+单条：
 
 ```bash
-dual-mem add --content "用户叫张三，在深圳做 ML" --app-id myapp --user-id user_001
+dual-mem add --content "用户在深圳做 ML" --app-id agentica --user-id u1
 ```
 
-检索（结果已按三路分组格式化）：
+会话结束批量写入多轮对话：
 
 ```bash
-dual-mem search "用户做什么工作" --app-id myapp --user-id user_001 --limit 5
+# messages.json: [{"role":"user","content":"..."},{"role":"assistant","content":"..."}, ...]
+dual-mem add --messages-file messages.json --app-id agentica --user-id u1
+
+# 或内联 JSON
+dual-mem add --messages-json '[{"role":"user","content":"我搬到北京了"}]' \
+  --app-id agentica --user-id u1
 ```
 
-其它：`dual-mem list --app-id myapp --user-id user_001`、
-`dual-mem get <memory_id>`、`dual-mem delete <memory_id>`、
-`dual-mem digest`（dual 模式触发 System2 沉淀）。
-启动服务：`dual-mem serve --host 0.0.0.0 --port 8000`（REST）、
-`dual-mem-mcp`（MCP stdio，供 Cursor/Claude Desktop 经 uvx 拉起）、
-`dual-mem-mcp --transport streamable-http --port 8765`（MCP over HTTP，暴露 `/mcp`）。
+检索与管理：
 
-## MCP 工具范式
+```bash
+dual-mem search "用户做什么工作" --app-id agentica --user-id u1
+dual-mem list --app-id agentica --user-id u1
+dual-mem get <memory_id>
+dual-mem update <memory_id> --content "新内容"
+dual-mem delete <memory_id>
+dual-mem delete-scope --app-id agentica --user-id u1 --confirm
+dual-mem list-scopes --app-id agentica
+dual-mem digest   # dual 模式
+```
 
-通过 MCP 接入时使用：`memory_add(content, app_id, user_id, ...)`、
-`memory_search(query, app_ids, user_id, ...)`、`memory_get`、`memory_list`、`memory_delete`。
-`app_id` × `user_id`（× 可选 `agent_id` / `session_id`）唯一确定记忆归属，检索时务必传一致的标识。
+## MCP 示例
 
-## 检索结果三路分组
+```text
+memory_add(app_id="agentica", user_id="u1", content="...")
+memory_add(app_id="agentica", user_id="u1", messages=[{"role":"user","content":"..."}, ...])
+memory_search(query="...", app_ids=["agentica"], user_id="u1")
+memory_list(app_id="agentica", user_id="u1")
+memory_get(memory_id="...")
+memory_update(memory_id="...", content="...")
+memory_delete(memory_id="...")
+memory_delete_scope(app_id="agentica", user_id="u1", confirm=true)
+memory_list_scopes(app_id="agentica")
+memory_digest()
+```
 
-search 返回 `memories` 对象，固定三个 key，按重要性顺序使用：
+启动：`dual-mem-mcp`（stdio）或 `dual-mem-mcp --transport streamable-http --port 8765`
 
-- **profile**：稳定的用户画像 / 身份 / 长期模式（最优先呈现）。
-- **proactive**：推断出的用户意图（仅 dual 模式且 `intention_limit>0` 时非空）。
-- **normal**：普通事实与知识记忆。
+## 检索结果解读
 
-渲染进上下文时按 profile → proactive → normal 顺序拼装。
+- **profile** — 画像 / 身份 / 长期偏好（优先用）
+- **proactive** — 推断意图（dual + `intention_limit>0`）
+- **normal** — 普通事实与知识
 
-## 演化链解读（evolution_chain）
+**evolution_chain**：同一记忆多次更新时，按最新→最旧排列；`[0]` 为当前版本。
 
-一条记忆若被多次更新，会带 `evolution_chain` 字段，按 **最新 → 最旧** 排序：
-`evolution_chain[0]` 就是当前最新版本（content 与外层一致），其余是历史版本。
-据此可以理解信息的变化轨迹（如"用户从 Java 转向 Python"）。展示时注意去重：
-要么只渲染演化链，要么跳过外层 content 从链里组装，避免最新版本重复出现两次。
+## 模式
 
-## system1 / dual 区别
-
-- **system1**（默认）：写路径 1 次 LLM extract（+ 可选 summarize）；默认 fast-write + 异步 reconcile 合并演化链。
-- **dual**：system1 + System2 异步蒸馏（L6 Schema / L7 Intention）+ 图库；可调 `digest` 主动触发沉淀。proactive 路在 `intention_limit>0` 时有 L7 意图。
+- **system1**（默认）：短期记忆，写入即可检索
+- **dual**：+ System2 深度记忆（L6 行为模式、L7 意图）；`memory_digest` 或自动后台巩固

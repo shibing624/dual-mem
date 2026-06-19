@@ -41,6 +41,7 @@ class SearchRequest(BaseModel):
     profile_min_score: float = 0.3
     intention_limit: int = 0
     created_after: int | None = None
+    debug: bool = False
 
 
 class SearchResponse(BaseModel):
@@ -62,7 +63,48 @@ class DeleteBulkResponse(BaseModel):
     """Response for a bulk delete, including the number removed."""
 
     success: bool
-    deleted: int
+    deleted: int = 0
+    error_code: int | None = None
+
+
+class UpdateRequest(BaseModel):
+    """Request body for updating a memory's content."""
+
+    content: str
+
+
+class UpdateResponse(BaseModel):
+    """Response for a successful update."""
+
+    success: bool
+    memory_id: str | None = None
+    error_code: int | None = None
+
+
+class DigestResponse(BaseModel):
+    """Response for System2 digest."""
+
+    success: bool
+    processed: int = 0
+    cores_created: int = 0
+
+
+class ScopeSummary(BaseModel):
+    """One tenant scope row."""
+
+    app_id: str
+    user_id: str
+    agent_id: str = ""
+    memory_count: int = 0
+
+
+class CapabilitiesResponse(BaseModel):
+    """Tool manifest for REST clients and npm MCP code generation."""
+
+    sdk_version: str
+    mode: str
+    tools: list[dict]
+    openapi_url: str
 
 
 class ErrorResponse(BaseModel):
@@ -95,6 +137,7 @@ class InfoResponse(BaseModel):
     sdk_version: str
     mode: str
     build: str
+    capabilities_url: str
 
 
 class MemoryItem(BaseModel):

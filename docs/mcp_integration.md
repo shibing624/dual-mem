@@ -1,131 +1,93 @@
-# MCP 接入与部署
+# MCP / REST 接入
 
-dual-mem 的 MCP server 把记忆能力暴露为 agent 可调用的工具，基于 FastMCP 实现，
-**同时支持两种传输**：
+dual-mem 面向 Agent 提供 **两条 MCP 接入路径**，工具名与 REST 路由一一对应，共享 `MemoryOperations` 实现层：
 
-- **stdio**：本地由 Cursor / Claude Desktop 直接拉起进程（最常用）。
-- **streamable-http**：作为独立 HTTP 服务运行，暴露 `/mcp` 端点，供远程/多客户端接入。
+| 路径 | 状态 | 适用场景 |
+|---|---|---|
+| **本地 uvx Python MCP** | ✅ 已实现 | Cursor / Claude Desktop 本机直连，`uvx dual-mem-mcp` 或 `pip install dual-mem[mcp]` |
+| **Cloud-hosted HTTP MCP** | 🔜 规划中 | 托管记忆服务 + 远程 Agent；基于 REST API 暴露同一套 `memory_*` 契约 |
 
-底层都复用同一个 `MemoryClient`（配置走 `~/.dual_mem/config.yaml`，见 `config.example.yaml`）。
+**当前**：仅本地 Python MCP Server（stdio / streamable-http）可用。  
+**后续**：REST 层（`dual-mem serve` + `GET /v1/capabilities`）已对齐 MCP 工具契约，可直接作为 HTTP MCP 的传输底座——无需重复实现业务逻辑，只需在 REST 之上封装 MCP streamable-http 协议（或 npm/TypeScript 薄客户端）。
 
-## 暴露的工具
+```
+Agent (Cursor / Claude / 自研)
+    │
+    ├─ 本地 ──stdio/HTTP──▶ dual-mem-mcp ──▶ MemoryOperations ──▶ MemoryClient
+    │
+    └─ 云端 ──HTTP MCP──▶ dual-mem REST (/v1/...) ──▶ MemoryOperations ──▶ MemoryClient
+                              ↑ 同一套 memory_* 工具名与 JSON 契约
+```
 
-| 工具 | 说明 |
-|---|---|
-| `memory_add(content, app_id, user_id, agent_id?, session_id?)` | 写入一条记忆，返回 `memory_id` |
-| `memory_search(query, app_ids, user_id, agent_ids?, limit?, min_score?, intention_limit?)` | 语义检索，结果按 profile/proactive/normal 三路分组；演化过的记忆带 `evolution_chain`（最新→最旧） |
-| `memory_get(memory_id)` | 取单条，不存在返回 null |
-| `memory_list(app_id, user_id, agent_id?, limit?)` | 列出某 app/user（可选 agent）下的 ACTIVE 记忆 |
-| `memory_delete(memory_id)` | 删除单条（幂等） |
+## 工具 ↔ HTTP ↔ SDK
 
-> 默认 `intention_limit=0` 时 proactive 路恒空；需要主动意图召回时显式传正整数（仅 dual 模式有 L7 意图）。`min_score` 默认 0.4，约束 normal 路。
->
-> dual 模式的 System2 沉淀触发（`digest`）**未**作为 MCP 工具暴露，按需通过 SDK 或 CLI（`dual-mem digest`）触发；`per_write` / `scheduled` 触发模式则由 SDK 内部自动调度。
+| 工具 / 操作 | HTTP | MemoryClient |
+|---|---|---|
+| `memory_add` | `POST /v1/memories/` | `add` |
+| `memory_search` | `POST /v1/memories/search` | `search` |
+| `memory_list` | `GET /v1/memories/` | `list` |
+| `memory_get` | `GET /v1/memories/{id}` | `get` |
+| `memory_update` | `PUT /v1/memories/{id}` | `update` |
+| `memory_delete` | `DELETE /v1/memories/{id}` | `delete` |
+| `memory_delete_scope` | `DELETE /v1/memories/?confirm=true` | `delete_bulk` |
+| `memory_list_scopes` | `GET /v1/scopes/` | `list_scopes` |
+| `memory_digest` | `POST /v1/digest/` | `digest` |
 
-## 启动方式
+发现端点：`GET /v1/capabilities` — 返回 `tools` 数组（含 method/path），供 HTTP MCP / npm codegen 自动生成工具定义。
 
-### 1. stdio（本地）
+## 本地 MCP（已实现）
 
 ```bash
-dual-mem-mcp                      # 等价 --transport stdio
-# 或经 SDK CLI：
+# uvx 零安装（推荐）
+uvx dual-mem-mcp
+uvx dual-mem-mcp --transport streamable-http --port 8765
+
+# 或 pip 安装后
+dual-mem-mcp
+dual-mem-mcp --transport streamable-http --port 8765
 dual-mem mcp
 ```
 
-### 2. Streamable HTTP（暴露 /mcp）
-
-```bash
-dual-mem-mcp --transport streamable-http --host 0.0.0.0 --port 8765
-# 端点：http://<host>:8765/mcp
-```
-
-### 3. 经 uvx 免安装运行
-
-发布到 PyPI 后：
-
-```bash
-uvx dual-mem-mcp                                   # stdio
-uvx dual-mem-mcp --transport streamable-http       # HTTP
-```
-
-本地源码（未发布）可用 `--from`：
-
-```bash
-uvx --from /Users/xuming/Documents/Codes/dual-mem dual-mem-mcp
-```
-
-## 客户端配置
-
-### Cursor（stdio + uvx）
-
-`~/.cursor/mcp.json`（或项目内 `.cursor/mcp.json`）：
+### Cursor（本地 stdio）
 
 ```json
 {
   "mcpServers": {
-    "dual-mem": {
-      "command": "uvx",
-      "args": ["dual-mem-mcp"]
+    "dual-mem": { "command": "uvx", "args": ["dual-mem-mcp"] }
+  }
+}
+```
+
+配置：`~/.dual_mem/config.yaml` 或 `DUAL_MEM_*` 环境变量。
+
+## REST / HTTP MCP 底座（已实现 REST，HTTP MCP 待封装）
+
+REST 服务本身已可用，可作为 cloud-hosted HTTP MCP 的后端：
+
+```bash
+dual-mem serve --host 0.0.0.0 --port 8000
+curl http://localhost:8000/v1/capabilities
+curl http://localhost:8000/openapi.json
+```
+
+后续 HTTP MCP 接入方式（规划）：
+
+- **自托管**：REST + MCP streamable-http 网关（同一 `memory_*` 工具，Bearer 鉴权走 REST）
+- **Cloud-hosted**：托管 `dual-mem serve` 实例，Agent 通过 URL + appkey 连接，无需本机 Python 环境
+
+Cursor 侧预期形态（示意，尚未提供官方 npm 包）：
+
+```json
+{
+  "mcpServers": {
+    "dual-mem-cloud": {
+      "url": "https://your-host/mcp",
+      "headers": { "Authorization": "Bearer <appkey>" }
     }
   }
 }
 ```
 
-未发布时用本地源码：
+## Skill
 
-```json
-{
-  "mcpServers": {
-    "dual-mem": {
-      "command": "uvx",
-      "args": ["--from", "/Users/xuming/Documents/Codes/dual-mem", "dual-mem-mcp"]
-    }
-  }
-}
-```
-
-或直接用已安装的入口（`pip install -e .` 后）：
-
-```json
-{
-  "mcpServers": {
-    "dual-mem": { "command": "dual-mem-mcp", "args": [] }
-  }
-}
-```
-
-### Claude Desktop（stdio + uvx）
-
-`claude_desktop_config.json`（macOS：`~/Library/Application Support/Claude/`）：
-
-```json
-{
-  "mcpServers": {
-    "dual-mem": {
-      "command": "uvx",
-      "args": ["dual-mem-mcp"]
-    }
-  }
-}
-```
-
-### Streamable HTTP 客户端
-
-先以 HTTP 模式起服务，再在支持 HTTP MCP 的客户端里填端点 `http://127.0.0.1:8765/mcp`。
-握手符合 MCP Streamable HTTP 规范（`initialize` 走 `POST /mcp`，返回 `mcp-session-id`）。
-
-## 配置来源
-
-MCP server 启动时用 `Settings()` 读取配置，优先级：
-
-```
-显式传参  >  DUAL_MEM_* 环境变量  >  ~/.dual_mem/config.yaml  >  默认值
-```
-
-把 `llm_api_key` / `embed_api_key` / `mode` 等写进 `~/.dual_mem/config.yaml` 即可，
-无需在 MCP 客户端配置里塞密钥。
-
-## 与 Skill 的关系
-
-`skills/dual-mem/SKILL.md` 是给 agent 的使用说明（何时写入/检索、如何解读三路结果与演化链）。
-推荐链路：**Skill 指导 agent → 经 MCP 调工具 → dual-mem SDK → 存储**。
+`skills/dual-mem/SKILL.md` — 指导 agent 何时读写记忆、如何解读 profile/proactive/normal 与演化链。

@@ -12,6 +12,8 @@ dual-mem requires both an LLM API key and an embedding API key; missing credenti
 on construction (no silent embedding-only fallback). When you need to inject your own LLM
 client (tests, custom backends), pass it via the ``llm=`` constructor kwarg.
 """
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
@@ -28,6 +30,7 @@ from dual_mem.sdk_models import (
     DeleteResult,
     DigestResult,
     MemoryItem,
+    ScopeSummary,
     SearchResult,
     UpdateResult,
     WriteResult,
@@ -45,7 +48,28 @@ class MissingCredentialsError(RuntimeError):
 
 
 class MemoryClient:
-    """High-level async entry point; picks the system1 / dual writer based on Settings.mode."""
+    """High-level async entry point for dual-mem.
+
+    Picks ``system1`` (MemoryWriter) or ``dual`` (System2Writer) from ``Settings.mode``.
+
+    Constructor kwargs (see also ``Settings`` / ``~/.dual_mem/config.yaml``):
+
+    - ``mode``: ``"system1"`` (default, L0–L4 fast-write) or ``"dual"`` (+ async System2 L6/L7).
+    - ``storage_dir``: on-disk root for Chroma / Kuzu / SQLite; default ``./.dual_mem_data``.
+    - ``settings``: explicit ``Settings`` instance; overrides YAML and env.
+    - ``embed`` / ``llm``: inject custom clients; skips the corresponding api_key check.
+
+    Tenant scope on ``add`` / ``search``:
+
+    - ``app_id`` (required on add): product / tenant namespace, e.g. ``"agentica"`` — not a secret.
+    - ``user_id`` (required): end-user id; reads and writes must share the same pair.
+    - ``app_ids`` (required on search): list, usually ``[app_id]``.
+    - ``agent_id`` / ``session_id`` (optional): finer isolation within one user.
+
+    Lifecycle: reuse one client per process (FastAPI lifespan / agent runtime). Call
+    ``await aclose()`` on shutdown when ``mode="dual"`` and ``system2_trigger_mode="scheduled"``;
+    optional otherwise. Do **not** call ``aclose()`` after every add/search.
+    """
 
     def __init__(
         self,
@@ -136,11 +160,17 @@ class MemoryClient:
         session_id: str = "",
         memory_at: int | None = None,
     ) -> WriteResult:
-        """Write one memory (raw text or message list) and run cognition per mode.
+        """Write one memory and run the cognition pipeline (Gate → Extract → …).
 
-        When ``messages`` is given, only ``role=='user'`` turns drive Gate novelty (assistant
-        text is conversation context, not new user information). The L1_RAW node still stores
-        the full dialogue (with role markers) and the extractor sees the same dialogue text.
+        Pass either ``content`` (single blob) or ``messages`` (multi-turn chat) — same API.
+
+        ``app_id`` and ``user_id`` are **required** isolation keys. With ``messages``,
+        only ``role=='user'`` turns drive Gate vector novelty (max across turns); L1_RAW
+        and the extractor still see the full dialogue; the last assistant turn feeds Gate LLM context.
+
+        Each add costs ~2 LLM calls (Gate + Extract). For agent apps, you may batch
+        ``messages`` at session end to reduce cost; ``add(content=...)`` per turn is
+        also supported when low-latency persistence is required — see docs/skills tradeoff.
         """
         request_id = str(uuid.uuid4())
         start = time.perf_counter()
@@ -199,11 +229,13 @@ class MemoryClient:
         request_id: str | None = None,
         debug: bool = False,
     ) -> SearchResult:
-        """Semantic search returning a SearchResult with profile/proactive/normal groups.
+        """Semantic search; returns profile / proactive / normal groups.
 
-        ``debug=True`` populates ``SearchResult.read_result`` with the per-stage trace
-        (anchor path counts / expansion edges / fusion final count / elapsed_ms) so callers
-        can render the read pipeline without re-querying the store.
+        ``app_ids`` and ``user_id`` scope the query (must match values used in ``add``).
+        Read path uses embedding + hybrid retrieval — no LLM. Safe to call every user turn
+        in an agent loop before generation.
+
+        ``debug=True`` fills ``SearchResult.read_result`` with per-stage trace metadata.
         """
         request_id = request_id or str(uuid.uuid4())
         start = time.perf_counter()
@@ -351,6 +383,31 @@ class MemoryClient:
             )
         return DeleteBulkResult(success=True, deleted=len(node_ids))
 
+    async def list_scopes(
+        self,
+        *,
+        app_id: str | None = None,
+        limit: int = 5000,
+    ) -> list[ScopeSummary]:
+        """List distinct memory scopes (app_id, user_id, agent_id) present in storage."""
+        where: dict = {}
+        if app_id is not None:
+            where["app_id"] = app_id
+        nodes = self.factory.vector.get_many(where, limit=limit)
+        counts: dict[tuple[str, str, str], int] = {}
+        for node in nodes:
+            key = (node.app_id, node.user_id, node.agent_id or "")
+            counts[key] = counts.get(key, 0) + 1
+        return [
+            ScopeSummary(
+                app_id=key[0],
+                user_id=key[1],
+                agent_id=key[2],
+                memory_count=count,
+            )
+            for key, count in sorted(counts.items())
+        ]
+
     async def digest(self) -> DigestResult:
         """Drain every pending System2 task: reconcile chains, run S2 agent, sweeper."""
         if not isinstance(self.writer, System2Writer):
@@ -366,7 +423,12 @@ class MemoryClient:
         return DigestResult(success=True, processed=processed, cores_created=cores)
 
     async def aclose(self) -> None:
-        """Cancel any background tasks (e.g. scheduled S2 loop). Safe to call multiple times."""
+        """Release dual-mode background resources. Idempotent.
+
+        Cancels the scheduled System2 loop when ``system2_trigger_mode="scheduled"``.
+        No-op for ``system1``. Does **not** await in-flight ``per_write`` digest tasks.
+        Call once at application shutdown (not after each request).
+        """
         if isinstance(self.writer, System2Writer):
             await self.writer.aclose()
 

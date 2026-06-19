@@ -7,45 +7,69 @@
 [![GitHub issues](https://img.shields.io/github/issues/shibing624/dual-mem.svg)](https://github.com/shibing624/dual-mem/issues)
 [![Wechat Group](https://img.shields.io/badge/wechat-group-green.svg?logo=wechat)](#community--support)
 
-**dual-mem** is a **dual-system layered memory SDK** for LLM applications and agents. It turns conversational input into structured, evolvable, retrievable long-term memory, exposed through **SDK / REST / MCP / CLI / Skill**.
+**dual-mem** helps agents **actually remember users** — not by dumping chat logs, but like people do: **capture today’s conversation quickly, then consolidate it into profile, habits, and plans**. Layered storage, preference updates with history, and retrieval that surfaces what matters. Plug in via **SDK / REST / MCP / CLI / Skill**.
 
-| Capability | Description |
-|------------|-------------|
-| **Evolution chains** | Explicit `supersedes` pointers; read path expands full history (newest→oldest) |
-| **System1 write path** | Gate (LLM) → Extract → fast-write L2/L4 → async Reconcile |
-| **System2 distillation** | dual mode: DBSCAN + 8-tool ReAct → L6 Schema / L7 Intention |
-| **Three-route recall** | profile / proactive / normal; default hybrid reader (zero LLM on read) |
-| **Multi-entry** | Five frontends share one `MemoryClient`; optional extras |
+## Memory architecture (L0–L7)
+
+The core idea is an **eight-layer memory model** — inspired by how the brain moves from raw experience → encoding → consolidation → abstraction: from chat traces to profile, habits, and plans, with **evolution chains** (preference updates keep history instead of blind overwrite):
+
+| Layer | What it holds | Example |
+|---|---|---|
+| **L0 Profile** | Structured basics | Name, age, city |
+| **L1 Raw traces** | Full interaction history | Multi-turn chat (archived after extraction) |
+| **L2 Facts** | Verifiable statements | “Flying to Beijing next week” |
+| **L3 Summaries** | Long-text compression | Key points from a long note |
+| **L4 Identity & prefs** | Stable “who you are” | “Main language is Python” |
+| **L5 Knowledge** | Domain snippets | Concepts the user taught you |
+| **L6 Patterns** | Habits from many facts | “Lists everything before trips; loves organizing” |
+| **L7 Intentions** | Plans and goals | “Training for a marathon” |
+
+When preferences change (Java → Python), old entries aren’t erased — an **evolution chain** keeps history; reads return the **latest version plus the trail**.
+
+## Dual system: short-term × deep memory
+
+| | **System1 · short-term** | **System2 · deep memory** |
+|---|---|---|
+| **Like** | Hear and note it now | Sleep on it; understand deeper over time |
+| **When** | Every `add`, ready in seconds | `dual` mode, async in background (or on a schedule) |
+| **Produces** | L0–L4: facts, prefs, profile | L6 patterns, L7 intentions, linked knowledge |
+| **How to enable** | `mode="system1"` (default) | `mode="dual"` |
+
+```
+add conversation ──▶ System1 short-term memory (usable immediately)
+                         │
+                         └──▶ System2 deep memory (dual: background consolidation)
+```
+
+Recall groups results into **profile / proactive / normal**; hybrid semantic + keyword search; **no extra LLM on read** (embedding only).
+
+## Why dual-mem
+
+| | |
+|---|---|
+| **Easy start** | `SyncMemoryClient`: write + search in a few lines; config auto-created on first run |
+| **Agent-ready** | Batch multi-turn `messages`; Agentica integration in [Quickstart](docs/getting-started/quickstart.md) |
+| **Evolving memory** | Preference updates via chains, not blind overwrite |
+| **Five entry points** | One `MemoryClient`; optional REST / MCP / CLI extras |
 
 ## 🔥 News
 
+- [2026/06/20] **v0.1.2**: MemoryOperations for REST/MCP; SyncMemoryClient; CLI messages; post-extract embed batching; MCP bootstrap fixes and docs.
 - [2026/06/19] **v0.1.1**: Attentional Gate is now **LLM-primary** (heuristic fallback); dependencies split into `[api]` / `[cli]` / `[mcp]` extras; hybrid reader V2 by default.
 - [2026/06/18] **v0.1.0**: Initial release — system1 / dual modes, evolution chains, REST `/v1/memories/` contract, MCP tools.
 
-## Architecture
-
-dual-mem uses a **core SDK + parallel frontends** layout: `MemoryClient` owns all business logic; CLI / REST / MCP / Skill are thin protocol adapters.
+## Architecture at a glance
 
 ```
-        Agent / Cursor / Your app
-              │
-    ┌─────────┼─────────┬─────────┐
-    │  Skill  │   MCP   │  REST   │  CLI     ← frontends (optional extras)
-    └─────────┼─────────┴─────────┘
-              ▼
-       dual_mem.MemoryClient          ← core SDK
-              │
-    Chroma (vector) + Kuzu (graph) + SQLite (cache/queues)
+  Your agent / app
+        │  SDK · REST · MCP · CLI · Skill
+        ▼
+   MemoryClient (System1 write / search / evolution chains)
+        │
+   Vector + graph + local storage
 ```
 
-Write / read overview:
-
-```
-Write: Gate(1×LLM) → Extract(1×LLM) → fast-write L2/L4 → [async Reconcile / System2]
-Read:  QueryUnderstanding → AnchorSearch(5 routes) → GraphExpander → FusionScorer → 3 routes
-```
-
-See [docs/architecture.md](docs/architecture.md) and the online [Architecture](https://shibing624.github.io/dual-mem/architecture/) page.
+Implementation details (gate, reconcile, hybrid retrieval, etc.): [architecture.md](docs/architecture.md) · [docs site](https://shibing624.github.io/dual-mem/architecture/).
 
 ## Installation
 
@@ -73,6 +97,28 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
+Scripts / sync apps (recommended):
+
+```python
+from dual_mem import SyncMemoryClient
+
+with SyncMemoryClient(mode="system1", storage_dir="./.dual_mem_data") as client:
+    client.add(
+        content="My favorite language is Java. I've used it for 5 years.",
+        app_id="my_app",
+        user_id="alice",
+    )
+    res = client.search(
+        query="programming language preference",
+        app_ids=["my_app"],
+        user_id="alice",
+    )
+    for m in res.memories.profile:
+        print(m.content)
+```
+
+FastAPI / asyncio agents:
+
 ```python
 import asyncio
 from dual_mem import MemoryClient
@@ -80,56 +126,35 @@ from dual_mem import MemoryClient
 
 async def main():
     client = MemoryClient(mode="system1", storage_dir="./.dual_mem_data")
-
-    await client.add(
-        content="My favorite language is Java. I've used it for 5 years.",
-        app_id="my_app",
-        user_id="alice",
-    )
-
-    res = await client.search(
-        query="programming language preference",
-        app_ids=["my_app"],
-        user_id="alice",
-    )
-    for m in res.memories.profile:
-        print(m.content)
-
+    await client.add(content="...", app_id="my_app", user_id="alice")
     await client.aclose()
 
 
 asyncio.run(main())
 ```
 
-Config lives at `~/.dual_mem/config.yaml` (**auto-created on first startup**; see `config.example.yaml`). **Both LLM and embedding API keys are required.**
+Config lives at `~/.dual_mem/config.yaml` (**auto-created on first startup**). **Both LLM and embedding API keys are required.**
 
-```yaml
-mode: system1
-llm_api_key: sk-...
-embed_api_key: sk-...
-embed_model: text-embedding-3-small
-embed_dim: 1536
-```
+→ Parameters, multi-turn `messages`, `aclose()`, and agent integration patterns: **[Quickstart](docs/getting-started/quickstart.md)** ([online](https://shibing624.github.io/dual-mem/getting-started/quickstart/)).
 
 ## Features
 
-- **Async-first** — fully async `MemoryClient`; CLI/REST wrap with `asyncio.run`
-- **Attentional Gate** — LLM scores novelty / relevance / arousal; heuristic fallback on failure
-- **Fast-write + async Reconcile** — low-latency writes; `reconcile_sync=true` for strong consistency
-- **Evolution chains** — intra-layer `supersedes` pointers; soft-delete history; `evolution_chain` on read
-- **Hybrid reader (default)** — 5-route parallel anchors + 1-hop graph + FusionScorer; Chinese time-word parsing
-- **System2 ReAct (dual)** — 8-tool function-calling loop producing L6/L7 and graph edges
-- **OpenAI-compatible** — any LLM / embedding endpoint (OpenAI, DashScope, Zhipu, local vLLM, …)
-- **Multi-tenant isolation** — `app_id` + `user_id` + optional `agent_id` / `session_id`
+- **Eight layers + evolution chains** — from raw chat to patterns and intentions; preference history preserved
+- **System1 short-term memory** — structured on write; filters small talk, keeps what matters
+- **System2 deep memory** (dual) — background consolidation into L6/L7
+- **Hybrid retrieval** — semantic + keyword; profile / proactive / normal routes
+- **Sync & async SDK** — `SyncMemoryClient` for scripts; `MemoryClient` for FastAPI / agents
+- **OpenAI-compatible** — any LLM / embedding endpoint
+- **Multi-tenant** — `app_id` + `user_id` isolation
 
 ## Modes
 
-| | system1 (default) | dual |
+| | **system1** (default) | **dual** |
 |---|---|---|
-| LLM per `add` (fast-write) | ~2 (Gate + Extract; +1 summarize if long) | same + async 1~N |
-| Layers written | L0 / L1(SHADOW) / L2 / L3 / L4 | + L5 / L6 / L7 |
-| Graph (Kuzu) | off | on |
-| System2 | no | ReconcileWorker + ReAct Agent + Sweeper |
+| Short-term memory | ✓ | ✓ |
+| Deep memory | — | ✓ (background or scheduled consolidation) |
+| Best for | Assistants, support bots, quick integration | Deeper user modeling, intentions, behavior patterns |
+| Graph links | off | on |
 
 ## REST / MCP / CLI
 
@@ -152,8 +177,8 @@ See [examples/](https://github.com/shibing624/dual-mem/tree/main/examples) for r
 
 | Category | Content |
 |----------|---------|
-| **SDK basics** | system1 writes, evolution chains, multi-turn `messages` |
-| **System2** | dual `digest`, ReAct distillation, cross-domain schema |
+| **SDK basics** | Short-term writes, evolution chains, multi-turn `messages` |
+| **Deep memory** | dual mode, scheduled consolidation |
 | **REST** | FastAPI TestClient against `/v1/memories/` |
 | **CLI** | `dual-mem` add / search / list / delete |
 
@@ -206,4 +231,4 @@ Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md).
 - [kuzudb/kuzu](https://github.com/kuzudb/kuzu) — graph store
 - [tiangolo/fastapi](https://github.com/tiangolo/fastapi) — REST layer
 - [modelcontextprotocol/python-sdk](https://github.com/modelcontextprotocol/python-sdk) — MCP integration
-- [mem0ai/mem0](https://github.com/mem0ai/mem0) — early exploration in layered memory SDKs
+- [mem0ai/mem0](https://github.com/mem0ai/mem0) — memory SDK ecosystem

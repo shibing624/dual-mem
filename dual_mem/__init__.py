@@ -13,8 +13,9 @@ Logging policy (SDK best practice):
 import logging
 
 from dual_mem.client import MemoryClient
+from dual_mem.sync_client import SyncMemoryClient
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 # Library convention: install a NullHandler on the package logger so the SDK is silent
 # by default. The host application is responsible for configuring handlers.
@@ -43,4 +44,4 @@ def enable_logging(level: int | str = "INFO", *, propagate: bool = False) -> log
     return logger
 
 
-__all__ = ["__version__", "MemoryClient", "enable_logging"]
+__all__ = ["__version__", "MemoryClient", "SyncMemoryClient", "enable_logging"]

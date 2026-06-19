@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: FastAPI app factory exposing the dual-mem REST API (add/search/list/get/
-delete/health), with Bearer auth, app whitelist enforcement and contract error responses.
-SDK dataclasses are flattened to dicts at this boundary via .to_dict().
+@description: FastAPI app — HTTP front-end over MemoryOperations (same contract as MCP tools).
 """
 import time
 from datetime import datetime
@@ -13,36 +11,39 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from dual_mem import __version__
+from dual_mem.api.contracts import MEMORY_TOOL_CONTRACTS
+from dual_mem.api.operations import MemoryOperations
 from dual_mem.api.schemas import (
     AddRequest,
     AddResponse,
+    CapabilitiesResponse,
     DeleteBulkResponse,
     DeleteResponse,
+    DigestResponse,
     HealthResponse,
     InfoResponse,
     PingResponse,
     SearchRequest,
     SearchResponse,
+    UpdateRequest,
+    UpdateResponse,
 )
 from dual_mem.client import MemoryClient
 from dual_mem.config import Settings
 
 
 def _get_settings(request: Request) -> Settings:
-    """FastAPI dependency returning the app's Settings."""
     return request.app.state.settings
 
 
-def _get_client(request: Request) -> MemoryClient:
-    """FastAPI dependency returning the app's MemoryClient."""
-    return request.app.state.client
+def _get_ops(request: Request) -> MemoryOperations:
+    return request.app.state.ops
 
 
 def _verify_bearer(
     request: Request,
     authorization: str | None = Header(default=None),
 ) -> None:
-    """Enforce a non-empty Bearer token unless auth is disabled."""
     settings: Settings = request.app.state.settings
     if settings.auth_disabled:
         return
@@ -54,7 +55,6 @@ def _verify_bearer(
 
 
 def _check_whitelist(settings: Settings, app_ids: list[str]) -> None:
-    """Reject app_ids not in the configured whitelist unless auth is disabled."""
     if settings.auth_disabled:
         return
     for app_id in app_ids:
@@ -65,15 +65,22 @@ def _check_whitelist(settings: Settings, app_ids: list[str]) -> None:
 def create_app(
     *, client: MemoryClient | None = None, settings: Settings | None = None
 ) -> FastAPI:
-    """Build and return the FastAPI app, wiring routes, auth and a MemoryClient."""
+    """Build FastAPI app wired to MemoryOperations (REST ≡ MCP tool contract)."""
     if settings is None:
         settings = client.settings if client is not None else Settings()
     if client is None:
         client = MemoryClient(settings=settings)
 
-    app = FastAPI(title="dual-mem REST API", version=__version__)
+    ops = MemoryOperations(client)
+
+    app = FastAPI(
+        title="dual-mem REST API",
+        version=__version__,
+        description="HTTP transport for dual-mem memory tools; see GET /v1/capabilities",
+    )
     app.state.settings = settings
     app.state.client = client
+    app.state.ops = ops
     app.state.started_at = time.time()
 
     @app.exception_handler(HTTPException)
@@ -98,16 +105,18 @@ def create_app(
             },
         )
 
+    # ── memory_add ──────────────────────────────────────────────────────────
+
     @app.post("/v1/memories/", response_model=AddResponse, dependencies=[Depends(_verify_bearer)])
-    async def add_memory(
+    async def memory_add(
         body: AddRequest,
         settings: Settings = Depends(_get_settings),
-        client: MemoryClient = Depends(_get_client),
+        ops: MemoryOperations = Depends(_get_ops),
     ):
         _check_whitelist(settings, [body.app_id])
         if not body.content and not body.messages:
             raise HTTPException(status_code=400, detail="content 与 messages 至少二选一")
-        result = await client.add(
+        return await ops.memory_add(
             content=body.content,
             messages=body.messages,
             app_id=body.app_id,
@@ -116,20 +125,21 @@ def create_app(
             session_id=body.session_id,
             memory_at=body.memory_at,
         )
-        return result.to_dict()
+
+    # ── memory_search ─────────────────────────────────────────────────────────
 
     @app.post(
         "/v1/memories/search",
         response_model=SearchResponse,
         dependencies=[Depends(_verify_bearer)],
     )
-    async def search_memory(
+    async def memory_search(
         body: SearchRequest,
         settings: Settings = Depends(_get_settings),
-        client: MemoryClient = Depends(_get_client),
+        ops: MemoryOperations = Depends(_get_ops),
     ):
         _check_whitelist(settings, body.app_ids)
-        result = await client.search(
+        return await ops.memory_search(
             query=body.query,
             app_ids=body.app_ids,
             user_id=body.user_id,
@@ -141,74 +151,140 @@ def create_app(
             profile_min_score=body.profile_min_score,
             intention_limit=body.intention_limit,
             created_after=body.created_after,
+            debug=body.debug,
         )
-        return result.to_dict()
+
+    # ── memory_list ───────────────────────────────────────────────────────────
 
     @app.get("/v1/memories/", dependencies=[Depends(_verify_bearer)])
-    async def list_memories(
+    async def memory_list(
         app_id: str,
         user_id: str,
         agent_id: str = "",
         limit: int = 100,
         settings: Settings = Depends(_get_settings),
-        client: MemoryClient = Depends(_get_client),
+        ops: MemoryOperations = Depends(_get_ops),
     ):
         _check_whitelist(settings, [app_id])
-        items = await client.list(
+        return await ops.memory_list(
             app_id=app_id, user_id=user_id, agent_id=agent_id, limit=limit
         )
-        return [item.to_dict() for item in items]
+
+    # ── memory_get ────────────────────────────────────────────────────────────
 
     @app.get("/v1/memories/{memory_id}", dependencies=[Depends(_verify_bearer)])
-    async def get_memory(
+    async def memory_get(
         memory_id: str,
-        client: MemoryClient = Depends(_get_client),
+        ops: MemoryOperations = Depends(_get_ops),
     ):
-        item = await client.get(memory_id)
+        item = await ops.memory_get(memory_id)
         if item is None:
             raise HTTPException(status_code=404, detail=f"memory_id '{memory_id}' 不存在")
-        return item.to_dict()
+        return item
+
+    # ── memory_update ─────────────────────────────────────────────────────────
+
+    @app.put(
+        "/v1/memories/{memory_id}",
+        response_model=UpdateResponse,
+        dependencies=[Depends(_verify_bearer)],
+    )
+    async def memory_update(
+        memory_id: str,
+        body: UpdateRequest,
+        ops: MemoryOperations = Depends(_get_ops),
+    ):
+        result = await ops.memory_update(memory_id, body.content)
+        if not result["success"]:
+            raise HTTPException(
+                status_code=result.get("error_code") or 404,
+                detail=f"memory_id '{memory_id}' 不存在",
+            )
+        return result
+
+    # ── memory_delete ─────────────────────────────────────────────────────────
 
     @app.delete(
         "/v1/memories/{memory_id}",
         response_model=DeleteResponse,
         dependencies=[Depends(_verify_bearer)],
     )
-    async def delete_memory(
+    async def memory_delete(
         memory_id: str,
-        client: MemoryClient = Depends(_get_client),
+        ops: MemoryOperations = Depends(_get_ops),
     ):
-        result = await client.delete(memory_id)
-        if not result.success:
+        result = await ops.memory_delete(memory_id)
+        if not result["success"]:
             raise HTTPException(
-                status_code=result.error_code or 404,
+                status_code=result.get("error_code") or 404,
                 detail=f"memory_id '{memory_id}' 不存在",
             )
-        return result.to_dict()
+        return result
+
+    # ── memory_delete_scope ───────────────────────────────────────────────────
 
     @app.delete(
         "/v1/memories/",
         response_model=DeleteBulkResponse,
         dependencies=[Depends(_verify_bearer)],
     )
-    async def delete_bulk(
+    async def memory_delete_scope(
         app_id: str,
+        confirm: bool = False,
         user_id: str | None = None,
         agent_id: str | None = None,
-        confirm: bool = False,
         settings: Settings = Depends(_get_settings),
-        client: MemoryClient = Depends(_get_client),
+        ops: MemoryOperations = Depends(_get_ops),
     ):
         _check_whitelist(settings, [app_id])
-        result = await client.delete_bulk(
-            app_id=app_id, user_id=user_id, agent_id=agent_id, confirm=confirm
+        result = await ops.memory_delete_scope(
+            app_id=app_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            confirm=confirm,
         )
-        if not result.success:
+        if not result["success"]:
             raise HTTPException(
-                status_code=result.error_code or 400,
+                status_code=result.get("error_code") or 400,
                 detail="批量删除必须显式传入 confirm=true",
             )
-        return result.to_dict()
+        return result
+
+    # ── memory_list_scopes ────────────────────────────────────────────────────
+
+    @app.get("/v1/scopes/", dependencies=[Depends(_verify_bearer)])
+    async def memory_list_scopes(
+        app_id: str | None = None,
+        limit: int = 5000,
+        settings: Settings = Depends(_get_settings),
+        ops: MemoryOperations = Depends(_get_ops),
+    ):
+        if app_id is not None:
+            _check_whitelist(settings, [app_id])
+        return await ops.memory_list_scopes(app_id=app_id, limit=limit)
+
+    # ── memory_digest ─────────────────────────────────────────────────────────
+
+    @app.post(
+        "/v1/digest/",
+        response_model=DigestResponse,
+        dependencies=[Depends(_verify_bearer)],
+    )
+    async def memory_digest(ops: MemoryOperations = Depends(_get_ops)):
+        return await ops.memory_digest()
+
+    # ── discovery (npm / TS MCP codegen) ──────────────────────────────────────
+
+    @app.get("/v1/capabilities", response_model=CapabilitiesResponse)
+    async def capabilities():
+        return {
+            "sdk_version": __version__,
+            "mode": app.state.settings.mode,
+            "tools": MEMORY_TOOL_CONTRACTS,
+            "openapi_url": "/openapi.json",
+        }
+
+    # ── ops meta ──────────────────────────────────────────────────────────────
 
     @app.get("/health", response_model=HealthResponse)
     async def health():
@@ -233,10 +309,11 @@ def create_app(
             "sdk_version": __version__,
             "mode": app.state.settings.mode,
             "build": "dual-mem",
+            "capabilities_url": "/v1/capabilities",
         }
 
     @app.on_event("shutdown")
     async def _on_shutdown():
-        await client.aclose()
+        await ops.aclose()
 
     return app

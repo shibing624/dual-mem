@@ -232,6 +232,19 @@ class DeleteBulkResult:
 
 
 @dataclass
+class ScopeSummary:
+    """One tenant scope (app + user + optional agent) and how many memories it holds."""
+
+    app_id: str
+    user_id: str
+    agent_id: str = ""
+    memory_count: int = 0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class UpdateResult:
     """Outcome of an update call: success flag and the updated memory id."""
 

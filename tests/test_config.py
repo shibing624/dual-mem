@@ -100,3 +100,11 @@ def test_ensure_config_file_creates_default(tmp_path, monkeypatch):
     assert path.read_text(encoding="utf-8") == text  # idempotent
     ensure_config_file()
     assert path.read_text(encoding="utf-8") == text
+
+
+def test_ensure_storage_dir_creates_nested(tmp_path):
+    from dual_mem.config import ensure_storage_dir
+
+    target = tmp_path / "nested" / "dual_mem_data"
+    ensure_storage_dir(str(target))
+    assert target.is_dir()
