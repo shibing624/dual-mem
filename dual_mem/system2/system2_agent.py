@@ -1,80 +1,31 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: System2 cognitive-processing agent: prepares clustered fact materials, then emits
-schema/intention ops (single LLM call by default, or a bounded multi-turn loop when
-system2_agent_loop is set) executed by the ToolExecutor.
+@description: System2 ReAct cognitive-processing agent. Phase 1 prepares clustered fact
+materials (no LLM); phase 2 hands them to the LLM, which drives a true OpenAI
+function-calling tool loop (search_vdb / search_graph / get_node / expand_node +
+create_schema / create_intention / add_evidence / add_edge) until it emits no more
+tool_calls. The legacy single-shot ops-JSON path has been deleted.
 """
 import json
+import logging
 
+from dual_mem.agent import prompts
 from dual_mem.isolation import build_filter
 from dual_mem.providers.llm import is_chinese
 from dual_mem.registry import ComponentFactory
 from dual_mem.system2.clustering import cluster_facts
-from dual_mem.system2.tool_executor import ToolExecutor
+from dual_mem.system2.s2_tools import SYSTEM2_TOOL_DEFINITIONS, System2ToolExecutor
 from dual_mem.types import Layer, MemoryStatus
 
-SYSTEM2_OPS_PROMPT_ZH = """你是一个认知加工 Agent，从用户的事实聚类中演化高层认知结构（L6 Schema / L7 Intention），并以一组操作（ops）的形式输出。
+logger = logging.getLogger("dual_mem.system2.agent")
 
-## L6 Schema 是什么？
-Schema 捕获用户在**特定领域**内的**一个**行为模式，含三要素：
-- 场景（Circumstance）：该模式发生的领域/话题/场景，不要跨域泛化。
-- 模式（Pattern）：用户在该场景下的惯常行为或行动倾向。
-- 洞察（Insight）：底层心理驱动力或心智模型。
-内容用一句话组合三要素："当[场景]时，用户[模式]——反映了[洞察]。"
-规则：一个 Schema 只含一个模式（原子化）；已有 Schema 覆盖该模式 → 用 add_evidence 追加证据，不要重建。
-✅ "当做饭时，用户严格按菜谱步骤精确称量——反映了用外部结构管理不确定性的需要。"
-❌ "用户对很多事充满热情且追求品质。"（无场景、太泛）
-
-## L7 Intention 是什么？
-用户表达的**具体未来事件或计划**，必须有明确行动 + 时间边界（明确或隐含）。
-✅ "用户正在准备一场工作面试。"
-❌ "用户想成为更好的人。"（无具体行动）
-
-## 输出格式
-只输出一个 JSON 对象，键 `ops` 是操作数组，不要任何解释或代码块外文字。每个 op 是以下四类之一：
-{{"ops": [
-  {{"op": "create_schema", "content": "当...时，用户...——反映...", "tags": ["..."], "evidence": ["fact_id", ...]}},
-  {{"op": "create_intention", "content": "...", "tags": ["..."], "evidence": ["fact_id", ...]}},
-  {{"op": "add_evidence", "schema_id": "已有schema_id", "evidence": ["fact_id", ...]}},
-  {{"op": "add_edge", "from_id": "...", "to_id": "...", "rel": "RELATED_TO"}}
-]}}
-打标签时优先复用已有标签列表中的标签。证据 fact_id 必须来自聚类中给出的 id。
-若数据不足以得出可靠结论，输出 {{"ops": []}}。"""
-
-SYSTEM2_OPS_PROMPT_EN = """You are a cognitive processing Agent. Evolve higher-order cognitive structures (L6 Schema / L7 Intention) from the user's fact clusters, and output them as a list of operations (ops).
-
-## What is an L6 Schema?
-A Schema captures ONE behavioral pattern in a SPECIFIC domain, with three components:
-- Circumstance: the domain/topic where the pattern is observed; do NOT generalize across domains.
-- Pattern: the user's habitual behavior or action tendency in this circumstance.
-- Insight: the underlying psychological driver or mental model.
-Content is one sentence combining all three: "When [circumstance], the user [pattern] — reflecting [insight]."
-Rules: one pattern per Schema (atomic); if an existing Schema already covers the pattern, use add_evidence instead of recreating.
-GOOD: "When cooking, the user strictly follows recipe steps and precisely measures ingredients — reflecting a need for external structure to manage uncertainty."
-BAD: "The user is passionate about many things and values quality." (no circumstance, too vague)
-
-## What is an L7 Intention?
-A CONCRETE future event or plan the user expressed, requiring a clear action + temporal boundedness (explicit or implicit).
-GOOD: "The user is preparing for a job interview."
-BAD: "The user wants to be a better person." (no concrete action)
-
-## Output format
-Output ONLY a JSON object whose key `ops` is the operations array, no prose and nothing outside it. Each op is one of four kinds:
-{{"ops": [
-  {{"op": "create_schema", "content": "When ..., the user ... — reflecting ...", "tags": ["..."], "evidence": ["fact_id", ...]}},
-  {{"op": "create_intention", "content": "...", "tags": ["..."], "evidence": ["fact_id", ...]}},
-  {{"op": "add_evidence", "schema_id": "existing_schema_id", "evidence": ["fact_id", ...]}},
-  {{"op": "add_edge", "from_id": "...", "to_id": "...", "rel": "RELATED_TO"}}
-]}}
-Prefer reusing tags from the existing tags list. Evidence fact_ids MUST come from the cluster ids provided.
-If the data is insufficient for reliable conclusions, output {{"ops": []}}."""
 
 _S2_LAYERS = [Layer.L2_FACT, Layer.L4_IDENTITY]
 _GRAPH_TOPK = 8
 
 
-def prepare_materials(
+async def prepare_materials(
     *, factory: ComponentFactory, app_id: str, user_id: str, agent_id: str
 ) -> dict:
     """Cluster fresh facts and gather existing schemas/tags as System2 input materials."""
@@ -156,30 +107,33 @@ def _build_user_message(materials: dict) -> str:
         parts.append("\n## 已有标签 / Existing tags")
         parts.append("  " + ", ".join(tags))
 
-    parts.append("\n请输出 ops JSON 对象 / Output the ops JSON object.")
+    parts.append(
+        "\n请使用提供的工具完成认知加工：先 search_graph 检查已有 schema、必要时调"
+        " create_schema/create_intention/add_evidence/add_edge。完成后直接停止调用工具。"
+        " / Use the tools to do the cognitive work: search existing schemas first,"
+        " then create new ones / link evidence as needed. Stop calling tools when finished."
+    )
     return "\n".join(parts)
 
 
-def _extract_ops(raw) -> list:
-    """Normalize the LLM reply (JSON-mode object or bare array) into an ops list."""
-    if isinstance(raw, dict):
-        ops = raw.get("ops")
-        return ops if isinstance(ops, list) else []
-    return raw if isinstance(raw, list) else []
-
-
 class System2Agent:
-    """Distills fresh facts into L6 schemas / L7 intentions via clustering and one LLM pass."""
+    """ReAct-style cognitive agent: drives an OpenAI function-calling loop over the 8 tools."""
 
     def __init__(self, *, factory: ComponentFactory):
         self.factory = factory
 
-    def run(self, *, app_id: str, user_id: str, agent_id: str = "") -> dict:
-        """Process one app/user: prepare materials, generate ops, execute them, return stats."""
-        materials = prepare_materials(
+    async def run(
+        self, *, app_id: str, user_id: str, agent_id: str = ""
+    ) -> dict:
+        """Process one app/user: prepare materials, run ReAct tool loop, return stats."""
+        materials = await prepare_materials(
             factory=self.factory, app_id=app_id, user_id=user_id, agent_id=agent_id
         )
         if not materials["clusters"]:
+            logger.info(
+                "s2_react user=%s no clusters (fresh=%d total=%d), skip",
+                user_id, materials["stats"]["fresh_facts"], materials["stats"]["total_facts"],
+            )
             return {
                 "created_schemas": 0,
                 "created_intentions": 0,
@@ -187,58 +141,128 @@ class System2Agent:
                 "edges_added": 0,
             }
 
+        logger.info(
+            "s2_react user=%s clusters=%d existing_schemas=%d fresh=%d",
+            user_id,
+            materials["stats"]["clusters_found"],
+            materials["stats"]["existing_schemas"],
+            materials["stats"]["fresh_facts"],
+        )
+
         cluster_text = " ".join(
             f["content"]
             for cluster in materials["clusters"]
             for f in cluster["facts"]
         )
-        system = SYSTEM2_OPS_PROMPT_ZH if is_chinese(cluster_text) else SYSTEM2_OPS_PROMPT_EN
-        base_user = _build_user_message(materials)
+        system = prompts.SYSTEM2_OPS_ZH if is_chinese(cluster_text) else prompts.SYSTEM2_OPS_EN
+        user = _build_user_message(materials)
 
-        if self.factory.settings.system2_agent_loop:
-            stats = self._run_loop(
-                system=system, base_user=base_user, app_id=app_id, user_id=user_id, agent_id=agent_id
-            )
-        else:
-            raw = self.factory.llm.chat_json(system=system, user=base_user)
-            stats = ToolExecutor(factory=self.factory).apply(
-                ops=_extract_ops(raw), app_id=app_id, user_id=user_id, agent_id=agent_id
-            )
-
+        executor = System2ToolExecutor(
+            factory=self.factory, app_id=app_id, user_id=user_id, agent_id=agent_id
+        )
+        await self._run_react_loop(system=system, user=user, executor=executor)
         self._mark_clustered_processed(materials["clusters"])
-        return stats
+        logger.info(
+            "s2_react done user=%s schemas=%d intentions=%d evidence=%d edges=%d",
+            user_id,
+            executor.stats["created_schemas"],
+            executor.stats["created_intentions"],
+            executor.stats["evidence_added"],
+            executor.stats["edges_added"],
+        )
+        return dict(executor.stats)
 
-    def _run_loop(
-        self, *, system: str, base_user: str, app_id: str, user_id: str, agent_id: str
-    ) -> dict:
-        """Multi-turn ops emission: each round may add more ops or stop, feeding prior ops back."""
-        executor = ToolExecutor(factory=self.factory)
-        total = {
-            "created_schemas": 0,
-            "created_intentions": 0,
-            "evidence_added": 0,
-            "edges_added": 0,
-        }
-        history_ops: list = []
-        for _ in range(max(1, self.factory.settings.system2_loop_max_iters)):
-            user = base_user
-            if history_ops:
-                user = (
-                    base_user
-                    + "\n\n## 本轮已生成的 ops（避免重复，可补充新结构或停止）\n"
-                    + json.dumps(history_ops, ensure_ascii=False)
+    async def _run_react_loop(
+        self, *, system: str, user: str, executor: System2ToolExecutor
+    ) -> None:
+        """Drive the OpenAI function-calling loop until the LLM emits no more tool_calls."""
+        llm = self.factory.llm
+        assert llm is not None, "System2Agent requires factory.llm"
+
+        messages: list[dict] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        max_iters = max(1, self.factory.settings.system2_max_iters)
+        request_id = f"s2::{executor.app_id}::{executor.user_id}"
+        iters_run = 0
+        for turn_idx in range(max_iters):
+            iters_run = turn_idx + 1
+            try:
+                turn = await llm.chat_with_tools(
+                    messages=messages,
+                    tools=SYSTEM2_TOOL_DEFINITIONS,
+                    tool_choice="auto",
                 )
-            ops = _extract_ops(self.factory.llm.chat_json(system=system, user=user))
-            if not ops:
+            except Exception as exc:
+                logger.warning("[s2-react] llm call failed: %s", exc)
+                self._log_trajectory(request_id, executor, iters_run, error=str(exc))
+                return
+
+            tool_calls = turn.get("tool_calls") or []
+            assistant_msg: dict = {"role": "assistant", "content": turn.get("content") or ""}
+            if tool_calls:
+                assistant_msg["tool_calls"] = tool_calls
+            messages.append(assistant_msg)
+
+            try:
+                self.factory.cache.log_pipeline(
+                    request_id=request_id,
+                    stage="S2_AGENT_TURN",
+                    payload={
+                        "turn": turn_idx,
+                        "tool_call_count": len(tool_calls),
+                        "tools": [(tc.get("function") or {}).get("name", "") for tc in tool_calls],
+                    },
+                )
+            except Exception:
+                pass
+
+            if not tool_calls:
                 break
-            stats = executor.apply(ops=ops, app_id=app_id, user_id=user_id, agent_id=agent_id)
-            for key in total:
-                total[key] += stats[key]
-            history_ops.extend(ops)
-        return total
+
+            for tc in tool_calls:
+                fn = tc.get("function") or {}
+                name = fn.get("name") or ""
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                    if not isinstance(args, dict):
+                        args = {}
+                except json.JSONDecodeError:
+                    args = {}
+                result_str = await executor.execute(name=name, arguments=args)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.get("id") or f"call_{name}",
+                        "content": result_str,
+                    }
+                )
+
+        self._log_trajectory(request_id, executor, iters_run)
+
+    def _log_trajectory(
+        self, request_id: str, executor: System2ToolExecutor, iters: int, *, error: str | None = None
+    ) -> None:
+        """Persist the full ReAct tool_call_log + final stats for replay/debug."""
+        payload: dict = {
+            "iters": iters,
+            "stats": dict(executor.stats),
+            "tool_call_log": list(executor.tool_call_log),
+        }
+        if error is not None:
+            payload["error"] = error
+        try:
+            self.factory.cache.log_pipeline(
+                request_id=request_id,
+                stage="S2_AGENT_TRAJECTORY",
+                payload=payload,
+            )
+        except Exception:
+            pass
 
     def _mark_clustered_processed(self, clusters: list[dict]) -> None:
-        """Mark all clustered facts as processed so unused ones are not re-consumed next digest."""
+        """Mark clustered facts as processed so unused ones are not re-consumed next digest."""
         for cluster in clusters:
             for fact in cluster["facts"]:
                 node = self.factory.vector.get(fact["node_id"])

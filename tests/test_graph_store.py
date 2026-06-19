@@ -15,7 +15,7 @@ def _gnode(fake_embed, nid, content, tags=None):
         content=content,
         app_id="app",
         user_id="u",
-        embedding=fake_embed.embed(content),
+        embedding=fake_embed.embed_sync(content),
         tags=tags or [],
     )
 
@@ -28,7 +28,7 @@ def test_add_and_query_by_embedding(gstore, fake_embed):
         layer="L6_SCHEMA",
         user_id="u",
         app_ids=["app"],
-        embedding=fake_embed.embed("用户偏好简洁回答"),
+        embedding=fake_embed.embed_sync("用户偏好简洁回答"),
         top_k=5,
     )
     assert res[0].node_id == "s1"

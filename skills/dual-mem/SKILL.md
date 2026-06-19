@@ -44,7 +44,7 @@ dual-mem search "用户做什么工作" --app-id myapp --user-id user_001 --limi
 
 其它：`dual-mem list --app-id myapp --user-id user_001`、
 `dual-mem get <memory_id>`、`dual-mem delete <memory_id>`、
-`dual-mem digest`（ultra 模式触发后台沉淀）。
+`dual-mem digest`（dual 模式触发 System2 沉淀）。
 启动服务：`dual-mem serve --host 0.0.0.0 --port 8000`（REST）、
 `dual-mem-mcp`（MCP stdio，供 Cursor/Claude Desktop 经 uvx 拉起）、
 `dual-mem-mcp --transport streamable-http --port 8765`（MCP over HTTP，暴露 `/mcp`）。
@@ -60,7 +60,7 @@ dual-mem search "用户做什么工作" --app-id myapp --user-id user_001 --limi
 search 返回 `memories` 对象，固定三个 key，按重要性顺序使用：
 
 - **profile**：稳定的用户画像 / 身份 / 长期模式（最优先呈现）。
-- **proactive**：推断出的用户意图（仅 ultra 模式非空，pro/lite 为空）。
+- **proactive**：推断出的用户意图（仅 dual 模式且 `intention_limit>0` 时非空）。
 - **normal**：普通事实与知识记忆。
 
 渲染进上下文时按 profile → proactive → normal 顺序拼装。
@@ -72,9 +72,7 @@ search 返回 `memories` 对象，固定三个 key，按重要性顺序使用：
 据此可以理解信息的变化轨迹（如"用户从 Java 转向 Python"）。展示时注意去重：
 要么只渲染演化链，要么跳过外层 content 从链里组装，避免最新版本重复出现两次。
 
-## lite / pro / ultra 区别
+## system1 / dual 区别
 
-- **lite**：只做写入与语义检索，不调用 LLM，零成本、最快。proactive 路始终为空。
-- **pro**：写入路径中由 LLM 同步完成抽取 / 整理 / 去重，无后台 worker。
-- **ultra**：完整 System1 + System2。写入同步返回后，System2 在后台异步做反思、
-  抽象与演化链构建；可调 `digest` 主动触发沉淀。proactive（意图）路在此模式下才有内容。
+- **system1**（默认）：写路径 1 次 LLM extract（+ 可选 summarize）；默认 fast-write + 异步 reconcile 合并演化链。
+- **dual**：system1 + System2 异步蒸馏（L6 Schema / L7 Intention）+ 图库；可调 `digest` 主动触发沉淀。proactive 路在 `intention_limit>0` 时有 L7 意图。

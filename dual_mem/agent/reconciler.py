@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: Reconciler that recalls related existing memories, merges supersedes chains
-and asks the LLM to emit ADD/DELETE ops integrating new memories losslessly.
+@description: Async reconciler that recalls related existing memories, merges supersedes
+chains and asks the LLM to emit ADD/DELETE ops integrating new memories losslessly. Used
+both inside the synchronous write path (reconcile_sync=True) and from the System2 worker.
 """
 import json
+import logging
 from dataclasses import dataclass, field
 
 from dual_mem.agent import prompts
@@ -14,10 +16,17 @@ from dual_mem.providers.llm import LLMClient
 from dual_mem.storage.vector_store import VectorStore
 from dual_mem.types import Layer, MemoryStatus
 
+logger = logging.getLogger("dual_mem.agent.reconcile")
+
 
 @dataclass
 class ReconcileOp:
-    """A single reconciliation operation (ADD or DELETE) parsed from the LLM output."""
+    """A single reconciliation operation parsed from the LLM output.
+
+    update_type classifies the relationship between the new memory and existing memories
+    (OVERRIDE / SUPPLEMENT / TEMPORAL / NEGATE / CONFLICT), so downstream apply logic can
+    persist temporal_scope on TEMPORAL ops and tag NEGATE ops in node.custom for the reader.
+    """
 
     op: str = "ADD"
     content: str | None = None
@@ -27,6 +36,9 @@ class ReconcileOp:
     tags: list[str] = field(default_factory=list)
     memory_id: str | None = None
     reason: str = ""
+    update_type: str = ""           # OVERRIDE | SUPPLEMENT | TEMPORAL | NEGATE | CONFLICT | ""
+    temporal_scope: str | None = None
+    negation: bool = False
 
 
 class Reconciler:
@@ -49,7 +61,7 @@ class Reconciler:
         self.vector = vector
         self.enable_search_query = enable_search_query
 
-    def reconcile(
+    async def reconcile(
         self,
         *,
         new_memories: list[str],
@@ -58,13 +70,21 @@ class Reconciler:
         user_id: str,
         agent_id: str,
         current_time: str,
+        exclude_ids: list[str] | None = None,
     ) -> list[ReconcileOp]:
-        """Recall related memories and return LLM-proposed ADD/DELETE ops for the new batch."""
+        """Recall related memories and return LLM-proposed ADD/DELETE ops for the new batch.
+
+        ``exclude_ids`` are dropped from the candidate set — used by the async reconcile
+        worker to keep the just-written fast-write originals (which are still ACTIVE) from
+        coming back as near-1.0 self-matches and polluting the LLM's "existing" list.
+        """
         if not new_memories:
             return []
 
+        excluded = set(exclude_ids or ())
+
         search_queries = (
-            self._gen_search_queries(new_memories) if self.enable_search_query else []
+            await self._gen_search_queries(new_memories) if self.enable_search_query else []
         )
 
         where = build_filter(
@@ -78,11 +98,13 @@ class Reconciler:
         candidate_map: dict = {}
         candidate_scores: dict = {}
         for text in [*new_memories, *search_queries]:
-            embedding = self.embed.embed(text)
+            embedding = await self.embed.embed(text)
             for node in self.vector.query(embedding=embedding, where=where, top_k=self.SEARCH_TOPK):
                 if node.score < self.SEARCH_THRESHOLD:
                     continue
                 nid = node.node_id
+                if nid in excluded:
+                    continue
                 if nid not in candidate_map:
                     candidate_map[nid] = node
                     candidate_scores[nid] = node.score
@@ -158,15 +180,22 @@ class Reconciler:
 
         for _ in range(3):
             try:
-                data = self.llm.chat_json(system=system, user=new_mem_lines)
-            except json.JSONDecodeError:
+                data = await self.llm.chat_json(system=system, user=new_mem_lines)
+            except json.JSONDecodeError as exc:
+                logger.warning("reconcile JSON parse failed, retrying: %s", exc)
                 continue
             ops = self._parse_ops(data)
             if ops or data in ([], {}):
+                logger.debug(
+                    "reconcile candidates=%d ops=%d supersedes=%d",
+                    len(candidate_map), len(ops),
+                    sum(1 for op in ops if op.op == "ADD" and op.supersedes),
+                )
                 return ops
+        logger.warning("reconcile produced no parseable ops after 3 retries")
         return []
 
-    def _gen_search_queries(self, new_memories: list[str]) -> list[str]:
+    async def _gen_search_queries(self, new_memories: list[str]) -> list[str]:
         """Ask the LLM for extra recall queries derived from the new memories."""
         mem_lines = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(new_memories))
         joined = "\n".join(new_memories)
@@ -174,7 +203,7 @@ class Reconciler:
             new_memories=mem_lines
         )
         try:
-            queries = self.llm.chat_json(system=system, user=mem_lines, json_object=False)
+            queries = await self.llm.chat_json(system=system, user=mem_lines, json_object=False)
         except json.JSONDecodeError:
             return []
         if not isinstance(queries, list):
@@ -250,6 +279,12 @@ class Reconciler:
                 if not isinstance(raw_tags, list):
                     raw_tags = [raw_tags]
                 tags = [str(t).strip().lower() for t in raw_tags if t and str(t).strip()][:3]
+                update_type = str(op_dict.get("update_type") or "").strip().upper()
+                if update_type not in ("OVERRIDE", "SUPPLEMENT", "TEMPORAL", "NEGATE", "CONFLICT", ""):
+                    update_type = ""
+                temporal_scope = op_dict.get("temporal_scope")
+                if temporal_scope is not None and not isinstance(temporal_scope, str):
+                    temporal_scope = str(temporal_scope)
                 parsed.append(
                     ReconcileOp(
                         op="ADD",
@@ -259,6 +294,9 @@ class Reconciler:
                         supersede_reason=str(op_dict.get("supersede_reason") or "").strip(),
                         tags=tags,
                         reason=op_reason,
+                        update_type=update_type,
+                        temporal_scope=temporal_scope or None,
+                        negation=update_type == "NEGATE",
                     )
                 )
             elif op_type == "DELETE":

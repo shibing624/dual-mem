@@ -7,9 +7,9 @@ from dual_mem.config import Settings
 
 
 @pytest.fixture
-def app_client(tmp_storage, fake_embed):
-    settings = Settings(storage_dir=tmp_storage, mode="lite", auth_disabled=True)
-    client = MemoryClient(settings=settings, embed=fake_embed)
+def app_client(tmp_storage, fake_embed, fake_llm):
+    settings = Settings(storage_dir=tmp_storage, mode="system1", auth_disabled=True)
+    client = MemoryClient(settings=settings, embed=fake_embed, llm=fake_llm)
     app = create_app(client=client, settings=settings)
     return TestClient(app)
 
@@ -94,19 +94,19 @@ def test_health_ping_info(app_client):
 
     info = app_client.get("/info")
     assert info.status_code == 200
-    assert info.json()["mode"] == "lite"
+    assert info.json()["mode"] == "system1"
     assert "sdk_version" in info.json()
 
 
 @pytest.fixture
-def auth_client(tmp_storage, fake_embed):
+def auth_client(tmp_storage, fake_embed, fake_llm):
     settings = Settings(
         storage_dir=tmp_storage,
-        mode="lite",
+        mode="system1",
         auth_disabled=False,
         app_whitelist=["allowed"],
     )
-    client = MemoryClient(settings=settings, embed=fake_embed)
+    client = MemoryClient(settings=settings, embed=fake_embed, llm=fake_llm)
     app = create_app(client=client, settings=settings)
     return TestClient(app)
 

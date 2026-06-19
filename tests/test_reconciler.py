@@ -1,6 +1,6 @@
 import pytest
 
-from dual_mem.agent.reconciler import Reconciler, ReconcileOp
+from dual_mem.agent.reconciler import Reconciler
 from dual_mem.storage.vector_store import ChromaVectorStore
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
@@ -22,15 +22,15 @@ def _seed(store, fake_embed, content, layer=Layer.L4_IDENTITY):
         status=MemoryStatus.ACTIVE,
         is_latest=True,
     )
-    node.embedding = fake_embed.embed(content)
+    node.embedding = fake_embed.embed_sync(content)
     store.upsert([node])
     return node
 
 
-def test_no_candidates_all_add(store, fake_embed):
+async def test_no_candidates_all_add(store, fake_embed):
     llm = FakeLLMClient(responses={"search_query": []})
     rec = Reconciler(llm=llm, embed=fake_embed, vector=store)
-    ops = rec.reconcile(
+    ops = await rec.reconcile(
         new_memories=["用户喜欢喝咖啡"],
         new_memories_meta=[{"content": "用户喜欢喝咖啡", "layer": "L4_IDENTITY", "tags": ["drink"]}],
         app_id="app",
@@ -45,7 +45,7 @@ def test_no_candidates_all_add(store, fake_embed):
     assert ops[0].tags == ["drink"]
 
 
-def test_supersede_group(store, fake_embed):
+async def test_supersede_group(store, fake_embed):
     seed = _seed(store, fake_embed, "用户喜欢喝咖啡")
     reconcile_response = [
         {
@@ -65,7 +65,7 @@ def test_supersede_group(store, fake_embed):
     llm = FakeLLMClient(responses={"search_query": [], "reconcile": reconcile_response})
     rec = Reconciler(llm=llm, embed=fake_embed, vector=store)
 
-    ops = rec.reconcile(
+    ops = await rec.reconcile(
         new_memories=["用户喜欢喝咖啡"],
         new_memories_meta=[{"content": "用户喜欢喝咖啡", "layer": "L4_IDENTITY", "tags": ["drink"]}],
         app_id="app",

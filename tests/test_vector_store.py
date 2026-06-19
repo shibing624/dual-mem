@@ -7,7 +7,7 @@ from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
 def _node(fake_embed, content, layer=Layer.L2_FACT, app_id="app", user_id="u"):
     node = MemoryNode(content=content, layer=layer, app_id=app_id, user_id=user_id)
-    node.embedding = fake_embed.embed(content)
+    node.embedding = fake_embed.embed_sync(content)
     return node
 
 
@@ -22,7 +22,7 @@ def test_upsert_and_query_hit(store, fake_embed):
     store.upsert([n1, n2])
 
     where = build_filter(app_ids=["app"], user_id="u", statuses=[MemoryStatus.ACTIVE])
-    results = store.query(embedding=fake_embed.embed("用户喜欢喝咖啡"), where=where, top_k=5)
+    results = store.query(embedding=fake_embed.embed_sync("用户喜欢喝咖啡"), where=where, top_k=5)
     assert results[0].node_id == n1.node_id
     assert results[0].score > 0.99
 

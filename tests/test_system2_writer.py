@@ -12,17 +12,17 @@ def _pending_count(factory) -> int:
     return row[0]
 
 
-def _ultra_factory(tmp_storage, fake_embed):
+def _dual_factory(tmp_storage, fake_embed):
     return ComponentFactory(
-        settings=Settings(mode="ultra", storage_dir=tmp_storage),
+        settings=Settings(mode="dual", storage_dir=tmp_storage),
         embed=fake_embed,
         llm=FakeLLMClient(responses={"json": []}),
     )
 
 
-async def test_ultra_write_enqueues_then_pending_processes(tmp_storage, fake_embed):
-    factory = _ultra_factory(tmp_storage, fake_embed)
-    writer = System2Writer(factory=factory, agent_mode="full")
+async def test_dual_write_enqueues_then_pending_processes(tmp_storage, fake_embed):
+    factory = _dual_factory(tmp_storage, fake_embed)
+    writer = System2Writer(factory=factory)
 
     await writer.write(
         content="用户喜欢喝咖啡",
@@ -34,12 +34,12 @@ async def test_ultra_write_enqueues_then_pending_processes(tmp_storage, fake_emb
     )
     assert _pending_count(factory) == 1
 
-    processed = await writer.run_system2_pending()
+    processed = await writer._digest_pending()
     assert processed == 1
     assert _pending_count(factory) == 0
 
 
-async def test_run_system2_pending_empty_queue(tmp_storage, fake_embed):
-    factory = _ultra_factory(tmp_storage, fake_embed)
-    writer = System2Writer(factory=factory, agent_mode="full")
-    assert await writer.run_system2_pending() == 0
+async def test__digest_pending_empty_queue(tmp_storage, fake_embed):
+    factory = _dual_factory(tmp_storage, fake_embed)
+    writer = System2Writer(factory=factory)
+    assert await writer._digest_pending() == 0

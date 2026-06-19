@@ -2,7 +2,7 @@
 """
 @author:XuMing(xuming624@qq.com)
 @description: Graph store abstraction and a Kuzu-backed implementation modeling memory
-nodes, tag topics, evidence and cross-layer relations for ultra-mode reasoning.
+nodes, tag topics, evidence and cross-layer relations for dual-mode reasoning.
 """
 import json
 import math

@@ -3,11 +3,9 @@
 @author:XuMing(xuming624@qq.com)
 @description: MCP server exposing dual-mem memory tools (add/search/get/list/delete) over
 FastMCP, backed by a MemoryClient. Supports stdio and Streamable HTTP transports and ships a
-console entry point (dual-mem-mcp) for uvx.
+console entry point (dual-mem-mcp) for uvx. SDK dataclasses are .to_dict()'d at this boundary.
 """
 import argparse
-
-from mcp.server.fastmcp import FastMCP
 
 from dual_mem.client import MemoryClient
 from dual_mem.config import Settings
@@ -17,7 +15,7 @@ DEFAULT_PORT = 8765
 
 _GROUP_DOC = (
     "搜索结果按三路分组返回：profile 是稳定的用户画像/身份/模式记忆；"
-    "proactive 是推断出的用户意图（仅 ultra 模式非空）；normal 是普通事实与知识记忆。"
+    "proactive 是推断出的用户意图（仅 dual 模式非空）；normal 是普通事实与知识记忆。"
     "若某条记忆经历过演化更新，会带 evolution_chain 字段（按 最新→最旧 排序），"
     "代表同一记忆的多个历史版本。"
 )
@@ -25,11 +23,18 @@ _GROUP_DOC = (
 
 def build_mcp(
     *, client: MemoryClient | None = None, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT
-) -> FastMCP:
+):
     """Build a FastMCP server registering the dual-mem memory tools.
 
     host/port only take effect for the Streamable HTTP transport (path defaults to /mcp).
     """
+    try:
+        from mcp.server.fastmcp import FastMCP
+    except ImportError as exc:
+        raise ImportError(
+            "MCP support requires the optional dependency. Install with: pip install dual-mem[mcp]"
+        ) from exc
+
     if client is None:
         client = MemoryClient(settings=Settings())
 
@@ -48,13 +53,14 @@ def build_mcp(
         agent_id: str = "",
         session_id: str = "",
     ) -> dict:
-        return await client.add(
+        result = await client.add(
             content=content,
             app_id=app_id,
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
         )
+        return result.to_dict()
 
     @mcp.tool(
         description=(
@@ -71,7 +77,7 @@ def build_mcp(
         min_score: float = 0.4,
         intention_limit: int = 0,
     ) -> dict:
-        return await client.search(
+        result = await client.search(
             query=query,
             app_ids=app_ids,
             user_id=user_id,
@@ -80,10 +86,12 @@ def build_mcp(
             min_score=min_score,
             intention_limit=intention_limit,
         )
+        return result.to_dict()
 
     @mcp.tool(description="按 memory_id 获取单条记忆，不存在返回 null。")
     async def memory_get(memory_id: str) -> dict | None:
-        return await client.get(memory_id)
+        item = await client.get(memory_id)
+        return item.to_dict() if item is not None else None
 
     @mcp.tool(description="列出某 app_id+user_id（可选 agent_id）下的记忆。")
     async def memory_list(
@@ -92,13 +100,15 @@ def build_mcp(
         agent_id: str = "",
         limit: int = 100,
     ) -> list[dict]:
-        return await client.list(
+        items = await client.list(
             app_id=app_id, user_id=user_id, agent_id=agent_id, limit=limit
         )
+        return [item.to_dict() for item in items]
 
     @mcp.tool(description="按 memory_id 删除单条记忆（幂等）。")
     async def memory_delete(memory_id: str) -> dict:
-        return await client.delete(memory_id)
+        result = await client.delete(memory_id)
+        return result.to_dict()
 
     return mcp
 
@@ -107,8 +117,10 @@ def run_server(
     *, transport: str = "stdio", host: str = DEFAULT_HOST, port: int = DEFAULT_PORT
 ) -> None:
     """Run the MCP server with the given transport (stdio or streamable-http)."""
+    from typing import Literal, cast
+
     mcp = build_mcp(host=host, port=port)
-    mcp.run(transport=transport)
+    mcp.run(transport=cast(Literal["stdio", "sse", "streamable-http"], transport))
 
 
 def main() -> None:

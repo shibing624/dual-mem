@@ -3,13 +3,17 @@
 # 也可用 DUAL_MEM_CONFIG_FILE 环境变量指定其它路径。
 # 字段同名环境变量（DUAL_MEM_ 前缀）可临时覆盖本文件。
 
-# 运行档位：lite | pro | ultra
-mode: pro
+# 运行档位：
+#   system1 —— System1 同步认知：Gate → LLM 抽取 → 直写 L0–L4（默认档）。
+#   dual    —— System1 + System2 异步蒸馏/图谱（L6 Schema / L7 Intention，名字即"双系统"）。
+# 注意：dual-mem 同时需要 LLM 与 Embedding 两套 API key；缺一者 MemoryClient(...)
+#       构造时会立即抛 MissingCredentialsError（fail-fast，不会静默降级）。
+mode: system1
 
 # 向量/图/KV 数据落盘目录
 storage_dir: ./.dual_mem_data
 
-# LLM（抽取 / 整理 / System2）
+# LLM（抽取 / 整理 / System2，必填）
 llm_base_url: https://api.openai.com/v1
 llm_api_key: sk-your-llm-key
 llm_model: gpt-4o-mini
@@ -17,28 +21,62 @@ llm_model: gpt-4o-mini
 # 仅当所用 endpoint 不支持 response_format 时才设为 false。
 llm_json_mode: true
 
-# Embedding
+# Embedding（OpenAI 兼容协议；embed_model 填服务端模型名，无内置白名单，必填）
 embed_base_url: https://api.openai.com/v1
 embed_api_key: sk-your-embed-key
 embed_model: text-embedding-3-small
 embed_dim: 1536
+# qwen3-embedding / *-for-online* 不支持 dimensions 参数：SDK 会自动省略，embed_dim 改为模型原生维度（如 4096）
 
 # 鉴权（REST）
 auth_disabled: true
 app_whitelist:
   - default
 
-# System2 触发：per_write | manual | scheduled
+# ───── System2 触发与节奏（仅 dual 档生效）─────
+# per_write：每次 write 后 fire-and-forget 起后台任务跑该 user 的 reconcile + S2 agent
+# manual：仅入队，等用户调用 client.digest()
+# scheduled：启动后台循环周期性批量消费队列
 system2_trigger_mode: per_write
+system2_schedule_interval_sec: 300
 
-# System2 聚类相似度阈值（cosine）。默认适配 text-embedding-3-small；
-# 换用相似度更集中的中文 embedding（bge/Qwen 等）可调高到 0.55 / 0.75。
+# 演化链同步落账：默认 false，演化由 System2 异步合并（最终一致，写延迟更低）；
+# true 时 reconcile 在写入路径同步执行，写完立刻可查到 SUPERSEDE。
+reconcile_sync: false
+
+# ───── Attentional Gate（写侧价值过滤）─────
+# LLM 三维度打分（novelty / relevance / arousal）；LLM 失败时降级启发式。
+# 阈值 0.3 较宽松；gate_enabled=false 可跳过门控。
+gate_enabled: true
+gate_threshold: 0.3
+
+# ───── System2 聚类阈值（cosine）─────
+# 默认值适配出厂的 text-embedding-3-small（其同主题事实 cosine 普遍偏低）；
+# 若改用相似度更集中的中文 embedding（如 bge/Qwen），可调高到 0.55/0.75。
 cluster_stage1_sim: 0.42
 cluster_stage2_sim: 0.55
 
-# Reconciler 额外的 LLM 召回查询改写：默认关闭，语义召回已够用，每次写入省一次 LLM。
+# ───── Reconciler / System2 Agent ─────
+# Reconciler 额外的 LLM 召回查询改写：默认关闭，省一次 LLM。
 reconcile_search_query: false
 
-# System2 用多轮 ops 循环（更强的取证/反思，但更慢更贵）；默认单轮即可。
-system2_agent_loop: false
-system2_loop_max_iters: 3
+# System2 ReAct loop iteration cap (the agent stops earlier when the LLM emits no more
+# tool_calls). The legacy single-shot ops JSON path has been removed.
+system2_max_iters: 10
+
+# ───── Reader pipeline ─────
+# hybrid (default) = QueryUnderstanding -> AnchorSearch (5 paths) -> GraphExpander -> Fusion W(d)
+# legacy = original three-route + bm25 RRF rerank baseline
+reader_mode: hybrid
+
+# ───── Embedding 写路径攒批 ─────
+# 高并发写入时，embed_queued 把多个并发请求攒成一次 batch（窗口期到或攒满即发）。
+embed_queue_batch_size: 32
+embed_queue_window_ms: 200.0
+
+# ───── Cross-Domain Sweeper（行为升维）─────
+# 默认关闭：开启后 digest 末尾会跑一次跨域归纳（行为抽象 + 矩阵碰撞 + UnionFind +
+# LLM 升维出 core schema），多 1~N 次 LLM 调用，仅深度画像场景值得开。
+cross_domain_enable: false
+cross_domain_min_basics: 5
+cross_domain_threshold: 0.7

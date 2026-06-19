@@ -4,10 +4,14 @@
 @description: L0_BASIC_INFO profile updater: merges stable structured user attributes into an
 evolution chain, storing only the KV diff and superseding the old head.
 """
+import logging
+
 from dual_mem.isolation import build_filter
 from dual_mem.providers.embedding import EmbedService
 from dual_mem.storage.vector_store import VectorStore
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
+
+logger = logging.getLogger("dual_mem.agent.basic_profile")
 
 BASIC_FIELDS = ["name", "age", "location", "occupation", "employer"]
 
@@ -54,7 +58,7 @@ class BasicProfileTool:
         self.vector = vector
         self.embed = embed
 
-    def apply(
+    async def apply(
         self,
         *,
         arguments: dict,
@@ -109,15 +113,20 @@ class BasicProfileTool:
             supersedes=[head.node_id] if head else [],
             custom={"basic_info_kv": diff_kv},
         )
-        new_node.embedding = self.embed.embed(content)
+        new_node.embedding = await self.embed.embed(content)
         self.vector.upsert([new_node])
 
         if head:
             old = self.vector.get(head.node_id)
-            old.is_latest = False
-            if new_node.node_id not in old.superseded_by:
-                old.superseded_by.append(new_node.node_id)
-            old.status = MemoryStatus.SUPERSEDED
-            self.vector.upsert([old])
+            if old is not None:
+                old.is_latest = False
+                if new_node.node_id not in old.superseded_by:
+                    old.superseded_by.append(new_node.node_id)
+                old.status = MemoryStatus.SUPERSEDED
+                self.vector.upsert([old])
 
+        logger.debug(
+            "basic_profile applied user=%s diff_keys=%s superseded=%s",
+            user_id, list(diff_kv.keys()), bool(head),
+        )
         return new_node.node_id

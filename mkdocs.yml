@@ -1,0 +1,49 @@
+site_name: dual-mem
+site_description: Dual-system layered memory SDK for LLM applications and agents
+site_url: https://shibing624.github.io/dual-mem
+repo_url: https://github.com/shibing624/dual-mem
+repo_name: shibing624/dual-mem
+
+exclude_docs: |
+  hy-memory-test/**
+  superpowers/**
+
+theme:
+  name: readthedocs
+  locale: zh
+  highlightjs: true
+  hljs_languages:
+    - python
+    - bash
+    - yaml
+    - json
+  navigation_depth: 3
+  collapse_navigation: false
+  sticky_navigation: true
+  prev_next_buttons_location: bottom
+  include_homepage_in_sidebar: true
+
+nav:
+  - Home: index.md
+  - Introduction:
+      - Architecture: architecture.md
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+  - Integration:
+      - MCP: mcp_integration.md
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - pymdownx.details
+  - tables
+  - toc:
+      permalink: true
+
+plugins:
+  - search

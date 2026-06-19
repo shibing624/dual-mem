@@ -39,13 +39,13 @@ def test_build_filter_omits_none():
     assert "status" not in f
 
 
-def test_fixtures_available(fake_embed, fake_llm, tmp_storage):
-    v1 = fake_embed.embed("hello")
-    v2 = fake_embed.embed("hello")
+async def test_fixtures_available(fake_embed, fake_llm, tmp_storage):
+    v1 = fake_embed.embed_sync("hello")
+    v2 = fake_embed.embed_sync("hello")
     assert v1 == v2
     assert len(v1) == 64
-    batch = fake_embed.embed_batch(["a", "b"])
+    batch = await fake_embed.embed_batch(["a", "b"])
     assert len(batch) == 2
-    out = fake_llm.chat_json(system="s", user="u")
+    out = await fake_llm.chat_json(system="s", user="u")
     assert out == {"facts": [], "identity": []}
     assert isinstance(tmp_storage, str)

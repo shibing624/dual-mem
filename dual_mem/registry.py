@@ -2,7 +2,9 @@
 """
 @author:XuMing(xuming624@qq.com)
 @description: ComponentFactory for dependency wiring; lazily constructs and caches
-providers and stores (embed/vector/cache/history/graph/llm) from Settings.
+providers and stores (embed/vector/cache/history/graph/llm) from Settings. dual-mem requires
+both LLM and embedding API keys; the factory always materializes an LLM client and never
+operates in an embedding-only / no-LLM state.
 """
 from dual_mem.config import Settings
 from dual_mem.providers.embedding import EmbedService
@@ -32,6 +34,9 @@ class ComponentFactory:
         self._history: HistoryStore | None = None
         self._graph = _UNSET
         self._llm = llm
+        # True when the caller injected an LLM client (tests / custom backends). Such a
+        # client is trusted as-is and bypasses the api_key/probe checks done by MemoryClient.
+        self.has_user_llm = llm is not _UNSET and llm is not None
 
     @property
     def embed(self) -> EmbedService:
@@ -42,6 +47,8 @@ class ComponentFactory:
                 api_key=self.settings.embed_api_key,
                 model=self.settings.embed_model,
                 dim=self.settings.embed_dim,
+                queue_batch_size=self.settings.embed_queue_batch_size,
+                queue_batch_window_ms=self.settings.embed_queue_window_ms,
             )
         return self._embed
 
@@ -68,7 +75,7 @@ class ComponentFactory:
 
     @property
     def graph(self) -> KuzuGraphStore | None:
-        """The graph store when graph is enabled (ultra), else None."""
+        """The graph store when graph is enabled (``dual``), else None."""
         if self._graph is _UNSET:
             self._graph = (
                 KuzuGraphStore(self.settings.storage_dir)
@@ -78,17 +85,13 @@ class ComponentFactory:
         return self._graph
 
     @property
-    def llm(self) -> LLMClient | None:
-        """The LLM client for pro/ultra modes, else None (lite)."""
+    def llm(self) -> LLMClient:
+        """The LLM client. Always non-None; dual-mem requires an LLM API key."""
         if self._llm is _UNSET:
-            self._llm = (
-                LLMClient(
-                    base_url=self.settings.llm_base_url,
-                    api_key=self.settings.llm_api_key,
-                    model=self.settings.llm_model,
-                    json_mode=self.settings.llm_json_mode,
-                )
-                if self.settings.mode in ("pro", "ultra")
-                else None
+            self._llm = LLMClient(
+                base_url=self.settings.llm_base_url,
+                api_key=self.settings.llm_api_key,
+                model=self.settings.llm_model,
+                json_mode=self.settings.llm_json_mode,
             )
         return self._llm

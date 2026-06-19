@@ -70,6 +70,7 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+site/
 
 # PyBuilder
 .pybuilder/
@@ -228,3 +229,7 @@ tmp/
 # example & runtime data
 examples/.data/
 .dual_mem_data/
+AGENTS.md
+AGENTS.md.bak
+
+CLAUDE.md

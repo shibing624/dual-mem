@@ -4,11 +4,15 @@
 @description: Two-stage DBSCAN clustering of facts (no LLM) used to prepare System2
 materials: coarse clustering, refinement of large clusters and intra-cluster dedup.
 """
+import logging
+
 import numpy as np
 from sklearn.cluster import DBSCAN
 from sklearn.metrics.pairwise import cosine_distances
 
 from dual_mem.types import MemoryNode
+
+logger = logging.getLogger("dual_mem.system2.cluster")
 
 _MIN_FACTS = 3
 _STAGE2_MIN_SAMPLES = 2
@@ -70,6 +74,10 @@ def cluster_facts(
                 ],
             }
         )
+    logger.debug(
+        "cluster_facts pool=%d stage1_groups=%d clusters=%d",
+        len(pool), len(stage1), len(clusters),
+    )
     return clusters
 
 

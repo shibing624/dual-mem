@@ -1,5 +1,3 @@
-import pytest
-
 from dual_mem.agent.mem_agent import MemAgent
 from dual_mem.config import Settings
 from dual_mem.registry import ComponentFactory
@@ -8,15 +6,19 @@ from dual_mem.types import Layer, MemoryNode, MemoryStatus
 from conftest import FakeLLMClient
 
 EXTRACT_RESPONSE = {
+    "is_ephemeral": False,
+    "emotion": {"valence": 0.0, "arousal": 0.0, "dominant_emotion": None},
     "identity": [{"content": "用户喜欢喝咖啡", "speculate": None, "tags": ["food"]}],
     "facts": [{"content": "用户昨天去了北京", "speculate": None, "tags": ["travel"]}],
+    "intentions": [],
     "basic_info": {},
 }
 
 
 def _factory(tmp_storage, fake_embed, responses):
     factory = ComponentFactory(
-        settings=Settings(mode="pro", storage_dir=tmp_storage),
+        # gate_enabled=False so trivial test inputs aren't filtered out by the heuristic gate.
+        settings=Settings(mode="system1", storage_dir=tmp_storage, gate_enabled=False),
         embed=fake_embed,
         llm=FakeLLMClient(responses=responses),
     )
@@ -25,19 +27,20 @@ def _factory(tmp_storage, fake_embed, responses):
 
 def _raw(fake_embed, content):
     node = MemoryNode(content=content, layer=Layer.L1_RAW, app_id="app", user_id="u", agent_id="ag")
-    node.embedding = fake_embed.embed(content)
+    node.embedding = fake_embed.embed_sync(content)
     return node
 
 
-def test_run_produces_l2_l4(tmp_storage, fake_embed):
+async def test_run_produces_l2_l4(tmp_storage, fake_embed):
     factory = _factory(tmp_storage, fake_embed, {"extract": EXTRACT_RESPONSE, "search_query": []})
     agent = MemAgent(factory=factory)
     raw = _raw(fake_embed, "用户喜欢喝咖啡，昨天去了北京")
     factory.vector.upsert([raw])
 
-    stored_ids = agent.run(
+    stored_ids, gate_result, is_ephemeral = await agent.run(
         raw_node=raw,
         content="用户喜欢喝咖啡，昨天去了北京",
+        embedding=raw.embedding,
         app_id="app",
         user_id="u",
         agent_id="ag",
@@ -46,6 +49,8 @@ def test_run_produces_l2_l4(tmp_storage, fake_embed):
         memory_at=None,
     )
 
+    assert is_ephemeral is False
+    assert gate_result.passed is True
     assert len(stored_ids) == 2
     layers = {factory.vector.get(nid).layer for nid in stored_ids}
     assert layers == {Layer.L4_IDENTITY, Layer.L2_FACT}
@@ -55,7 +60,7 @@ def test_run_produces_l2_l4(tmp_storage, fake_embed):
         assert node.is_latest is True
 
 
-def test_run_long_content_adds_l3(tmp_storage, fake_embed):
+async def test_run_long_content_adds_l3(tmp_storage, fake_embed):
     long_text = "用户" + "聊了很多关于旅行和美食的事情。" * 60
     assert len(long_text) >= 500
     factory = _factory(
@@ -66,9 +71,10 @@ def test_run_long_content_adds_l3(tmp_storage, fake_embed):
     agent = MemAgent(factory=factory)
     raw = _raw(fake_embed, long_text)
 
-    stored_ids = agent.run(
+    stored_ids, _, _ = await agent.run(
         raw_node=raw,
         content=long_text,
+        embedding=raw.embedding,
         app_id="app",
         user_id="u",
         agent_id="ag",

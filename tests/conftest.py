@@ -11,12 +11,22 @@ import pytest
 
 
 class FakeEmbedService:
-    """Deterministic embedding: same text -> same normalized vector."""
+    """Deterministic embedding: same text -> same normalized vector. Async API + sync helper."""
 
     def __init__(self, dim: int = 64):
         self.dim = dim
 
-    def embed(self, text: str) -> list[float]:
+    async def embed(self, text: str) -> list[float]:
+        return self.embed_sync(text)
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [self.embed_sync(t) for t in texts]
+
+    async def embed_queued(self, text: str) -> list[float]:
+        return self.embed_sync(text)
+
+    def embed_sync(self, text: str) -> list[float]:
+        """Synchronous helper used by test fixtures that need a vector without an event loop."""
         vec: list[float] = []
         counter = 0
         while len(vec) < self.dim:
@@ -29,22 +39,21 @@ class FakeEmbedService:
         norm = math.sqrt(sum(x * x for x in vec)) or 1.0
         return [x / norm for x in vec]
 
-    def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        return [self.embed(t) for t in texts]
-
 
 class FakeLLMClient:
-    """脚本化 fake LLM。
+    """Async scripted fake LLM.
 
-    按调用类型 + system prompt 关键词路由到 ``responses`` 中的不同条目：
-    - ``chat_json`` 且 system 含 "记忆分析专家"/"memory analyst" → key ``"extract"``
-      （默认 ``{"facts": [], "identity": []}``；返回值是已解析的对象）。
-    - ``chat_json`` 且 system 含 "搜索查询生成器"/"search query generator" → key ``"search_query"``。
-    - ``chat_json`` 且 system 含 "记忆管理系统"/"memory management system" → key ``"reconcile"``。
-    - 其余 ``chat_json`` → key ``"json"``（默认 ``{"facts": [], "identity": []}``）。
-    - ``chat_text``（summary）→ key ``"text"``（默认 ``""``）。
+    Routes by call type + system prompt keyword to entries in ``responses``:
+    - ``chat_json`` with system containing "记忆价值评估"/"memory value gate" → key ``"gate"``
+      (default passes threshold with high novelty/relevance).
+    - ``chat_json`` with system containing "记忆分析专家"/"memory analyst" → key ``"extract"``
+      (default ``{"facts": [], "identity": [], "intentions": [], "is_ephemeral": False}``).
+    - ``chat_json`` with system containing "搜索查询生成器"/"search query generator" → key ``"search_query"``.
+    - ``chat_json`` with system containing "记忆管理系统"/"memory management system" → key ``"reconcile"``.
+    - Other ``chat_json`` → key ``"json"``.
+    - ``chat_text`` (summary) → key ``"text"`` (default ``""``).
 
-    每个 response 值可以是直接结果，也可以是 ``callable(system=, user=)``。
+    Each response value can be a direct result or a ``callable(system=, user=)``.
     """
 
     def __init__(self, responses: dict | None = None):
@@ -57,19 +66,66 @@ class FakeLLMClient:
             return value(system=system, user=user)
         return value
 
-    def chat_json(self, *, system: str, user: str, **kw):
+    async def chat_json(self, *, system: str, user: str, **kw):
         self.calls.append({"type": "chat_json", "system": system, "user": user, "kw": kw})
+        if "记忆价值评估" in system or "memory value gate" in system:
+            return self._resolve(
+                "gate",
+                {
+                    "novelty": 0.8,
+                    "biographical_relevance": 0.8,
+                    "emotional_arousal": 0.3,
+                    "reason": "test gate pass",
+                },
+                system=system,
+                user=user,
+            )
         if "记忆分析专家" in system or "memory analyst" in system:
-            return self._resolve("extract", {"facts": [], "identity": []}, system=system, user=user)
+            return self._resolve(
+                "extract",
+                {"facts": [], "identity": [], "intentions": [], "is_ephemeral": False},
+                system=system,
+                user=user,
+            )
         if "搜索查询生成器" in system or "search query generator" in system:
             return self._resolve("search_query", [], system=system, user=user)
         if "记忆管理系统" in system or "memory management system" in system:
             return self._resolve("reconcile", [], system=system, user=user)
         return self._resolve("json", {"facts": [], "identity": []}, system=system, user=user)
 
-    def chat_text(self, *, system: str, user: str, **kw) -> str:
+    async def chat_text(self, *, system: str, user: str, **kw) -> str:
         self.calls.append({"type": "chat_text", "system": system, "user": user, "kw": kw})
         return self._resolve("text", "", system=system, user=user)
+
+    async def chat_with_tools(
+        self,
+        *,
+        messages: list[dict],
+        tools: list[dict],
+        tool_choice: str = "auto",
+        temperature: float = 0.2,
+    ) -> dict:
+        """Scripted ReAct turn for the System2 agent.
+
+        Routes by responses["tools"]: a callable taking ``messages`` and returning
+        ``{"content": str, "tool_calls": [...]}`` or a single dict / list-of-dicts (the
+        list is consumed one element per call). Default returns no tool_calls so the loop
+        terminates after one turn.
+        """
+        self.calls.append(
+            {"type": "chat_with_tools", "messages": list(messages), "tools_count": len(tools)}
+        )
+        spec = self.responses.get("tools")
+        if spec is None:
+            return {"content": "", "tool_calls": []}
+        if callable(spec):
+            return spec(messages=messages, tools=tools)
+        if isinstance(spec, list):
+            idx = sum(1 for c in self.calls if c["type"] == "chat_with_tools") - 1
+            return spec[idx] if idx < len(spec) else {"content": "", "tool_calls": []}
+        if isinstance(spec, dict):
+            return spec
+        return {"content": "", "tool_calls": []}
 
 
 @pytest.fixture

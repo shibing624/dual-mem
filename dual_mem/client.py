@@ -1,25 +1,51 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: Public async facade of the layered-memory SDK. MemoryClient wires the
-configured providers/stores together and exposes add/search/get/list/update/delete/digest.
+@description: Public async facade of the dual-mem layered-memory SDK. MemoryClient wires
+configured providers/stores together and exposes add/search/get/list/update/delete/digest,
+returning strongly typed dataclass models (sdk_models). Multi-turn messages are formatted
+into natural dialogue text for L1_RAW + extract; embed sees the user-only concatenation.
+A per-user asyncio.Lock serializes concurrent add() for the same (app_id, user_id) so the
+fast-write -> reconcile pipeline can never race on the same evolution chain.
+
+dual-mem requires both an LLM API key and an embedding API key; missing credentials raise
+on construction (no silent embedding-only fallback). When you need to inject your own LLM
+client (tests, custom backends), pass it via the ``llm=`` constructor kwarg.
 """
-import json
+import asyncio
+import logging
 import time
 import uuid
 
 from dual_mem.config import Settings
 from dual_mem.isolation import build_filter
-from dual_mem.registry import ComponentFactory
+from dual_mem.locks import LockRegistry
+from dual_mem.registry import _UNSET, ComponentFactory
 from dual_mem.retrieval.reader import Reader
+from dual_mem.sdk_models import (
+    ChatMessage,
+    DeleteBulkResult,
+    DeleteResult,
+    DigestResult,
+    MemoryItem,
+    SearchResult,
+    UpdateResult,
+    WriteResult,
+)
 from dual_mem.system2.cross_domain_sweeper import CrossDomainSweeper
 from dual_mem.system2.system2_writer import System2Writer
 from dual_mem.types import MemoryStatus
 from dual_mem.writer.memory_writer import MemoryWriter
 
+logger = logging.getLogger("dual_mem.client")
+
+
+class MissingCredentialsError(RuntimeError):
+    """Raised when MemoryClient is constructed without the required LLM / embedding keys."""
+
 
 class MemoryClient:
-    """High-level entry point; pick lite/pro/ultra writer based on the resolved mode."""
+    """High-level async entry point; picks the system1 / dual writer based on Settings.mode."""
 
     def __init__(
         self,
@@ -30,7 +56,6 @@ class MemoryClient:
         embed=None,
         llm=None,
     ):
-        # Build Settings from overrides when not supplied; inject fakes via embed/llm in tests.
         if settings is None:
             overrides = {}
             if storage_dir is not None:
@@ -41,53 +66,121 @@ class MemoryClient:
         self.settings = settings
         self.mode = mode or settings.mode
 
-        factory_kwargs = {"settings": settings}
-        if embed is not None:
-            factory_kwargs["embed"] = embed
-        if llm is not None:
-            factory_kwargs["llm"] = llm
-        self.factory = ComponentFactory(**factory_kwargs)
+        self.factory = ComponentFactory(
+            settings=settings,
+            embed=embed,
+            llm=llm if llm is not None else _UNSET,
+        )
 
-        if self.settings.mode == "ultra":
-            self.writer = System2Writer(
-                factory=self.factory, agent_mode=self.settings.agent_mode
-            )
-        else:
-            self.writer = MemoryWriter(
-                factory=self.factory, agent_mode=self.settings.agent_mode
-            )
+        self._validate_credentials(injected_embed=embed is not None, injected_llm=llm is not None)
+        self._build_writer()
         self.reader = Reader(factory=self.factory)
+        self._write_locks = LockRegistry()
+
+    @classmethod
+    async def acreate(
+        cls,
+        *,
+        settings: Settings | None = None,
+        storage_dir: str | None = None,
+        mode: str | None = None,
+        embed=None,
+        llm=None,
+    ) -> "MemoryClient":
+        """Async factory mirror of ``MemoryClient(...)``; kept for API symmetry with prior versions."""
+        return cls(
+            settings=settings,
+            storage_dir=storage_dir,
+            mode=mode,
+            embed=embed,
+            llm=llm,
+        )
+
+    def _validate_credentials(self, *, injected_embed: bool, injected_llm: bool) -> None:
+        """Fail fast when LLM or embedding credentials are missing.
+
+        Injected ``embed`` / ``llm`` clients (tests, custom backends) bypass the api_key check
+        — the caller is responsible for those. Raises ``MissingCredentialsError`` otherwise.
+        """
+        missing: list[str] = []
+        if not injected_llm and not self.settings.llm_api_key:
+            missing.append("llm_api_key (set DUAL_MEM_LLM_API_KEY or pass settings.llm_api_key)")
+        if not injected_embed and not self.settings.embed_api_key:
+            missing.append("embed_api_key (set DUAL_MEM_EMBED_API_KEY or pass settings.embed_api_key)")
+        if missing:
+            raise MissingCredentialsError(
+                "dual-mem requires both LLM and embedding API keys. Missing: "
+                + "; ".join(missing)
+                + ". For tests / custom backends, pass embed=... and llm=... to MemoryClient(...)."
+            )
+
+    def _build_writer(self) -> None:
+        """Instantiate the writer matching the configured mode (system1 or dual)."""
+        if self.settings.mode == "dual":
+            self.writer = System2Writer(factory=self.factory)
+        else:
+            self.writer = MemoryWriter(factory=self.factory)
+
+    def _user_write_lock(self, app_id: str, user_id: str) -> asyncio.Lock:
+        """Return the per-user write lock, creating it lazily on first access."""
+        return self._write_locks.get(f"{app_id}::{user_id}")
 
     async def add(
         self,
         *,
         content: str = "",
-        messages: list | None = None,
+        messages: list[dict] | list[ChatMessage] | None = None,
         app_id: str,
         user_id: str,
         agent_id: str = "",
         session_id: str = "",
         memory_at: int | None = None,
-    ) -> dict:
-        """Write one memory (raw text or message list) and run cognition per mode."""
+    ) -> WriteResult:
+        """Write one memory (raw text or message list) and run cognition per mode.
+
+        When ``messages`` is given, only ``role=='user'`` turns drive Gate novelty (assistant
+        text is conversation context, not new user information). The L1_RAW node still stores
+        the full dialogue (with role markers) and the extractor sees the same dialogue text.
+        """
         request_id = str(uuid.uuid4())
         start = time.perf_counter()
-        text = content if content else json.dumps(messages, ensure_ascii=False)
-        result = await self.writer.write(
-            content=text,
-            app_id=app_id,
-            user_id=user_id,
-            agent_id=agent_id,
-            session_id=session_id,
-            request_id=request_id,
-            memory_at=memory_at,
+
+        user_queries: list[str] = []
+        agent_context: str | None = None
+        if messages:
+            normalized = _normalize_messages(messages)
+            user_queries = [m.content for m in normalized if m.role == "user" and m.content.strip()]
+            content = _format_dialogue(normalized)
+            agent_context = _last_assistant_context(normalized)
+
+        logger.info(
+            "add app=%s user=%s mode=%s len=%d turns=%d",
+            app_id, user_id, self.mode, len(content), len(user_queries),
         )
-        return {
-            "success": True,
-            "memory_id": result.memory_id,
-            "request_id": request_id,
-            "processing_time_ms": round((time.perf_counter() - start) * 1000, 2),
-        }
+
+        async with self._user_write_lock(app_id, user_id):
+            result = await self.writer.write(
+                content=content,
+                app_id=app_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                session_id=session_id,
+                request_id=request_id,
+                memory_at=memory_at,
+                user_queries=user_queries or None,
+                agent_context=agent_context,
+            )
+        return WriteResult(
+            success=True,
+            memory_id=result.memory_id,
+            request_id=request_id,
+            processing_time_ms=round((time.perf_counter() - start) * 1000, 2),
+            gate_passed=result.gate_passed,
+            gate_score=result.gate_score,
+            extracted_count=len(result.extra_node_ids),
+            extra_node_ids=list(result.extra_node_ids),
+            is_ephemeral=result.is_ephemeral,
+        )
 
     async def search(
         self,
@@ -103,40 +196,88 @@ class MemoryClient:
         profile_min_score: float = 0.3,
         intention_limit: int = 0,
         created_after: int | None = None,
-    ) -> dict:
-        """Semantic search returning memories grouped as profile/proactive/normal."""
-        request_id = str(uuid.uuid4())
-        start = time.perf_counter()
-        memories = self.reader.search(
-            query=query,
-            app_ids=app_ids,
-            user_id=user_id,
-            agent_ids=agent_ids,
-            session_ids=session_ids,
-            limit=limit,
-            min_score=min_score,
-            profile_limit=profile_limit,
-            profile_min_score=profile_min_score,
-            intention_limit=intention_limit,
-            created_after=created_after,
-        )
-        return {
-            "success": True,
-            "request_id": request_id,
-            "memories": memories,
-            "processing_time_ms": round((time.perf_counter() - start) * 1000, 2),
-        }
+        request_id: str | None = None,
+        debug: bool = False,
+    ) -> SearchResult:
+        """Semantic search returning a SearchResult with profile/proactive/normal groups.
 
-    async def get(self, memory_id: str) -> dict | None:
+        ``debug=True`` populates ``SearchResult.read_result`` with the per-stage trace
+        (anchor path counts / expansion edges / fusion final count / elapsed_ms) so callers
+        can render the read pipeline without re-querying the store.
+        """
+        request_id = request_id or str(uuid.uuid4())
+        start = time.perf_counter()
+        logger.info(
+            "search app=%s user=%s query=%r limit=%d debug=%s",
+            (app_ids[0] if app_ids else ""), user_id, query, limit, debug,
+        )
+        if debug:
+            memories, trace = await self.reader.search_with_trace(
+                query=query,
+                app_ids=app_ids,
+                user_id=user_id,
+                agent_ids=agent_ids,
+                session_ids=session_ids,
+                limit=limit,
+                min_score=min_score,
+                profile_limit=profile_limit,
+                profile_min_score=profile_min_score,
+                intention_limit=intention_limit,
+                created_after=created_after,
+                request_id=request_id,
+            )
+        else:
+            memories = await self.reader.search(
+                query=query,
+                app_ids=app_ids,
+                user_id=user_id,
+                agent_ids=agent_ids,
+                session_ids=session_ids,
+                limit=limit,
+                min_score=min_score,
+                profile_limit=profile_limit,
+                profile_min_score=profile_min_score,
+                intention_limit=intention_limit,
+                created_after=created_after,
+                request_id=request_id,
+            )
+            trace = None
+
+        # In per_write mode, drain reconsolidation tasks the read hook just enqueued so
+        # users do not have to wait for the next write to see the reactivation effects.
+        # The hook runs as a fire-and-forget task inside the reader, so await it FIRST —
+        # otherwise the drain races ahead of its own enqueue and finds an empty queue.
+        if (
+            isinstance(self.writer, System2Writer)
+            and self.settings.system2_trigger_mode == "per_write"
+        ):
+            enqueue_task = self.reader.last_reconsolidation_task
+            if enqueue_task is not None:
+                try:
+                    await enqueue_task
+                except Exception:
+                    pass  # enqueue failures are logged by the hook's done-callback
+            task = asyncio.create_task(self.writer._digest_reconsolidation_pending())
+            task.add_done_callback(_swallow_task_exception)
+
+        return SearchResult(
+            success=True,
+            request_id=request_id,
+            memories=memories,
+            processing_time_ms=round((time.perf_counter() - start) * 1000, 2),
+            read_result=trace,
+        )
+
+    async def get(self, memory_id: str) -> MemoryItem | None:
         """Fetch a single memory by id, or None if it does not exist."""
         node = self.factory.vector.get(memory_id)
         if node is None:
             return None
-        return Reader._to_dict(node)
+        return Reader.memory_node_to_item(node)
 
     async def list(
         self, *, app_id: str, user_id: str, agent_id: str = "", limit: int = 100
-    ) -> list[dict]:
+    ) -> list[MemoryItem]:
         """List ACTIVE memories under the given app/user (optionally agent) scope."""
         where = build_filter(
             app_ids=[app_id],
@@ -145,16 +286,16 @@ class MemoryClient:
             statuses=[MemoryStatus.ACTIVE],
         )
         nodes = self.factory.vector.get_many(where, limit=limit)
-        return [Reader._to_dict(node) for node in nodes]
+        return [Reader.memory_node_to_item(node) for node in nodes]
 
-    async def update(self, memory_id: str, content: str) -> dict:
+    async def update(self, memory_id: str, content: str) -> UpdateResult:
         """Replace a memory's content and re-embed it, logging the change to history."""
         node = self.factory.vector.get(memory_id)
         if node is None:
-            return {"success": False, "error_code": 404}
+            return UpdateResult(success=False, error_code=404)
         old_meta = node.to_metadata()
         node.content = content
-        node.embedding = self.factory.embed.embed(content)
+        node.embedding = await self.factory.embed.embed(content)
         node.gmt_modified = int(time.time())
         self.factory.vector.upsert([node])
         self.factory.history.append(
@@ -164,13 +305,13 @@ class MemoryClient:
             old=old_meta,
             new=node.to_metadata(),
         )
-        return {"success": True, "memory_id": memory_id}
+        return UpdateResult(success=True, memory_id=memory_id)
 
-    async def delete(self, memory_id: str) -> dict:
+    async def delete(self, memory_id: str) -> DeleteResult:
         """Physically remove a memory and append a DELETE history record."""
         node = self.factory.vector.get(memory_id)
         if node is None:
-            return {"success": False, "error_code": 404}
+            return DeleteResult(success=False, error_code=404)
         self.factory.vector.delete([memory_id])
         self.factory.history.append(
             event="DELETE",
@@ -179,7 +320,7 @@ class MemoryClient:
             old=node.to_metadata(),
             new=None,
         )
-        return {"success": True}
+        return DeleteResult(success=True)
 
     async def delete_bulk(
         self,
@@ -188,10 +329,10 @@ class MemoryClient:
         user_id: str | None = None,
         agent_id: str | None = None,
         confirm: bool = False,
-    ) -> dict:
+    ) -> DeleteBulkResult:
         """Delete every memory in a scope; requires confirm=True as a safety guard."""
         if confirm is not True:
-            return {"success": False, "error_code": 400}
+            return DeleteBulkResult(success=False, error_code=400)
         where: dict = {"app_id": {"$in": [app_id]}}
         if user_id is not None:
             where["user_id"] = user_id
@@ -208,17 +349,72 @@ class MemoryClient:
                 old=node.to_metadata(),
                 new=None,
             )
-        return {"success": True, "deleted": len(node_ids)}
+        return DeleteBulkResult(success=True, deleted=len(node_ids))
 
-    async def digest(self) -> dict:
-        """Drain the System2 queue (ultra only): consolidate facts into schemas/intentions."""
+    async def digest(self) -> DigestResult:
+        """Drain every pending System2 task: reconcile chains, run S2 agent, sweeper."""
         if not isinstance(self.writer, System2Writer):
-            return {"success": True, "processed": 0}
-        processed = await self.writer.run_system2_pending()
-        sweeper = CrossDomainSweeper(factory=self.factory)
+            return DigestResult(success=True, processed=0)
+        processed = await self.writer._digest_pending()
         cores = 0
-        for app_id, user_id in self.writer.processed_pairs:
-            result = sweeper.run(app_id=app_id, user_id=user_id)
-            if result.get("core_id"):
-                cores += 1
-        return {"success": True, "processed": processed, "cores_created": cores}
+        if self.settings.cross_domain_enable:
+            sweeper = CrossDomainSweeper(factory=self.factory)
+            for app_id, user_id in self.writer.processed_pairs:
+                result = await sweeper.run(app_id=app_id, user_id=user_id)
+                if result.get("cores"):
+                    cores += int(result["cores"])
+        return DigestResult(success=True, processed=processed, cores_created=cores)
+
+    async def aclose(self) -> None:
+        """Cancel any background tasks (e.g. scheduled S2 loop). Safe to call multiple times."""
+        if isinstance(self.writer, System2Writer):
+            await self.writer.aclose()
+
+
+def _swallow_task_exception(task: asyncio.Task) -> None:
+    """Drop any exception raised in a fire-and-forget background task."""
+    if task.cancelled():
+        return
+    task.exception()
+
+
+def _normalize_messages(messages: list) -> list[ChatMessage]:
+    """Coerce the user's input (mixed dict / ChatMessage) into a clean ChatMessage list."""
+    out: list[ChatMessage] = []
+    for msg in messages:
+        if isinstance(msg, ChatMessage):
+            role = (msg.role or "user").lower()
+            text = (msg.content or "").strip()
+        elif isinstance(msg, dict):
+            role = str(msg.get("role") or "user").lower()
+            text = str(msg.get("content") or "").strip()
+        else:
+            continue
+        if not text:
+            continue
+        out.append(ChatMessage(role=role, content=text))
+    return out
+
+
+def _format_dialogue(messages: list[ChatMessage]) -> str:
+    """Render normalized messages into a natural-language dialogue chunk for L1_RAW + extract."""
+    parts: list[str] = []
+    for msg in messages:
+        if msg.role == "user":
+            label = "[user]"
+        elif msg.role == "assistant":
+            label = "[assistant]"
+        elif msg.role == "system":
+            label = "[system]"
+        else:
+            label = f"[{msg.role}]"
+        parts.append(f"{label}: {msg.content}")
+    return "\n".join(parts)
+
+
+def _last_assistant_context(messages: list[ChatMessage]) -> str | None:
+    """Return the last non-empty assistant turn for Gate context scoring."""
+    for msg in reversed(messages):
+        if msg.role == "assistant" and msg.content.strip():
+            return msg.content.strip()
+    return None

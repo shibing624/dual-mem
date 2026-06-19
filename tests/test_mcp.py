@@ -8,9 +8,9 @@ from dual_mem.mcp.server import build_mcp
 
 
 @pytest.fixture
-def mcp(tmp_storage, fake_embed):
-    settings = Settings(storage_dir=tmp_storage, mode="lite", auth_disabled=True)
-    client = MemoryClient(settings=settings, embed=fake_embed)
+def mcp(tmp_storage, fake_embed, fake_llm):
+    settings = Settings(storage_dir=tmp_storage, mode="system1", auth_disabled=True)
+    client = MemoryClient(settings=settings, embed=fake_embed, llm=fake_llm)
     return build_mcp(client=client)
 
 

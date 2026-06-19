@@ -20,7 +20,7 @@ def _completion(message: dict) -> dict:
 
 
 @respx.mock
-def test_chat_json_parses_fenced_content():
+async def test_chat_json_parses_fenced_content():
     route = respx.post("https://api.test/v1/chat/completions").mock(
         return_value=httpx.Response(
             200,
@@ -29,13 +29,13 @@ def test_chat_json_parses_fenced_content():
             ),
         )
     )
-    result = _make_client().chat_json(system="s", user="u")
+    result = await _make_client().chat_json(system="s", user="u")
     assert result == {"facts": ["a"]}
     assert route.called
 
 
 @respx.mock
-def test_chat_json_regex_fallback():
+async def test_chat_json_regex_fallback():
     respx.post("https://api.test/v1/chat/completions").mock(
         return_value=httpx.Response(
             200,
@@ -44,38 +44,38 @@ def test_chat_json_regex_fallback():
             ),
         )
     )
-    result = _make_client().chat_json(system="s", user="u")
+    result = await _make_client().chat_json(system="s", user="u")
     assert result == {"k": 1}
 
 
 @respx.mock
-def test_chat_json_sends_json_mode_by_default():
+async def test_chat_json_sends_json_mode_by_default():
     import json as _json
 
     route = respx.post("https://api.test/v1/chat/completions").mock(
         return_value=httpx.Response(200, json=_completion({"role": "assistant", "content": "{}"}))
     )
-    _make_client().chat_json(system="s", user="u")
+    await _make_client().chat_json(system="s", user="u")
     body = _json.loads(route.calls.last.request.content)
     assert body["response_format"] == {"type": "json_object"}
 
 
 @respx.mock
-def test_chat_json_disabled_json_mode_omits_response_format():
+async def test_chat_json_disabled_json_mode_omits_response_format():
     import json as _json
 
     route = respx.post("https://api.test/v1/chat/completions").mock(
         return_value=httpx.Response(200, json=_completion({"role": "assistant", "content": "[]"}))
     )
     # client-level json_mode off
-    LLMClient(
+    await LLMClient(
         base_url="https://api.test/v1", api_key="sk-x", model="gpt-test", json_mode=False
     ).chat_json(system="s", user="u")
     body = _json.loads(route.calls.last.request.content)
     assert "response_format" not in body
 
     # per-call override off
-    _make_client().chat_json(system="s", user="u", json_object=False)
+    await _make_client().chat_json(system="s", user="u", json_object=False)
     body2 = _json.loads(route.calls.last.request.content)
     assert "response_format" not in body2
 

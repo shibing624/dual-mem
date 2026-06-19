@@ -12,11 +12,15 @@ dual-mem 的 MCP server 把记忆能力暴露为 agent 可调用的工具，基�
 
 | 工具 | 说明 |
 |---|---|
-| `memory_add(content, app_id, user_id, agent_id?, session_id?)` | 写入一条记忆 |
-| `memory_search(query, app_ids, user_id, agent_ids?, limit?, min_score?, intention_limit?)` | 语义检索，返回 profile/proactive/normal 三路 |
-| `memory_get(memory_id)` | 取单条 |
-| `memory_list(app_id, user_id, agent_id?, limit?)` | 列出 |
-| `memory_delete(memory_id)` | 删除 |
+| `memory_add(content, app_id, user_id, agent_id?, session_id?)` | 写入一条记忆，返回 `memory_id` |
+| `memory_search(query, app_ids, user_id, agent_ids?, limit?, min_score?, intention_limit?)` | 语义检索，结果按 profile/proactive/normal 三路分组；演化过的记忆带 `evolution_chain`（最新→最旧） |
+| `memory_get(memory_id)` | 取单条，不存在返回 null |
+| `memory_list(app_id, user_id, agent_id?, limit?)` | 列出某 app/user（可选 agent）下的 ACTIVE 记忆 |
+| `memory_delete(memory_id)` | 删除单条（幂等） |
+
+> 默认 `intention_limit=0` 时 proactive 路恒空；需要主动意图召回时显式传正整数（仅 dual 模式有 L7 意图）。`min_score` 默认 0.4，约束 normal 路。
+>
+> dual 模式的 System2 沉淀触发（`digest`）**未**作为 MCP 工具暴露，按需通过 SDK 或 CLI（`dual-mem digest`）触发；`per_write` / `scheduled` 触发模式则由 SDK 内部自动调度。
 
 ## 启动方式
 

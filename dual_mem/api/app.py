@@ -3,6 +3,7 @@
 @author:XuMing(xuming624@qq.com)
 @description: FastAPI app factory exposing the dual-mem REST API (add/search/list/get/
 delete/health), with Bearer auth, app whitelist enforcement and contract error responses.
+SDK dataclasses are flattened to dicts at this boundary via .to_dict().
 """
 import time
 from datetime import datetime
@@ -106,7 +107,7 @@ def create_app(
         _check_whitelist(settings, [body.app_id])
         if not body.content and not body.messages:
             raise HTTPException(status_code=400, detail="content 与 messages 至少二选一")
-        return await client.add(
+        result = await client.add(
             content=body.content,
             messages=body.messages,
             app_id=body.app_id,
@@ -115,6 +116,7 @@ def create_app(
             session_id=body.session_id,
             memory_at=body.memory_at,
         )
+        return result.to_dict()
 
     @app.post(
         "/v1/memories/search",
@@ -127,7 +129,7 @@ def create_app(
         client: MemoryClient = Depends(_get_client),
     ):
         _check_whitelist(settings, body.app_ids)
-        return await client.search(
+        result = await client.search(
             query=body.query,
             app_ids=body.app_ids,
             user_id=body.user_id,
@@ -140,6 +142,7 @@ def create_app(
             intention_limit=body.intention_limit,
             created_after=body.created_after,
         )
+        return result.to_dict()
 
     @app.get("/v1/memories/", dependencies=[Depends(_verify_bearer)])
     async def list_memories(
@@ -151,19 +154,20 @@ def create_app(
         client: MemoryClient = Depends(_get_client),
     ):
         _check_whitelist(settings, [app_id])
-        return await client.list(
+        items = await client.list(
             app_id=app_id, user_id=user_id, agent_id=agent_id, limit=limit
         )
+        return [item.to_dict() for item in items]
 
     @app.get("/v1/memories/{memory_id}", dependencies=[Depends(_verify_bearer)])
     async def get_memory(
         memory_id: str,
         client: MemoryClient = Depends(_get_client),
     ):
-        node = await client.get(memory_id)
-        if node is None:
+        item = await client.get(memory_id)
+        if item is None:
             raise HTTPException(status_code=404, detail=f"memory_id '{memory_id}' 不存在")
-        return node
+        return item.to_dict()
 
     @app.delete(
         "/v1/memories/{memory_id}",
@@ -175,12 +179,12 @@ def create_app(
         client: MemoryClient = Depends(_get_client),
     ):
         result = await client.delete(memory_id)
-        if result["success"] is False:
+        if not result.success:
             raise HTTPException(
-                status_code=result["error_code"],
+                status_code=result.error_code or 404,
                 detail=f"memory_id '{memory_id}' 不存在",
             )
-        return result
+        return result.to_dict()
 
     @app.delete(
         "/v1/memories/",
@@ -199,12 +203,12 @@ def create_app(
         result = await client.delete_bulk(
             app_id=app_id, user_id=user_id, agent_id=agent_id, confirm=confirm
         )
-        if result["success"] is False:
+        if not result.success:
             raise HTTPException(
-                status_code=result["error_code"],
+                status_code=result.error_code or 400,
                 detail="批量删除必须显式传入 confirm=true",
             )
-        return result
+        return result.to_dict()
 
     @app.get("/health", response_model=HealthResponse)
     async def health():
@@ -230,5 +234,9 @@ def create_app(
             "mode": app.state.settings.mode,
             "build": "dual-mem",
         }
+
+    @app.on_event("shutdown")
+    async def _on_shutdown():
+        await client.aclose()
 
     return app

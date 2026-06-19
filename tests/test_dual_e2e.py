@@ -1,3 +1,5 @@
+import json
+
 from conftest import FakeLLMClient
 
 from dual_mem import MemoryClient
@@ -6,9 +8,21 @@ from dual_mem.types import Layer, MemoryNode
 _SCHEMA = "当处理任务时，用户追求确定性与掌控——反映低不确定性容忍。"
 _INTENTION = "用户正在准备一场数据库技术分享。"
 
-_OPS = [
-    {"op": "create_schema", "content": _SCHEMA, "tags": ["工作"], "evidence": ["a1", "a2", "a3"]},
-    {"op": "create_intention", "content": _INTENTION, "tags": ["工作"], "evidence": ["a1"]},
+
+def _tc(call_id: str, name: str, args: dict) -> dict:
+    return {"id": call_id, "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}
+
+
+# Scripted ReAct turns: create the schema, create the intention, then stop.
+_TOOL_TURNS = [
+    {"content": "", "tool_calls": [
+        _tc("c1", "create_schema",
+            {"content": _SCHEMA, "tags": ["工作"], "evidence": ["a1", "a2", "a3"]}),
+        _tc("c2", "create_intention",
+            {"content": _INTENTION, "tags": ["工作"], "evidence": ["a1"]}),
+    ]},
+    {"content": "", "tool_calls": []},
 ]
 
 
@@ -34,32 +48,32 @@ def _seed_fresh_facts(client):
     client.factory.vector.upsert(nodes)
 
 
-async def test_ultra_digest_then_recall_schema_and_intention(tmp_storage, fake_embed):
+async def test_dual_digest_then_recall_schema_and_intention(tmp_storage, fake_embed):
     client = MemoryClient(
         storage_dir=tmp_storage,
-        mode="ultra",
+        mode="dual",
         embed=fake_embed,
-        llm=FakeLLMClient(responses={"json": _OPS}),
+        llm=FakeLLMClient(responses={"tools": _TOOL_TURNS}),
     )
     _seed_fresh_facts(client)
     client.factory.cache.enqueue_s2_task("u", "app")
 
     digest = await client.digest()
-    assert digest["processed"] == 1
+    assert digest.processed >= 1
 
     # profile 路召回 L6 schema
     res = await client.search(query=_SCHEMA, app_ids=["app"], user_id="u")
-    profile_contents = [m["content"] for m in res["memories"]["profile"]]
+    profile_contents = [m.content for m in res.memories.profile]
     assert _SCHEMA in profile_contents
-    assert any(m["category"] == "schema" for m in res["memories"]["profile"])
+    assert any(m.category == "schema" for m in res.memories.profile)
 
     # proactive 路（intention_limit>0）召回 L7 intention
     res2 = await client.search(
         query=_INTENTION, app_ids=["app"], user_id="u", intention_limit=3
     )
-    proactive_contents = [m["content"] for m in res2["memories"]["proactive"]]
+    proactive_contents = [m.content for m in res2.memories.proactive]
     assert _INTENTION in proactive_contents
 
     # 默认 intention_limit=0 → proactive 恒空
     res3 = await client.search(query=_INTENTION, app_ids=["app"], user_id="u")
-    assert res3["memories"]["proactive"] == []
+    assert res3.memories.proactive == []

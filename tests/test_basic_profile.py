@@ -30,10 +30,10 @@ def test_render_content():
     assert render_content({}) == ""
 
 
-def test_evolution_chain_two_applies(store, fake_embed):
+async def test_evolution_chain_two_applies(store, fake_embed):
     tool = BasicProfileTool(vector=store, embed=fake_embed)
 
-    id1 = tool.apply(
+    id1 = await tool.apply(
         arguments={"name": "张三"},
         app_id="app",
         user_id="u",
@@ -42,7 +42,7 @@ def test_evolution_chain_two_applies(store, fake_embed):
     )
     assert id1 is not None
 
-    id2 = tool.apply(
+    id2 = await tool.apply(
         arguments={"location": "北京"},
         app_id="app",
         user_id="u",
@@ -67,13 +67,13 @@ def test_evolution_chain_two_applies(store, fake_embed):
     assert _full_kv(all_l0) == {"name": "张三", "location": "北京"}
 
 
-def test_no_diff_returns_none(store, fake_embed):
+async def test_no_diff_returns_none(store, fake_embed):
     tool = BasicProfileTool(vector=store, embed=fake_embed)
-    tool.apply(arguments={"name": "张三"}, app_id="app", user_id="u", agent_id="ag", session_id="se")
-    again = tool.apply(arguments={"name": "张三"}, app_id="app", user_id="u", agent_id="ag", session_id="se")
+    await tool.apply(arguments={"name": "张三"}, app_id="app", user_id="u", agent_id="ag", session_id="se")
+    again = await tool.apply(arguments={"name": "张三"}, app_id="app", user_id="u", agent_id="ag", session_id="se")
     assert again is None
 
 
-def test_empty_arguments_returns_none(store, fake_embed):
+async def test_empty_arguments_returns_none(store, fake_embed):
     tool = BasicProfileTool(vector=store, embed=fake_embed)
-    assert tool.apply(arguments={"name": " "}, app_id="app", user_id="u", agent_id="ag", session_id="se") is None
+    assert await tool.apply(arguments={"name": " "}, app_id="app", user_id="u", agent_id="ag", session_id="se") is None

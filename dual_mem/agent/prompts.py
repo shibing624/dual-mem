@@ -1,10 +1,105 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: Bilingual (zh/en) prompt templates for the System1 memory agent (extract,
-search-query, reconcile, summary); pick() selects a language matching the input.
+@description: Bilingual prompt templates for the dual-mem agents (gate, extract, reconcile,
+summary, system2 ops, cross-domain sweep). Dual ZH/EN forms picked by pick() from input language.
 """
 from dual_mem.providers.llm import is_chinese
+
+
+# =====================================================================
+# Attentional Gate — LLM-primary three-dimension scoring with heuristic fallback
+# =====================================================================
+
+GATE_CONTEXT_ZH = """对话上下文 (Agent 的上一条消息):
+---
+{agent_context}
+---
+注意: 用户的回复可能是对上面这条消息的回应。即使回复很短, 也要结合上下文判断其信息价值。"""
+
+GATE_CONTEXT_EN = """Agent context (the assistant's previous message):
+---
+{agent_context}
+---
+Note: the user's reply may respond to the message above. Even a short reply can carry value in context."""
+
+GATE_ZH = """你是一个记忆价值评估系统。判断一段对话内容是否值得被记忆系统长期记住。
+
+输入可能是单条消息，也可能是多轮对话（用户-助手来回多轮）。**请把整段对话作为整体评估**，不要逐条单独评分。
+
+请从以下三个维度对内容进行评分（0.0 ~ 1.0）：
+
+1. **novelty**（新颖度/信息量）
+   - 纯寒暄、敷衍回复、无实质内容 → 0.0~0.1（如 "嗯嗯好的"）
+   - 多轮对话中只要有一轮包含有价值的新信息，就应给较高分
+   - 例："我比较喜欢川菜，但是花生过敏" → 0.85
+
+2. **biographical_relevance**（传记相关性）
+   - 涉及用户持久属性（身份、偏好、习惯、家庭、健康、工作、重大事件）→ 高分
+   - 安全关键信息（过敏、疾病等）→ 极高分
+   - 与用户画像无关的闲聊 → 低分
+
+3. **emotional_arousal**（情绪唤醒度）
+   - 强烈情绪表达 → 高分
+   - 平淡/无情绪 → 低分
+   - 多轮对话中取最高情绪强度
+
+{context_section}
+
+对话内容：
+---
+{content}
+---
+
+只输出严格 JSON，不要其它文字：
+{{
+    "novelty": 0.0,
+    "biographical_relevance": 0.0,
+    "emotional_arousal": 0.0,
+    "reason": "一句话简要说明判断依据"
+}}"""
+
+GATE_EN = """You are a memory value gate. Decide whether a passage is worth long-term memory.
+
+Input may be a single message or a multi-turn dialogue (user-assistant turns). Score the
+WHOLE passage as one unit; do NOT score each turn separately.
+
+Rate three dimensions on a 0.0 to 1.0 scale:
+
+1. **novelty** (new-information density)
+   - Pure pleasantry / filler / no substantive info → 0.0–0.1 (e.g. "ok thanks")
+   - In multi-turn input, if any single turn carries valuable new info, score high overall
+   - Example: "I love Sichuan food but I'm allergic to peanuts" → 0.85
+
+2. **biographical_relevance** (relevance to who the user is)
+   - Touches a durable attribute (identity, preference, habit, family, health, work, major events) → high
+   - Safety-critical info (allergies, illnesses) → very high
+   - Pure chit-chat unrelated to the user's profile → low
+
+3. **emotional_arousal** (intensity of emotional expression)
+   - Strong emotion → high
+   - Flat / neutral → low
+   - In multi-turn input, take the maximum intensity across turns
+
+{context_section}
+
+Conversation content:
+---
+{content}
+---
+
+Output strict JSON only, nothing else:
+{{
+    "novelty": 0.0,
+    "biographical_relevance": 0.0,
+    "emotional_arousal": 0.0,
+    "reason": "one short sentence explaining the rationale"
+}}"""
+
+
+# =====================================================================
+# Lightweight Extractor — facts + identity + basic_info + emotion + intentions + ephemeral
+# =====================================================================
 
 EXTRACT_ZH = """你是一位专业的记忆分析专家。请从以下对话中提取关于用户的结构化信息。
 
@@ -61,6 +156,15 @@ EXTRACT_ZH = """你是一位专业的记忆分析专家。请从以下对话中�
 - 未来的计划和安排
 - 客观事实陈述（非观点）
 
+### intentions (L7_INTENTION 候选)
+用户表达的**具体未来事件或计划**，要求**明确行动 + 时间边界**（明确或隐含）。
+
+仅当用户表达了**会发生或会过期**的具体未来事件/计划时填入。否则给空数组 `[]`。
+✅ "用户正在准备一场工作面试。"
+✅ "用户计划下个月去音乐节。"
+❌ "用户想成为更好的人。"（无具体行动）
+❌ "用户重视家庭。"（人生信念→identity，不是 intention）
+
 ### 基本结构化属性——放入 basic_info，不要作为 identity/facts 输出
 稳定的结构化个人属性——**姓名、年龄、所在地、职业、雇主**——不作为 identity 或 fact 记忆输出，而是放入输出 JSON 的 `basic_info` 对象，只填对话中明确提到或更新的字段（键名用 name/age/location/occupation/employer），未提及的字段不要出现。若没有任何基本属性，`basic_info` 输出空对象 `{{}}`。
 
@@ -77,56 +181,49 @@ EXTRACT_ZH = """你是一位专业的记忆分析专家。请从以下对话中�
 
 每条记忆应该有连贯的内在逻辑——一个完整的想法，而不是碎片。
 
+## emotion 与 is_ephemeral
+
+整段对话给出整体情绪：
+- `valence`: -1.0 ~ 1.0 之间（负面到正面），无明显情绪 → 0.0
+- `arousal`: 0.0 ~ 1.0 之间（平淡到强烈），无明显情绪 → 0.0
+- `dominant_emotion`: 主要情绪标签（如"焦虑"、"开心"、"平静"），无则 null
+
+如果整段对话都是纯寒暄/无信息量（如只有"好的"、"嗯嗯"），`is_ephemeral=true`，并把
+`identity` 与 `facts` 都置空数组；只要有任何实质信息就 `is_ephemeral=false`。
+
 ## speculate 字段（适用于 identity 和 facts）
 
 `speculate` 是一个可选的分析注释，用于模糊或间接信号的情况。当背后的动机、真实原因或隐含偏好在用户的话语中不明确时填写；否则为 null。
 
 - **对于 identity**: 在态度信号模糊时解读隐含态度。
-- **对于 facts**: 当真实原因不明确时解释事件为何发生，尤其是内在动机 vs 外在因素。
-- 不要将 speculate 内容复制到 `content` 字段中——`content` 描述发生了什么/用户是什么样的；`speculate` 解释为什么。
+- **对于 facts**: 当真实原因不明确时解释事件为何发生。
+- 不要将 speculate 内容复制到 `content` 字段中。
 - 对于清晰明确的陈述不要编造 speculate。
-
-示例:
-- "我最近开始做饭了"（identity）→ speculate: "用户可能因为生活方式变化或更多空闲时间而对烹饪产生了更多兴趣"
-- "我辞职了"（fact）→ speculate: null（明确无歧义）
-- "我取消了健身房会员"（fact）→ speculate: "用户可能因为时间安排而取消，而非对健身失去兴趣"
 
 ## Tags
 
-每条 identity 和 fact 记忆必须包含 `tags` 字段——1到3个小写主题关键词（如 "音乐"、"旅行"、"工作"、"美食"、"健康"、"社交"、"技术"）。
+每条 identity 和 fact 记忆必须包含 `tags` 字段——1 到 3 个小写主题关键词（如 "音乐"、"旅行"、"工作"、"美食"、"健康"、"社交"、"技术"）。
 
 ## 输出格式
 
-严格格式要求:
-1. 输出必须是一个有效的 JSON 对象，包裹在以 ```json 开头、以 ``` 结尾的代码块中。
-2. 代码块前后不要有任何文字。不要有代码块以外的 markdown。
-3. 不要有解释、评论、道歉或思维链。
-4. 字段类型必须严格匹配（字符串/数组/null）。未知或不适用的字段使用 `null`。
-5. 如果 `identity` 或 `facts` 没有可提取的内容，使用空数组 `[]`——不要删除该键。
-
-JSON 结构:
+只输出 JSON 对象，不要其它文字：
 
 ```json
 {{
+  "is_ephemeral": false,
+  "emotion": {{"valence": 0.0, "arousal": 0.0, "dominant_emotion": null}},
   "identity": [
-    {{
-      "content": "关于用户偏好/态度/观点的自包含记忆",
-      "speculate": "对模糊信号的解读，如果明确则为 null",
-      "tags": ["主题1", "主题2"]
-    }}
+    {{"content": "用户...", "speculate": null, "tags": ["..."]}}
   ],
   "facts": [
-    {{
-      "content": "关于事件/经历/计划的自包含记忆",
-      "speculate": "如果原因不明确则解释为什么，否则为 null",
-      "tags": ["主题1"]
-    }}
+    {{"content": "用户...", "speculate": null, "tags": ["..."]}}
   ],
-  "basic_info": {{"name": "...", "location": "..."}}
+  "intentions": [
+    {{"content": "用户...", "trigger_time_description": null, "tags": ["..."]}}
+  ],
+  "basic_info": {{}}
 }}
-```
-
-现在输出 JSON。"""
+```"""
 
 EXTRACT_EN = """You are an expert memory analyst. Extract structured user information from the conversation below.
 
@@ -139,117 +236,80 @@ Current time: {current_time}
 
 ## Core Principles
 
-1. **User as subject**: Every memory describes the user in third person. Use "The user ..." for English input, "用户..." for Chinese input. Each memory must be a complete, self-contained statement — never omit circumstances, conditions, or reasons that give the memory meaning.
+1. **User as subject**: Every memory describes the user in third person. Use "The user ...". Each memory must be a complete, self-contained statement — never omit circumstances, conditions, or reasons that give the memory meaning.
 2. **Preserve details**: Retain ALL specific information (place names, person names, brands, numbers, etc.). Do NOT generalize or simplify.
-3. **Language consistency**: Output language MUST match the input language (English → English, Chinese → Chinese). Never translate content into a different language.
+3. **Language consistency**: Output language MUST match the input language.
 4. **Time handling**:
-   - If the conversation references a time (relative like "next week", "昨天", or absolute like "March 2025"):
-     - Time-sensitive content (scheduled plan, specific past event, deadline): embed the time into `content` naturally. If `current_time` is provided and the reference is relative, resolve it first (e.g. "next week" + current_time 2026-04-24 → "early May 2026") before embedding.
-     - Not time-sensitive (stable preference, personality trait): keep `content` atemporal, do NOT include the time.
-   - If `current_time` is empty AND content has a relative expression: rewrite `content` without the raw relative expression (describe atemporally).
-   - If no time expression anywhere: `content` unchanged.
+   - If the conversation references a time:
+     - Time-sensitive content: embed the time naturally; resolve relative expressions using `current_time` when provided.
+     - Not time-sensitive: keep `content` atemporal.
+   - If `current_time` is empty AND content has a relative expression: rewrite `content` without the raw relative expression.
 
 ## Memory Layers
 
 ### identity (L4_IDENTITY)
-User's **personal attributes, preferences, attitudes, opinions, values, and feelings** — what makes the user unique as a person.
+User's personal attributes, preferences, attitudes, opinions, values, and feelings — what makes the user unique as a person.
 
-Includes:
-- Preferences and tastes (likes, dislikes, favorites)
-- Attitudes, opinions, values, beliefs
-- Emotional dispositions and feelings toward things
-- Personality traits and behavioral patterns
-
-Each identity memory must include full context. If the user formed an opinion through a specific experience, include that context.
-
-**Implicit preference detection — read between the lines**:
-Users rarely say "I like X" or "I hate Y" directly. Watch for attitude-laden cues and create explicit identity memories when you spot them:
-- Positive: resuming/returning to an activity, passion/excitement words, voluntary effort, repeated engagement, enthusiastic detail
-- Negative: burden/chore words, loss of interest, stepping back, disappointment, avoidance
-- Shift (critical): "but now ...", "recently ...", "used to ... but ...", "decided to resume/quit", re-engagement after disengagement
-
-When such a signal appears — even implicitly — you MUST emit an identity memory that explicitly states the attitude. Examples:
-- "I lost interest quickly, it felt like a chore" → Identity: "The user lost interest in [activity] because the consistent-content pressure made it feel like a chore"
-- "the excitement of revisiting this hobby has reignited my passion" → Identity: "The user has regained enthusiasm for [activity] and finds it exciting again"
-
-**Assistant-confirmed insights**: If the assistant draws a conclusion about the user and the user does not object, treat it as valid implicit information. Keep the subject as "The user ..." even if the original conclusion was drawn by the assistant (e.g., "The user appears open to trying yoga after the assistant's suggestion").
+Watch for **implicit preference signals** (resuming, enthusiasm, burden words, loss-of-interest, "but now ...", re-engagement) and emit explicit identity memories that state the attitude.
 
 ### facts (L2_FACT)
-**Objective events, experiences, and factual occurrences** — things that happened, are happening, or are planned. Captures *what* the user did/will do, NOT how they feel about it.
+Objective events, experiences, and factual occurrences — what happened or is planned, NOT how the user feels about it.
 
-Includes:
-- Past events and experiences
-- Current activities and ongoing situations
-- Future plans and scheduled events
-- Objective factual statements (not opinions)
+### intentions (L7_INTENTION candidates)
+A CONCRETE future event or plan with clear action + temporal boundedness (explicit or implicit).
+GOOD: "The user is preparing for a job interview."
+BAD: "The user wants to be a better person." (no concrete action — belongs to identity, not intention.)
 
-### Basic structured attributes — put into basic_info, NOT identity/facts
-Stable structured personal attributes — **name, age, location, occupation, employer** — are NOT emitted as identity or fact memories. Instead put them into the `basic_info` object of the output JSON, filling ONLY the fields clearly stated or updated in the conversation (keys: name/age/location/occupation/employer). Omit unmentioned fields. If there are no basic attributes, output an empty object `{{}}` for `basic_info`.
+### Basic structured attributes — go into `basic_info`, NOT identity/facts
+Stable attributes (name, age, location, occupation, employer) go into the `basic_info` object only, with the keys present only when mentioned. Empty `{{}}` if none.
 
-- Do NOT emit an identity memory that merely restates one of these five attributes.
-- Exception: if the attribute comes with rich narrative context (e.g., "The user became a product manager in 2023 after 5 years as an engineer because they wanted to work closer to users"), that narrative belongs in `identity`; the bare fact still goes into `basic_info`.
-
-### Overlapping memories across layers
-A single conversation snippet may produce multiple facts + identity memories with overlapping content — this is expected and acceptable.
+Exception: a basic attribute with rich narrative context (e.g. "The user became a product manager in 2023 after 5 years as an engineer") goes into `identity`; the bare fact still goes into `basic_info`.
 
 ### Consolidation — prefer whole thoughts over fragments
-Within each layer (identity, facts), avoid over-splitting. When several sentences from the conversation describe different aspects of the same underlying thing (same preference, same event, same attitude, same plan), emit ONE self-contained memory that captures the whole picture rather than several fragmentary ones.
+Within each layer, when several sentences describe different aspects of the same thing, emit ONE self-contained memory. Split only when aspects are genuinely independent.
 
-Split into separate memories only when the aspects are genuinely independent (different topics, different dimensions of the user's life, different subjects). When in doubt about whether two points belong together, lean toward keeping them merged — downstream reconcile can split if truly needed, but cannot recover information dropped by over-aggressive splitting.
+## emotion and is_ephemeral
 
-Each memory should have coherent internal logic — a complete thought, not a fragment.
+Score the WHOLE passage:
+- `valence`: -1.0 to 1.0 (negative to positive), 0.0 when neutral
+- `arousal`: 0.0 to 1.0 (flat to intense), 0.0 when neutral
+- `dominant_emotion`: short label (e.g., "anxious", "excited"), null when none
 
-## speculate field (applies to BOTH identity and facts)
+If the whole passage is pure pleasantry / no substantive info (e.g. just "ok"/"thanks"), set `is_ephemeral=true` and leave `identity` / `facts` as empty arrays.
 
-`speculate` is an OPTIONAL analytical note for ambiguous or indirect signals. Fill it whenever the underlying motivation, real cause, or hidden preference is NOT explicit in the user's words; otherwise leave it null.
+## speculate field (identity AND facts)
 
-- **For identity**: interpret implicit attitude signals when ambiguous.
-- **For facts**: explain *why* an event happened if the real cause is ambiguous, especially intrinsic vs extrinsic motivation.
-- Do NOT duplicate speculate content into the main `content` field — `content` describes what happened / what the user is; `speculate` explains why.
-- Do NOT fabricate speculate for clear, explicit statements.
-
-Examples:
-- "I've been cooking more lately" (identity) → speculate: "The user may have developed more interest in cooking, possibly due to lifestyle changes or more free time"
-- "I quit my job" (fact) → speculate: null (explicit, no ambiguity)
-- "I canceled the gym membership" (fact) → speculate: "The user may have canceled due to schedule constraints rather than loss of interest in fitness"
-- Assistant suggests yoga, user doesn't object (identity) → speculate: "The user may be open to yoga but has not yet confirmed"
+Optional analytical note for ambiguous signals; null when the statement is explicit. Do not duplicate speculate content into `content`.
 
 ## Tags
 
-Each identity and fact memory must include a `tags` field — 1 to 3 lowercase topic keywords (e.g., "music", "travel", "work", "food", "health", "social", "technology").
+Each identity / fact memory has 1-3 lowercase topic keywords.
 
-## Output contract
+## Output format
 
-Strict formatting rules:
-1. Output MUST be a valid JSON object wrapped in a fenced code block that starts with ```json and ends with ```.
-2. NO prose before or after the fenced block. NO markdown other than the single fenced block.
-3. NO explanations, comments, apologies, or chain-of-thought.
-4. Field types MUST match exactly (strings / arrays / null). Unknown or not-applicable fields use `null` (never omit them, never use `"null"` string).
-5. If there is nothing to extract for `identity` or `facts`, use an empty array `[]` for that field — do NOT drop the key.
-
-JSON shape:
+Output ONLY the JSON object, no extra text:
 
 ```json
 {{
+  "is_ephemeral": false,
+  "emotion": {{"valence": 0.0, "arousal": 0.0, "dominant_emotion": null}},
   "identity": [
-    {{
-      "content": "self-contained memory about user's preference / attitude / opinion",
-      "speculate": "interpretation of ambiguous signals, or null if clear-cut",
-      "tags": ["topic1", "topic2"]
-    }}
+    {{"content": "The user ...", "speculate": null, "tags": ["..."]}}
   ],
   "facts": [
-    {{
-      "content": "self-contained memory about an event / experience / plan",
-      "speculate": "why it happened if ambiguous, else null",
-      "tags": ["topic1"]
-    }}
+    {{"content": "The user ...", "speculate": null, "tags": ["..."]}}
   ],
-  "basic_info": {{"name": "...", "location": "..."}}
+  "intentions": [
+    {{"content": "The user ...", "trigger_time_description": null, "tags": ["..."]}}
+  ],
+  "basic_info": {{}}
 }}
-```
+```"""
 
-Output the JSON now."""
+
+# =====================================================================
+# Search-query expansion (kept as-is from original dual_mem; off by default)
+# =====================================================================
 
 SEARCH_QUERY_ZH = """你是一个搜索查询生成器。给定一组新提取的记忆，生成一组简短的搜索查询，用于在向量数据库中找到相关的已有记忆。
 
@@ -271,25 +331,30 @@ SEARCH_QUERY_ZH = """你是一个搜索查询生成器。给定一组新提取�
 
 只输出 JSON 数组，不要有其他文字。"""
 
-SEARCH_QUERY_EN = """You are a search query generator. Given a list of newly extracted memories, generate a set of short search queries that can be used to find related existing memories in a vector database.
+SEARCH_QUERY_EN = """You are a search query generator. Given a list of newly extracted memories, generate a set of short search queries to find related existing memories in a vector database.
 
-The goal is to maximize recall — find existing memories that are semantically related to the new memories, even if the wording is very different.
+The goal is to maximize recall — find existing memories semantically related to the new memories, even if wording differs.
 
 ## New memories:
 {new_memories}
 
-## Instructions
+## Guidelines
 
-Generate search queries that cover:
-- Key topics, entities, and themes mentioned in the memories
-- Rephrased or abstracted versions of the core concepts
-- Related concepts that might exist in the user's memory store
+Cover:
+- Key topics, entities, and themes
+- Rephrased / abstracted versions of core concepts
+- Likely related concepts in the user's memory store
 
-Output a JSON array of query strings (5-15 queries, short and focused):
+Output a JSON array of query strings (5-15 short focused queries):
 
 ["query1", "query2", "query3", ...]
 
 Output JSON array only, no other text."""
+
+
+# =====================================================================
+# Reconciler — integrate new memories into existing chain (kept, with sharper rules)
+# =====================================================================
 
 RECONCILE_ZH = """你是一个记忆管理系统。你的任务是将一批新记忆整合到已有的记忆库中，同时保持记忆库的整洁、可检索和信息无损。
 
@@ -323,9 +388,7 @@ RECONCILE_ZH = """你是一个记忆管理系统。你的任务是将一批新�
 - B: "用户因新工作搬到了上海。"（在居住地维度上取代 C——不可能同时住在两个城市）
 - A: "用户搬到了东京。"（在居住地维度上取代 B）
 
-这里只有居住地维度在演进（一个人同时只能住在一个城市）。C 中"从事软件工程师工作"的事实仍然有效——它从未被否定。
-
-当你看到已有记忆上的 `history_versions` 时，在做决策之前先阅读完整链以理解完整历史。
+这里只有居住地维度在演进。C 中"从事软件工程师工作"的事实仍然有效——它从未被否定。
 
 ## 待整合的新记忆
 {new_memories}
@@ -339,7 +402,14 @@ RECONCILE_ZH = """你是一个记忆管理系统。你的任务是将一批新�
 - `content`: 记忆文本。第三人称（"用户..."）。自包含。
 - `layer`: `"L2_FACT"` 或 `"L4_IDENTITY"`。
 - `supersedes`: 此新节点在争议维度上取代的已有 `memory_id` 列表。默认 `[]`。被引用的节点作为历史版本保留在链上。
-- `tags`: 1-3个小写主题关键词。**优先从下方已有标签列表中选取，仅在现有标签都不合适时才新增。**
+- `tags`: 1-3 个小写主题关键词。**优先从下方已有标签列表中选取，仅在现有标签都不合适时才新增。**
+- `update_type`: 该新节点与已有记忆的关系类型（必填，五选一）：
+  - `"OVERRIDE"`: 同维度状态变化，新节点取代旧节点（必须配合 `supersedes`）。
+  - `"SUPPLEMENT"`: 与已有记忆兼容、独立累加（`supersedes: []`）。
+  - `"TEMPORAL"`: 临时/短期变化（"今天想吃...", "最近在..."），可选 `temporal_scope` 描述有效范围。
+  - `"NEGATE"`: 显式否定旧主张（"不再喜欢...", "已经离开..."），必须配合 `supersedes` 指向被否定的节点。
+  - `"CONFLICT"`: 矛盾但无法判断真伪，保留两条共存（`supersedes: []`），由后续读侧消歧。
+- `temporal_scope`: 仅在 `update_type=="TEMPORAL"` 时填写，简短描述有效范围（如"今天"、"本周"、"本次出差期间"）。其它情况省略或填 `null`。
 
 ### DELETE — 逻辑删除一条已有记忆
 - `op`: `"DELETE"`
@@ -364,14 +434,14 @@ RECONCILE_ZH = """你是一个记忆管理系统。你的任务是将一批新�
 - 合并后的内容必须保留所有来源的每一条有意义的事实。
 
 ### 目标 3 — 粒度控制
-每条记忆应代表一个连贯的想法，具有完整的内在逻辑。避免两个极端:
+每条记忆应代表一个连贯的想法。避免两个极端:
 - 过于细粒度: 缺乏独立上下文的碎片化句子
-- 过于粗粒度: 同一主题膨胀过大（例如超过约2000字符），在一个节点中塞入过多信息。此时应将过大的节点拆分为多条更细维度的节点——每条覆盖一个独立子方面——同时确保拆分过程中信息零丢失。
+- 过于粗粒度: 同一主题膨胀过大（>2000 字符），应拆分为多条更细维度的节点
 
-犹豫时，倾向于稍粗一些（将相关方面放在一起），而非过度拆分。
+犹豫时，倾向于稍粗一些。
 
 ### 目标 4 — 不要动不需要改变的东西
-你选择不操作的记忆保持不变。不要对它们生成操作。
+你选择不操作的记忆保持不变。
 
 ## 绝对前提——信息无损保留
 
@@ -381,14 +451,7 @@ RECONCILE_ZH = """你是一个记忆管理系统。你的任务是将一批新�
 
 - 每个 ADD 的 `content` 必须自包含且为第三人称。语言必须与输入记忆一致。
 - `memory_at: null` 表示时间未知。绝不要编造时间线；绝不要以"年代久远"为由取代记忆。
-- 优先同层操作（L6↔L6，L2↔L2）。跨层仅在语义意义确实转移时使用。
-- 输出语言与输入记忆语言一致。
-
-## 验收自检（在输出前心理运行）
-
-1. **信息无损**: 每条新记忆和你正在取代或删除的每条已有节点中的每个事实，都在最终状态的某处存在。
-2. **碎片已清理**: 没有两个非链节点在明显同一主题上作为独立碎片存在（合并会改善可检索性的情况）。
-3. **没有无补偿的 DELETE**: 每个 DELETE 都有一个吸收其内容的对应 ADD。
+- 优先同层操作（L4↔L4，L2↔L2）。跨层仅在语义意义确实转移时使用。
 
 ## 输出格式
 
@@ -401,9 +464,9 @@ RECONCILE_ZH = """你是一个记忆管理系统。你的任务是将一批新�
       "reason": "<为什么需要这组操作>",
       "ops": [
         {{"op": "ADD", "content": "用户...", "layer": "L4_IDENTITY",
-          "supersedes": [], "tags": ["..."]}},
+          "supersedes": [], "tags": ["..."], "update_type": "SUPPLEMENT"}},
         {{"op": "ADD", "content": "用户...", "layer": "L4_IDENTITY",
-          "supersedes": ["<existing_id>"], "tags": ["..."]}},
+          "supersedes": ["<existing_id>"], "tags": ["..."], "update_type": "OVERRIDE"}},
         {{"op": "DELETE", "memory_id": "<existing_id>"}}
       ]
     }}
@@ -420,121 +483,91 @@ RECONCILE_ZH = """你是一个记忆管理系统。你的任务是将一批新�
 
 现在输出 JSON。"""
 
-RECONCILE_EN = """You are a memory management system. Your task is to integrate a batch of new memories into the existing memory base while keeping it clean, retrievable, and losslessly informative.
+RECONCILE_EN = """You are a memory management system. Integrate a batch of new memories into the existing memory base while keeping it clean, retrievable, and losslessly informative.
 
 Current time: {current_time}
-(`current_time` is provided for reference only. Do NOT infer that an existing memory is outdated solely because its `memory_at` is far in the past — age alone is not a reason to touch it.)
+(`current_time` is for reference only. Age alone is NOT a reason to supersede a memory.)
 
 ## Existing memories
 {existing_memories}
 
-Each existing memory has these fields:
-- `memory_id`: stable identifier (only present on head nodes — these are the only IDs you can reference in ops).
-- `content`: the stored text.
-- `memory_at`: timestamp when the memory occurred (ISO format). May be `null` (time unknown).
+Fields:
+- `memory_id`: stable id (only on chain heads — these are the only IDs you may reference).
+- `content`: stored text.
+- `memory_at`: timestamp (ISO). May be `null`.
 - `layer`: `l2_fact` or `l4_identity`.
 - `tags`: topic keywords.
 
-Some memories may include a `history_versions` field — this is the supersedes chain (explained below).
+Memories may include `history_versions` — that's the supersedes chain.
 
 ## Understanding supersedes chains
 
-A chain represents **state evolution on one specific dimension** — the user's stance on something changed over time.
+A chain represents **state evolution on one specific dimension**.
 
-Given a chain A → B → C (where A is the latest head, C is the oldest):
-- All three nodes talk about the **same dimension** (e.g., "preferred drink"), but each states a different claim.
-- A is the **current truth** on that dimension.
-- B and C are **historical** — their claims on that dimension are outdated.
-- However, B and C may contain OTHER information (on different dimensions) that is still valid and useful.
+Given chain A → B → C (A latest, C oldest):
+- All three describe the SAME dimension (e.g. "preferred drink") but state different claims.
+- A is current truth on that dimension; B and C are historical claims.
+- B/C may carry OTHER information on different dimensions that is still valid.
 
 Example:
 - C: "The user lives in Beijing and works as a software engineer."
-- B: "The user moved to Shanghai for a new job." (supersedes C on residence — cannot live in both cities simultaneously)
+- B: "The user moved to Shanghai for a new job." (supersedes C on residence)
 - A: "The user relocated to Tokyo." (supersedes B on residence)
 
-Here, only the residence dimension evolves (one can only live in one city at a time). The fact "works as a software engineer" in C is still valid — it was never contradicted.
-
-Counter-example (NOT a valid chain):
-- "The user likes coffee." → "The user also likes tea."
-These are NOT contradictory — preferences can coexist. Do NOT supersede. Just ADD independently.
-
-**Key principle**: A chain node ONLY states the new/changed claim on the contested dimension. It does NOT repeat information from older nodes. Old nodes remain visible and retrievable — there is no need to copy their content forward.
-
-When you see `history_versions` on an existing memory, read the full chain to understand the complete history before making decisions.
+Counter-example (NOT a chain):
+- "The user likes coffee." → "The user also likes tea." (preferences can coexist; ADD independently.)
 
 ## New memories to integrate
 {new_memories}
 
 ## Operation primitives
 
-You have exactly two primitives:
-
 ### ADD — create a new memory node
 - `op`: `"ADD"`
-- `content`: memory text. Third person ("The user ..."). Self-contained.
+- `content`: third-person, self-contained.
 - `layer`: `"L2_FACT"` or `"L4_IDENTITY"`.
-- `supersedes`: list of existing `memory_id`s that this new node marks as no-longer-current-truth on the contested dimension. Default `[]`. Referenced nodes are preserved as historical versions on the chain.
-- `supersede_reason`: (required when `supersedes` is non-empty) a short sentence explaining WHAT specifically contradicts, e.g. "User now prefers tea over coffee". This reason is stored and shown to downstream readers.
-- `tags`: 1–3 lowercase topic keywords. **Prefer reusing tags from the existing tags list below. Only create a new tag when no existing one fits.**
+- `supersedes`: list of existing `memory_id`s that this new node marks as no-longer-current-truth on the contested dimension. Default `[]`.
+- `tags`: 1-3 lowercase keywords; prefer reusing the existing tags list below.
+- `update_type` (REQUIRED): the relationship between this new node and existing memories. One of:
+  - `"OVERRIDE"`: same-dimension state change; new replaces old (REQUIRES non-empty `supersedes`).
+  - `"SUPPLEMENT"`: compatible, independent accumulation (`supersedes: []`).
+  - `"TEMPORAL"`: short-lived / temporary change ("today wants ...", "currently into ..."); set `temporal_scope`.
+  - `"NEGATE"`: explicit negation of an old claim ("no longer likes ...", "has left ..."); REQUIRES `supersedes`.
+  - `"CONFLICT"`: contradictory but unable to judge; keep both for read-side disambiguation (`supersedes: []`).
+- `temporal_scope`: only when `update_type=="TEMPORAL"`; short text (e.g. "today", "this week", "during current trip"). Otherwise omit or `null`.
 
 ### DELETE — logically remove an existing memory
 - `op`: `"DELETE"`
-- `memory_id`: the existing node to remove. Use only when a concurrent ADD has absorbed its content entirely.
+- `memory_id`: existing node to soft-delete. Use only when a concurrent ADD has absorbed its content.
 
-## Existing tags (reuse these when possible, avoid synonyms)
+## Existing tags (reuse when possible)
 {existing_tags}
 
 ## Objectives
 
-### Objective 1 — Build contradiction chains for ACTUALLY CONTRADICTORY state
-When a new memory and existing memories make claims on the **same dimension** that **cannot both be currently true**, form a chain: emit an ADD whose `supersedes` points at the existing head node.
+### 1 — Build supersedes chains for ACTUAL contradictions only
+Use `supersedes` only when claims on the SAME dimension cannot both be currently true. NOT for refinement / accumulation. The new head node must contain ONLY the new/changed claim — do NOT copy old node content forward.
 
-Key test: "If a reader asks 'what does the user currently do/prefer/have on dimension X?', would the old node give the WRONG answer?" If yes → supersede it.
+### 2 — Consolidate fragmented memories
+When memories describe the same topic compatibly: emit one merged ADD (`supersedes: []`) plus DELETE per absorbed node. Preserve every meaningful fact from all sources.
 
-**STRICT rules for supersedes:**
-- ONLY use `supersedes` when there is a genuine factual contradiction (A says X, B says not-X).
-- Do NOT supersede for refinement, elaboration, or accumulation — those go to Objective 2.
-- Do NOT supersede just because the new memory adds more detail on the same topic.
-- The new head node MUST contain ONLY the new/changed claim. Do NOT copy content from the superseded node — it is still visible in the chain.
+### 3 — Granularity control
+One memory = one coherent thought. Avoid both fragmentation and over-bundling (>2000 chars). When in doubt, prefer slightly coarser.
 
-### Objective 2 — Consolidate fragmented memories
-When memories describe the same topic compatibly (no contradiction), merge them:
-- Emit one ADD with merged content (`supersedes: []`).
-- Emit DELETE for each absorbed existing node.
-- The merged content MUST preserve every meaningful fact from all sources.
+### 4 — Do not touch what does not need changing
+Untouched memories remain untouched.
 
-### Objective 3 — Granularity control
-Each memory should represent one coherent thought with complete internal logic. Avoid extremes:
-- Too fine-grained: fragmentary sentences that lack context on their own
-- Too coarse-grained: a single topic that has grown too large (e.g. exceeding ~2000 characters), packing too many aspects into one node. In this case, split the oversized node into multiple finer-grained aspect nodes — each covering a distinct sub-aspect — while ensuring NO information is lost across the split.
+## Absolute prerequisite — lossless preservation
 
-When in doubt, prefer slightly coarser (keep related aspects together) over splitting too aggressively.
-
-### Objective 4 — Do not touch what does not need changing
-Memories you choose not to operate on remain untouched. Do not emit ops against them.
-
-## Absolute prerequisite — lossless information preservation
-
-**No information from any source — new or existing — may be lost after your ops execute.** Every meaningful fact must remain retrievable: as content of a chain node, as part of a consolidated ADD, as an independent ADD, or untouched in its original node.
-
-**However, for supersedes chains**: the old node is NOT deleted — it remains in the chain and is visible to readers. Therefore you do NOT need to copy old node content into the new head. Only write the new/changed claim. Information is preserved because old nodes are still there.
+No information from any source may be lost after your ops execute.
 
 ## Hard constraints
 
-- Every ADD's `content` is self-contained and third-person. Language MUST match input memories.
-- `memory_at: null` means time unknown. Never fabricate chronology; never cite "age" as a reason for superseding.
-- Prefer same-layer ops (L6↔L6, L2↔L2). Cross-layer only when semantic meaning genuinely transfers.
-- Output language matches input memory language.
-
-## Acceptance self-check (run mentally before emitting)
-
-1. **Lossless**: every fact from every new memory, and every fact from every existing node you are superseding or deleting, ends up somewhere in the final state.
-2. **Fragmentation cleared**: no two non-chain nodes on clearly the same topic remain as separate fragments where a merge would improve retrievability.
-3. **No no-op DELETEs**: every DELETE has a compensating ADD that absorbs its content.
+- ADD `content` is self-contained and third-person; language matches input.
+- `memory_at: null` means time unknown — never fabricate chronology, never cite "age" as a reason.
+- Prefer same-layer ops; cross-layer only when meaning genuinely transfers.
 
 ## Output format
-
-Output a JSON object whose top-level key `updates` is an array of groups. Each group is one logical update:
 
 ```json
 {{
@@ -543,9 +576,9 @@ Output a JSON object whose top-level key `updates` is an array of groups. Each g
       "reason": "<why this group exists>",
       "ops": [
         {{"op": "ADD", "content": "The user ...", "layer": "L4_IDENTITY",
-          "supersedes": [], "tags": ["..."]}},
+          "supersedes": [], "tags": ["..."], "update_type": "SUPPLEMENT"}},
         {{"op": "ADD", "content": "The user now prefers tea.", "layer": "L4_IDENTITY",
-          "supersedes": ["<existing_id>"], "supersede_reason": "Previously preferred coffee, now prefers tea", "tags": ["..."]}},
+          "supersedes": ["<existing_id>"], "tags": ["..."], "update_type": "OVERRIDE"}},
         {{"op": "DELETE", "memory_id": "<existing_id>"}}
       ]
     }}
@@ -555,12 +588,17 @@ Output a JSON object whose top-level key `updates` is an array of groups. Each g
 
 ## Output contract (strict)
 
-1. Output MUST be a valid JSON object with the top-level key `updates` (an array).
-2. NO prose, markdown, apologies, or chain-of-thought.
-3. If nothing needs to change, output `{{"updates": []}}`.
-4. Field types must match exactly: `supersedes` and `tags` are arrays (use `[]` when empty).
+1. Valid JSON with top-level key `updates` (array).
+2. No prose, markdown, apologies, or chain-of-thought.
+3. Empty case: `{{"updates": []}}`.
+4. `supersedes` and `tags` are arrays (use `[]` when empty).
 
-Now produce the JSON."""
+Output JSON now."""
+
+
+# =====================================================================
+# Summarizer — long-content summary (>=500 chars)
+# =====================================================================
 
 SUMMARY_ZH = """为以下对话内容生成简洁的摘要。
 
@@ -573,28 +611,26 @@ SUMMARY_ZH = """为以下对话内容生成简洁的摘要。
 
 要求:
 1. **第三人称**: 以"用户..."描述用户——不要使用没有明确先行词的代词。
-2. **长度**: 1-3句话，最多200字。
+2. **长度**: 1-3 句话，最多 200 字。
 3. **优先级（内容超出长度限制时）**:
    a) 变化、决定、承诺（最高）
    b) 明确的偏好、态度、喜恶
    c) 关键事件和事实
    d) 背景信息（最低）
-4. **保留偏好信号**: 保留任何直接或间接表达的喜好、厌恶、态度或观点——即使看起来不重要。
+4. **保留偏好信号**: 保留任何直接或间接表达的喜好、厌恶、态度或观点。
 5. **自包含**: 读者应该在不看原始对话的情况下就能理解摘要。
 6. **不要编造**: 不要添加原始内容中没有的信息。
-7. **语言**: 输出语言必须与输入语言一致（中文输入→中文输出）。
+7. **语言**: 输出语言必须与输入语言一致。
 8. **时间**:
-   - 如果提供了 `当前时间`，将相对时间表达转换为绝对引用（"上周" → 对应的日期左右）。
-   - 如果 `当前时间` 为空，重写句子使其不包含时间（避免在输出中留下"上周"/"昨天"等原始表达）。
+   - 如果提供了 `当前时间`，将相对时间表达转换为绝对引用。
+   - 如果 `当前时间` 为空，重写句子使其不包含时间。
 
 ## 输出约定
 
-严格格式要求:
-1. 只输出摘要文本——一段1-3句话的纯文本。
+1. 只输出摘要文本——一段 1-3 句话的纯文本。
 2. 不要用引号、反引号、代码块或任何 markdown 包裹输出。
 3. 不要添加前缀或标签（不要"摘要："、"Summary："、"这是..."等）。
 4. 不要添加尾部解释或元评论。
-5. 如果内容太简单不值得总结，输出一句描述最显著元素的话——不要输出空字符串。
 
 现在生成摘要。"""
 
@@ -608,31 +644,220 @@ Content:
 Current time: {current_time}
 
 Requirements:
-1. **Third-person voice**: Describe the user as "The user ..." — do not use pronouns without clear antecedent.
+1. **Third-person voice**: Describe the user as "The user ...".
 2. **Length**: 1-3 sentences, max 200 words.
 3. **Priorities (when content exceeds the length budget)**:
    a) Changes, decisions, commitments (highest)
    b) Explicit preferences, attitudes, dislikes/likes
    c) Key events and facts
    d) Background context (lowest)
-4. **Preserve preference signals**: Retain any expression of likes, dislikes, attitudes, or opinions — direct or implied — even if minor.
-5. **Self-contained**: A reader should understand the summary without seeing the original conversation.
-6. **No fabrication**: Do NOT add information not present in the original content.
-7. **Language**: Output language MUST match input language (English → English, Chinese → Chinese).
+4. **Preserve preference signals**.
+5. **Self-contained**.
+6. **No fabrication**.
+7. **Language**: must match the input.
 8. **Time**:
-   - If `current_time` is provided, resolve relative expressions to absolute references ("last week" → around the corresponding date).
-   - If `current_time` is empty, rewrite sentences atemporally (avoid leaving raw "last week" / "yesterday" in the output).
+   - With `current_time`, resolve relative expressions to absolute references.
+   - Without it, rewrite atemporally.
 
 ## Output contract
 
-Strict formatting rules:
 1. Output the summary text ONLY — one paragraph of 1-3 sentences, plain prose.
-2. Do NOT wrap the output in quotes, backticks, code fences, or any markdown.
-3. Do NOT add a prefix or label (no "Summary:", "摘要：", "Here is ...", etc.).
+2. Do NOT wrap in quotes, backticks, code fences, or markdown.
+3. Do NOT add a prefix or label.
 4. Do NOT add trailing explanations or meta-commentary.
-5. If the content is too trivial to summarize meaningfully, output a single sentence describing the most salient element — do not output an empty string.
 
-Now produce the summary."""
+Output the summary now."""
+
+
+# =====================================================================
+# System2 Agent — schema/intention ops emission
+# =====================================================================
+
+SYSTEM2_OPS_ZH = """你是一个认知加工 Agent，负责从用户的事实聚类中演化高层认知结构（L6 Schema / L7 Intention），并以一组操作（ops）的形式输出。
+
+## L6 Schema 是什么？
+
+Schema 捕获用户在**特定领域**内的**一个**行为模式，包含三个要素：
+- **场景（Circumstance）**: 该模式发生的领域/话题/场景。Schema 必须限定在其场景内，不要跨域泛化。
+- **模式（Pattern）**: 用户在该场景下的惯常行为、思维方式或行动倾向。
+- **洞察（Insight）**: 底层心理驱动力或心智模型。
+
+### 内容格式
+用一句话组合三要素：
+"当[场景]时，用户[模式]——反映了[洞察]。"
+
+### 规则
+- **原子化**: 一个 Schema 只包含一个模式。两个不同模式 → 两个 Schema。
+- **不可变**: Schema 创建后内容永远不变。不要修改已有 Schema 的内容。
+- **累积证据**: 新事实支持已有 Schema → 调 `add_evidence` 添加证据，不要重新创建。
+- **域内约束**: 不要跨域。跨域抽象由系统的其他流程处理。
+
+✅ "当做饭时，用户严格按菜谱步骤精确称量——反映了用外部结构管理不确定性的需要。"
+❌ "用户对很多事充满热情且追求品质。"（无场景、太泛）
+
+## L7 Intention 是什么？
+
+Intention 是用户表达的**具体未来事件或计划**。必须有：
+- **明确行动**: 用户将要做的事（不是感受或信念）
+- **时间边界**: 可以明确（"下周"）或隐含（"正在准备"）
+
+### 规则
+- 没有具体行动或事件 → 不是 Intention，考虑归入 Schema
+- 人生愿景、价值观 → Schema，不是 Intention
+- 一个事件一个 Intention，保持简洁
+
+## 工作流程
+
+对于每个事实聚类：
+1. **搜索已有 Schema**: 如果已有 Schema 已覆盖了该模式，调 `add_evidence` 链接新事实——不要重新创建。
+2. **创建新 Schema**: 仅当没有已有 Schema 覆盖时。一句话，三要素。
+3. **检测 Intention**: 事实中包含具体未来计划/事件 → 创建 L7 Intention。
+4. **建立关系**: 两个 Schema 主题相关 → 用 `add_edge`（RELATED_TO）。
+
+## 输出格式
+
+只输出一个 JSON 对象，键 `ops` 是操作数组，不要任何解释或代码块外文字。每个 op 是以下四类之一：
+{{"ops": [
+  {{"op": "create_schema", "content": "当...时，用户...——反映...", "tags": ["..."], "evidence": ["fact_id", ...]}},
+  {{"op": "create_intention", "content": "...", "tags": ["..."], "evidence": ["fact_id", ...]}},
+  {{"op": "add_evidence", "schema_id": "已有schema_id", "evidence": ["fact_id", ...]}},
+  {{"op": "add_edge", "from_id": "...", "to_id": "...", "rel": "RELATED_TO"}}
+]}}
+
+## 原则
+- Schema 内容创建后不可变——绝不重新创建已存在的 Schema
+- 优先 `add_evidence` 而非创建重复节点
+- 宁可不创建，也不要创建低质量节点
+- 一个 Schema = 一个域内原子模式
+- 一个 Intention = 一个具体未来事件
+- 打标签时优先使用已有标签列表中的标签
+
+打标签时优先复用已有标签列表中的标签。证据 fact_id 必须来自聚类中给出的 id。
+若数据不足以得出可靠结论，输出 {{"ops": []}}。"""
+
+SYSTEM2_OPS_EN = """You are a cognitive processing Agent. Evolve higher-order cognitive structures (L6 Schema / L7 Intention) from the user's fact clusters, and output them as a list of operations (ops).
+
+## What is an L6 Schema?
+
+A Schema captures ONE behavioral pattern in a SPECIFIC domain. Three components:
+
+- **Circumstance**: the domain/topic/situation where this pattern is observed. A Schema MUST stay within its circumstance — do NOT generalize across domains.
+- **Pattern**: the user's habitual behavior, thinking style, or action tendency in this circumstance.
+- **Insight**: the underlying psychological driver or mental model.
+
+### Content format
+Single sentence combining all three:
+"When [circumstance], the user [pattern] — reflecting [insight]."
+
+### Rules
+- **Atomic**: One pattern per Schema. Two distinct patterns → two Schemas.
+- **Immutable**: Once created, content NEVER changes.
+- **Evidence only**: New facts support existing Schema → call `add_evidence`. Do NOT recreate.
+- **Domain-bound**: Stay within the observed domain. Cross-domain abstraction is handled separately.
+
+✅ "When cooking, the user strictly follows recipe steps and precisely measures ingredients — reflecting a need for external structure to manage uncertainty."
+❌ "The user is passionate about many things and values quality." (no circumstance, too vague)
+
+## What is an L7 Intention?
+
+A CONCRETE future event or plan. Requires:
+- **A clear action**: something the user will DO
+- **Temporal boundedness**: explicit ("next week") or implicit ("currently preparing for")
+
+### Rules
+- No concrete action → NOT an Intention. Consider Schema instead.
+- Life aspirations, values, visions → Schema, not Intention.
+- One event per Intention.
+
+## Workflow
+
+For each cluster of facts:
+1. **Search existing Schemas**: if covered → `add_evidence`, do NOT recreate.
+2. **Create new Schema**: only when no existing Schema covers this pattern. One sentence, three components.
+3. **Detect Intentions**: concrete future plan → create L7 Intention.
+4. **Build relationships**: two Schemas thematically related → `add_edge` (RELATED_TO).
+
+## Output format
+
+Output ONLY a JSON object whose key `ops` is the operations array. No prose, nothing outside it. Each op is one of four kinds:
+{{"ops": [
+  {{"op": "create_schema", "content": "When ..., the user ... — reflecting ...", "tags": ["..."], "evidence": ["fact_id", ...]}},
+  {{"op": "create_intention", "content": "...", "tags": ["..."], "evidence": ["fact_id", ...]}},
+  {{"op": "add_evidence", "schema_id": "existing_schema_id", "evidence": ["fact_id", ...]}},
+  {{"op": "add_edge", "from_id": "...", "to_id": "...", "rel": "RELATED_TO"}}
+]}}
+
+## Principles
+- Schema content is IMMUTABLE — never recreate what already exists
+- Prefer `add_evidence` over duplicates
+- Prefer not creating over creating low-quality nodes
+- One Schema = one atomic pattern in one domain
+- One Intention = one concrete future event
+- Reuse tags from the existing tags list when possible
+
+Evidence fact_ids MUST come from the cluster ids provided.
+If the data is insufficient for reliable conclusions, output {{"ops": []}}."""
+
+
+# =====================================================================
+# Cross-Domain Sweeper — behavior abstraction + higher-order induction
+# =====================================================================
+
+BEHAVIOR_ABSTRACTION_ZH = """任务：你是一名行为心理学家。请把下列 schema 抽象为一段纯心理/行为描述。剥离所有领域具体名词和场景——只输出底层行为风格和心理动机。
+
+语言规则：输出语言必须与输入相同。
+
+输入 schema：
+{content}
+
+输出（严格 JSON）：
+{{"abstraction_for_embedding": "...纯行为描述，与输入语言一致..."}}"""
+
+BEHAVIOR_ABSTRACTION_EN = """Task: You are a behavioral psychologist. Abstract the following schema into a pure psychological/behavioral description. Strip ALL domain-specific nouns and scenarios — output ONLY the underlying behavioral style and psychological motivation.
+
+LANGUAGE RULE: Your output MUST be in the SAME language as the input schema.
+
+Input schema:
+{content}
+
+Output (strict JSON):
+{{"abstraction_for_embedding": "...pure behavioral description, same language as input..."}}"""
+
+
+CROSS_DOMAIN_INDUCTION_ZH = """任务：你是一名深层模式分析师。系统在用户不同生活领域的行为 schema 间发现了结构性共鸣：表面看不相关，但底层行为逻辑高度相似。
+
+请综合出一个**更高阶**的核心模式，解释这些行为为何共现（用户自己未必察觉）：
+- 深层认知风格（如何处理信息和做决策）
+- 核心心理需求（在最根本层面驱动他们的是什么）
+- 隐含的心智模型（这些行为背后的潜在信念体系）
+
+要有洞察力。要精准。质量优于数量——只在连接真正成立、逻辑严密时才输出。证据薄弱或连接表面化时，输出 null。
+
+语言规则：输出（core_pattern, reasoning）必须与输入 schema 相同语言。
+
+输入 schemas：
+{patterns}
+
+输出（严格 JSON，或 null 如果没有令人信服的综合）：
+{{"core_pattern": "...一句话描述更高阶模式，与输入语言一致...", "reasoning": "...为什么这些 schema 在深层相互连接...", "confidence": 0.85, "schema_ids": ["参与归纳的基础 schema_id", ...]}}"""
+
+CROSS_DOMAIN_INDUCTION_EN = """Task: You are a deep pattern analyst. The system has detected structural resonance among the following schemas from different areas of the user's life. On the surface they appear unrelated, but their underlying behavioral logic is strikingly similar.
+
+Your job: synthesize a HIGHER-ORDER pattern that explains WHY these behaviors co-occur — something the user themselves may not be consciously aware of. Think in terms of:
+- Deep cognitive style (how they process information and make decisions)
+- Core psychological need (what drives them at a fundamental level)
+- Hidden mental model (the implicit belief system behind these behaviors)
+
+Be insightful. Be precise. Quality over quantity — only output a synthesis if the connection is genuinely compelling and logically airtight. If the evidence is weak or the connection is superficial, output null.
+
+LANGUAGE RULE: Your output (core_pattern, reasoning) MUST be in the SAME language as the input schemas below.
+
+Input schemas:
+{patterns}
+
+Output (strict JSON, or null if no compelling synthesis):
+{{"core_pattern": "...one sentence describing the higher-order pattern, same language as input...", "reasoning": "...why these schemas are connected at a deep level, same language as input...", "confidence": 0.85, "schema_ids": ["basic schema_id involved", ...]}}"""
+
 
 def pick(zh_prompt: str, en_prompt: str, text: str) -> str:
     """Choose the Chinese or English prompt variant based on the input text's language."""

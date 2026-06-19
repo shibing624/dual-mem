@@ -1,30 +1,38 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: Synchronous write path (lite/pro): persists a raw memory node, logs it,
-and in full agent mode runs System1 cognition to derive extra memories.
+@description: Synchronous-write path: persist a raw L1 memory node, log it, and run the
+System1 cognition pipeline (gate -> extract -> fast-write) which queues async reconcile work
+and writes any L7 intentions / L3 summary in line. dual-mem requires LLM + embedding API
+keys; there is no embedding-only / no-LLM mode.
 """
+import logging
 from dataclasses import dataclass, field
 
 from dual_mem.agent.mem_agent import MemAgent
 from dual_mem.registry import ComponentFactory
+from dual_mem.sdk_models import GateResult
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
+
+logger = logging.getLogger("dual_mem.writer")
 
 
 @dataclass
-class WriteResult:
-    """Outcome of a write: the raw memory id plus any cognition-derived node ids."""
+class WriterOutcome:
+    """Internal write-path outcome before the public ``sdk_models.WriteResult`` wrapper."""
 
     memory_id: str
     extra_node_ids: list[str] = field(default_factory=list)
+    gate_passed: bool = True
+    gate_score: float | None = None
+    is_ephemeral: bool = False
 
 
 class MemoryWriter:
-    """Lite/pro writer: persist the raw memory and optionally run System1 cognition."""
+    """system1 writer: persist the raw memory and run the System1 cognition pipeline."""
 
-    def __init__(self, *, factory: ComponentFactory, agent_mode: str):
+    def __init__(self, *, factory: ComponentFactory):
         self.factory = factory
-        self.agent_mode = agent_mode
 
     async def write(
         self,
@@ -36,8 +44,14 @@ class MemoryWriter:
         session_id: str,
         request_id: str,
         memory_at: int | None = None,
-    ) -> WriteResult:
-        """Persist content as a raw node and, in full mode, derive and link extra memories."""
+        user_queries: list[str] | None = None,
+        agent_context: str | None = None,
+    ) -> WriterOutcome:
+        """Persist content as a raw node, then derive and link extra memories via System1.
+
+        ``user_queries`` carries the per-turn user texts for multi-turn writes; the gate uses
+        them for novelty=max-across-turns. None means single-turn (fall back to ``content``).
+        """
         node = MemoryNode(
             content=content,
             layer=Layer.L1_RAW,
@@ -48,7 +62,8 @@ class MemoryWriter:
             status=MemoryStatus.ACTIVE,
             memory_at=memory_at,
         )
-        node.embedding = self.factory.embed.embed(content)
+        embedding = await self.factory.embed.embed_queued(content)
+        node.embedding = embedding
         self.factory.vector.upsert([node])
         self.factory.history.append(
             event="ADD",
@@ -57,46 +72,38 @@ class MemoryWriter:
             old=None,
             new=node.to_metadata(),
         )
+        logger.debug(
+            "write_raw user=%s memory_id=%s len=%d",
+            user_id, node.node_id, len(content),
+        )
 
-        extra_node_ids: list[str] = []
-        if self.agent_mode == "full":
-            extra_node_ids = await self._run_cognition(
-                raw=node,
-                content=content,
-                app_id=app_id,
-                user_id=user_id,
-                agent_id=agent_id,
-                session_id=session_id,
-                request_id=request_id,
-                memory_at=memory_at,
-            )
-            if extra_node_ids:
-                node.status = MemoryStatus.SHADOW
-                self.factory.vector.upsert([node])
-
-        return WriteResult(memory_id=node.node_id, extra_node_ids=extra_node_ids)
-
-    async def _run_cognition(
-        self,
-        *,
-        raw: MemoryNode,
-        content: str,
-        app_id: str,
-        user_id: str,
-        agent_id: str,
-        session_id: str,
-        request_id: str,
-        memory_at: int | None,
-    ) -> list[str]:
-        """Run the System1 MemAgent over the raw node and return derived node ids."""
         agent = MemAgent(factory=self.factory)
-        return agent.run(
-            raw_node=raw,
+        extra_node_ids, gate_result, is_ephemeral = await agent.run(
+            raw_node=node,
             content=content,
+            embedding=embedding,
             app_id=app_id,
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
             request_id=request_id,
             memory_at=memory_at,
+            user_queries=user_queries,
+            agent_context=agent_context,
         )
+
+        if extra_node_ids:
+            node.status = MemoryStatus.SHADOW
+            self.factory.vector.upsert([node])
+
+        return WriterOutcome(
+            memory_id=node.node_id,
+            extra_node_ids=extra_node_ids,
+            gate_passed=gate_result.passed,
+            gate_score=gate_result.gate_score,
+            is_ephemeral=is_ephemeral,
+        )
+
+
+# Re-export GateResult for callers that want to inspect gate decisions on a write.
+__all__ = ["MemoryWriter", "WriterOutcome", "GateResult"]

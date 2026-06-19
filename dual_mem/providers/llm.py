@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: OpenAI-compatible LLM client wrapper offering JSON (optionally JSON mode) and
-text chat helpers, plus language detection, tolerant JSON parsing and per-call INFO logging.
+@description: Async OpenAI-compatible LLM client wrapper offering JSON (optionally JSON mode)
+and text chat helpers, plus language detection, tolerant JSON parsing and per-call INFO logging.
 """
 import itertools
 import json
@@ -10,9 +10,9 @@ import logging
 import re
 import time
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
-_CJK = re.compile(r"[\u4e00-\u9fff]")
+_CJK = re.compile(r"[一-鿿]")
 
 logger = logging.getLogger("dual_mem.llm")
 
@@ -45,7 +45,7 @@ def _parse_json(content: str):
 
 
 class LLMClient:
-    """Thin synchronous wrapper over an OpenAI-compatible chat completions endpoint."""
+    """Async wrapper over an OpenAI-compatible chat completions endpoint."""
 
     def __init__(
         self,
@@ -58,7 +58,7 @@ class LLMClient:
     ):
         self.model = model
         self.json_mode = json_mode
-        self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        self.client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
 
     def _log_call(self, kind: str, elapsed_ms: float) -> None:
         """Emit an INFO log per real LLM request with a global sequence number."""
@@ -67,7 +67,7 @@ class LLMClient:
             "LLM call #%d kind=%s model=%s took=%.0fms", seq, kind, self.model, elapsed_ms
         )
 
-    def chat_json(
+    async def chat_json(
         self,
         *,
         system: str,
@@ -85,7 +85,7 @@ class LLMClient:
         if use_json_mode:
             kwargs["response_format"] = {"type": "json_object"}
         start = time.perf_counter()
-        resp = self.client.chat.completions.create(
+        resp = await self.client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": system},
@@ -98,10 +98,10 @@ class LLMClient:
         content = resp.choices[0].message.content or ""
         return _parse_json(content)
 
-    def chat_text(self, *, system: str, user: str, temperature: float = 0.2) -> str:
+    async def chat_text(self, *, system: str, user: str, temperature: float = 0.2) -> str:
         """Run a chat completion and return the raw text reply."""
         start = time.perf_counter()
-        resp = self.client.chat.completions.create(
+        resp = await self.client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": system},
@@ -111,3 +111,45 @@ class LLMClient:
         )
         self._log_call("chat_text", (time.perf_counter() - start) * 1000)
         return resp.choices[0].message.content or ""
+
+    async def chat_with_tools(
+        self,
+        *,
+        messages: list[dict],
+        tools: list[dict],
+        tool_choice: str = "auto",
+        temperature: float = 0.2,
+    ) -> dict:
+        """Run a tool-calling chat completion; return ``{content, tool_calls}`` from one turn.
+
+        Used by the System2 ReAct loop: caller maintains the messages list, appends the
+        assistant turn (with tool_calls) plus role=tool replies, and re-invokes until the
+        model emits no more tool_calls.
+        """
+        start = time.perf_counter()
+        resp = await self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,  # type: ignore[arg-type]
+            tools=tools,  # type: ignore[arg-type]
+            tool_choice=tool_choice,  # type: ignore[arg-type]
+            temperature=temperature,
+        )
+        self._log_call("chat_tools", (time.perf_counter() - start) * 1000)
+        msg = resp.choices[0].message
+        tool_calls: list[dict] = []
+        if msg.tool_calls:
+            for tc in msg.tool_calls:
+                fn = getattr(tc, "function", None)
+                if fn is None:
+                    continue
+                tool_calls.append(
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": fn.name,
+                            "arguments": fn.arguments or "",
+                        },
+                    }
+                )
+        return {"content": msg.content or "", "tool_calls": tool_calls}

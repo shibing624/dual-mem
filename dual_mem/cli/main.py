@@ -2,7 +2,8 @@
 """
 @author:XuMing(xuming624@qq.com)
 @description: Typer CLI for the dual-mem SDK with commands to add/search/list/get/delete
-memories, trigger System2 digest, and serve the REST API or MCP server.
+memories, trigger System2 digest, and serve the REST API or MCP server. SDK results are
+dataclasses; this layer flattens them with .to_dict() for JSON output and friendly display.
 """
 import asyncio
 import json
@@ -32,14 +33,14 @@ def add(
     app_id: str = typer.Option(..., "--app-id"),
     user_id: str = typer.Option(..., "--user-id"),
     agent_id: str = typer.Option("", "--agent-id"),
-    mode: str | None = typer.Option(None, "--mode"),
+    mode: str | None = typer.Option(None, "--mode", help="emb | system1 | dual（默认取配置）"),
 ):
     """写入一条记忆。"""
     client = make_client(mode)
     result = asyncio.run(
         client.add(content=content, app_id=app_id, user_id=user_id, agent_id=agent_id)
     )
-    _echo_json(result)
+    _echo_json(result.to_dict())
 
 
 @app.command()
@@ -48,14 +49,14 @@ def search(
     app_id: str = typer.Option(..., "--app-id"),
     user_id: str = typer.Option(..., "--user-id"),
     limit: int = typer.Option(10, "--limit"),
-    mode: str | None = typer.Option(None, "--mode"),
+    mode: str | None = typer.Option(None, "--mode", help="emb | system1 | dual（默认取配置）"),
 ):
     """语义检索记忆并友好展示。"""
     client = make_client(mode)
     result = asyncio.run(
         client.search(query=query, app_ids=[app_id], user_id=user_id, limit=limit)
     )
-    typer.echo(format_memories(result["memories"]))
+    typer.echo(format_memories(result.memories.to_dict()))
 
 
 @app.command(name="list")
@@ -67,18 +68,18 @@ def list_memories(
 ):
     """列出记忆。"""
     client = make_client()
-    result = asyncio.run(
+    items = asyncio.run(
         client.list(app_id=app_id, user_id=user_id, agent_id=agent_id, limit=limit)
     )
-    _echo_json(result)
+    _echo_json([item.to_dict() for item in items])
 
 
 @app.command()
 def get(memory_id: str = typer.Argument(...)):
     """获取单条记忆。"""
     client = make_client()
-    result = asyncio.run(client.get(memory_id))
-    _echo_json(result)
+    item = asyncio.run(client.get(memory_id))
+    _echo_json(item.to_dict() if item is not None else None)
 
 
 @app.command()
@@ -86,15 +87,15 @@ def delete(memory_id: str = typer.Argument(...)):
     """删除单条记忆。"""
     client = make_client()
     result = asyncio.run(client.delete(memory_id))
-    _echo_json(result)
+    _echo_json(result.to_dict())
 
 
 @app.command()
 def digest():
-    """触发 System2 后台沉淀（ultra 模式）。"""
+    """触发 System2 后台沉淀（仅 dual 模式有效）。"""
     client = make_client()
     result = asyncio.run(client.digest())
-    _echo_json(result)
+    _echo_json(result.to_dict())
 
 
 @app.command()

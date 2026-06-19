@@ -9,9 +9,9 @@ runner = CliRunner()
 
 
 @pytest.fixture
-def patched_client(tmp_storage, fake_embed, monkeypatch):
-    settings = Settings(storage_dir=tmp_storage, mode="lite", auth_disabled=True)
-    client = MemoryClient(settings=settings, embed=fake_embed)
+def patched_client(tmp_storage, fake_embed, fake_llm, monkeypatch):
+    settings = Settings(storage_dir=tmp_storage, mode="system1", auth_disabled=True)
+    client = MemoryClient(settings=settings, embed=fake_embed, llm=fake_llm)
     monkeypatch.setattr(cli_main, "make_client", lambda mode=None: client)
     return client
 
