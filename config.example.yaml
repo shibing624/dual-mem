@@ -1,5 +1,5 @@
-# dual-mem 配置示例
-# 复制到 ~/.dual_mem/config.yaml 后按需修改。
+# dual-mem 配置参考（与包内 dual_mem/config.default.yaml 一致）
+# 首次 MemoryClient / Settings() 启动时会自动写入 ~/.dual_mem/config.yaml，无需手动复制。
 # 也可用 DUAL_MEM_CONFIG_FILE 环境变量指定其它路径。
 # 字段同名环境变量（DUAL_MEM_ 前缀）可临时覆盖本文件。
 

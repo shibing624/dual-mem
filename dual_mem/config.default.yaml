@@ -1,0 +1,40 @@
+# dual-mem 默认配置（首次启动 MemoryClient 时自动写入 ~/.dual_mem/config.yaml）
+# 按需修改 llm_api_key / embed_api_key；也可用 DUAL_MEM_* 环境变量临时覆盖。
+
+mode: system1
+storage_dir: ./.dual_mem_data
+
+llm_base_url: https://api.openai.com/v1
+llm_api_key: ""
+llm_model: gpt-4o-mini
+llm_json_mode: true
+
+embed_base_url: https://api.openai.com/v1
+embed_api_key: ""
+embed_model: text-embedding-3-small
+embed_dim: 1536
+
+auth_disabled: true
+app_whitelist:
+  - default
+
+system2_trigger_mode: per_write
+system2_schedule_interval_sec: 300
+reconcile_sync: false
+
+gate_enabled: true
+gate_threshold: 0.3
+
+cluster_stage1_sim: 0.42
+cluster_stage2_sim: 0.55
+reconcile_search_query: false
+system2_max_iters: 10
+
+reader_mode: hybrid
+
+embed_queue_batch_size: 32
+embed_queue_window_ms: 200.0
+
+cross_domain_enable: false
+cross_domain_min_basics: 5
+cross_domain_threshold: 0.7

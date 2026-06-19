@@ -52,6 +52,9 @@ dual-mem-mcp = "dual_mem.mcp.server:main"
 [tool.setuptools.packages.find]
 include = ["dual_mem*"]
 
+[tool.setuptools.package-data]
+dual_mem = ["config.default.yaml"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = [

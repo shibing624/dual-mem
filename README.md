@@ -101,7 +101,7 @@ async def main():
 asyncio.run(main())
 ```
 
-配置写入 `~/.dual_mem/config.yaml`（参考 `config.example.yaml`）。**LLM 与 Embedding 两套 API key 均必填**。
+配置位于 `~/.dual_mem/config.yaml`（**首次启动自动创建**，参考 `config.example.yaml`）。**LLM 与 Embedding 两套 API key 均必填**。
 
 ```yaml
 mode: system1

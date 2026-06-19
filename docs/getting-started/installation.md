@@ -28,11 +28,11 @@ pip install -e ".[dev]"
 
 ## 配置
 
-复制 `config.example.yaml` 到 `~/.dual_mem/config.yaml`：
+首次 `MemoryClient(...)` 或 `Settings()` 会在 **`~/.dual_mem/config.yaml`** 自动创建默认配置（与仓库根 `config.example.yaml` 一致），只需填入 API key：
 
-```bash
-mkdir -p ~/.dual_mem
-cp config.example.yaml ~/.dual_mem/config.yaml
+```yaml
+llm_api_key: sk-...
+embed_api_key: sk-...
 ```
 
 **dual-mem 同时需要 LLM 与 Embedding 两套 API key**，缺失时 `MemoryClient(...)` 会抛 `MissingCredentialsError`。

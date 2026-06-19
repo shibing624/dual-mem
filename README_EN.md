@@ -101,7 +101,7 @@ async def main():
 asyncio.run(main())
 ```
 
-Copy `config.example.yaml` to `~/.dual_mem/config.yaml`. **Both LLM and embedding API keys are required.**
+Config lives at `~/.dual_mem/config.yaml` (**auto-created on first startup**; see `config.example.yaml`). **Both LLM and embedding API keys are required.**
 
 ```yaml
 mode: system1

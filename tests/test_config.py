@@ -84,3 +84,19 @@ def test_init_overrides_yaml(tmp_path, monkeypatch):
     cfg.write_text("mode: dual\n", encoding="utf-8")
     monkeypatch.setenv("DUAL_MEM_CONFIG_FILE", str(cfg))
     assert Settings(mode="system1").mode == "system1"
+
+
+def test_ensure_config_file_creates_default(tmp_path, monkeypatch):
+    """Default ~/.dual_mem/config.yaml is bootstrapped when missing."""
+    monkeypatch.delenv("DUAL_MEM_CONFIG_FILE", raising=False)
+    monkeypatch.setattr("dual_mem.config.DEFAULT_CONFIG_PATH", tmp_path / "config.yaml")
+    from dual_mem.config import ensure_config_file
+
+    path = ensure_config_file()
+    assert path.exists()
+    text = path.read_text(encoding="utf-8")
+    assert "llm_api_key" in text
+    assert "embed_api_key" in text
+    assert path.read_text(encoding="utf-8") == text  # idempotent
+    ensure_config_file()
+    assert path.read_text(encoding="utf-8") == text

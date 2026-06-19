@@ -6,6 +6,7 @@ args, DUAL_MEM_* env vars and a YAML file, and derives mode-based flags.
 """
 import logging
 import os
+from importlib import resources
 from pathlib import Path
 from typing import Literal
 
@@ -32,6 +33,32 @@ def config_path() -> Path:
     """Resolve the YAML config path, honoring the DUAL_MEM_CONFIG_FILE override."""
     override = os.environ.get("DUAL_MEM_CONFIG_FILE")
     return Path(override).expanduser() if override else DEFAULT_CONFIG_PATH
+
+
+def _default_config_template() -> str:
+    """Load the bundled default YAML shipped inside the dual_mem package."""
+    return resources.files("dual_mem").joinpath("config.default.yaml").read_text(encoding="utf-8")
+
+
+def ensure_config_file() -> Path:
+    """Create ``~/.dual_mem/config.yaml`` with defaults when missing (MetaGPT-style bootstrap).
+
+    Skipped when ``DUAL_MEM_CONFIG_FILE`` points at a custom path — only the default
+    home location is auto-created so tests and explicit overrides stay predictable.
+    """
+    if os.environ.get("DUAL_MEM_CONFIG_FILE"):
+        return config_path()
+    path = DEFAULT_CONFIG_PATH
+    if path.exists():
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_default_config_template(), encoding="utf-8")
+    logger.info(
+        "Created default config at %s — edit llm_api_key and embed_api_key, "
+        "or set DUAL_MEM_LLM_API_KEY / DUAL_MEM_EMBED_API_KEY.",
+        path,
+    )
+    return path
 
 
 class Settings(BaseSettings):
@@ -141,6 +168,7 @@ class Settings(BaseSettings):
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """Order config sources as init args > env vars > YAML file."""
+        ensure_config_file()
         yaml_source = YamlConfigSettingsSource(settings_cls, yaml_file=config_path())
         return (init_settings, env_settings, yaml_source)
 
