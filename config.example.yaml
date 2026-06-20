@@ -32,6 +32,8 @@ embed_dim: 1536
 auth_disabled: true
 app_whitelist:
   - default
+# SDK add/list/search 省略 app_id 时使用（默认 default）；多产品共享服务时可显式传入
+default_app_id: default
 
 # ───── System2 触发与节奏（仅 dual 档生效）─────
 # per_write：每次 write 后 fire-and-forget 起后台任务跑该 user 的 reconcile + S2 agent

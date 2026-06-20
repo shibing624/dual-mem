@@ -27,7 +27,7 @@ async def main() -> None:
         system2_schedule_interval_sec=SCHEDULE_SEC,
     )
     client = MemoryClient(settings=settings)
-    app, user = "default", "dave"
+    user = "dave"
     try:
         section(f"写入事实（仅入队，不立即 digest；{SCHEDULE_SEC}s 后由 scheduled loop 处理）")
         facts = [
@@ -38,7 +38,7 @@ async def main() -> None:
             "下个月我要参加一场马拉松比赛，正在按周制定训练计划。",
         ]
         for text in facts:
-            res = await client.add(content=text, app_id=app, user_id=user)
+            res = await client.add(content=text, user_id=user)
             print(f"  + {text}\n    -> id={res.memory_id[:8]}")
 
         section(f"等待 scheduled loop（{SCHEDULE_SEC + 2}s）…")
@@ -47,7 +47,6 @@ async def main() -> None:
         section("检索：行为模式（期望 profile 出现 L6 Schema）")
         out = await client.search(
             query="这位用户在做事方式上有什么稳定的行为模式？",
-            app_ids=[app],
             user_id=user,
             limit=5,
             min_score=0.0,

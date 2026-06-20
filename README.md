@@ -105,12 +105,10 @@ from dual_mem import SyncMemoryClient
 with SyncMemoryClient(mode="system1", storage_dir="./.dual_mem_data") as client:
     client.add(
         content="我最爱的编程语言是 Java，已经用了5年。",
-        app_id="my_app",
         user_id="alice",
     )
     res = client.search(
         query="用户的编程语言偏好",
-        app_ids=["my_app"],
         user_id="alice",
     )
     for m in res.memories.profile:
@@ -126,7 +124,7 @@ from dual_mem import MemoryClient
 
 async def main():
     client = MemoryClient(mode="system1", storage_dir="./.dual_mem_data")
-    await client.add(content="...", app_id="my_app", user_id="alice")
+    await client.add(content="...", user_id="alice")
     await client.aclose()
 
 
@@ -145,7 +143,7 @@ asyncio.run(main())
 - **混合检索** — 语义 + 关键词；画像 / 主动 / 常规三路召回
 - **同步 & 异步 SDK** — `SyncMemoryClient` 给脚本；`MemoryClient` 给 FastAPI / Agent
 - **OpenAI 兼容** — 任意 LLM / Embedding 端点
-- **多租户** — `app_id` + `user_id` 隔离
+- **单产品默认** — 省略 `app_id` 时用 `default_app_id`（默认 `"default"`）；`user_id` 为主隔离键
 
 ## 两档模式
 

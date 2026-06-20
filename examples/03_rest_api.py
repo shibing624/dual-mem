@@ -26,11 +26,11 @@ def main() -> None:
         section("GET /health")
         print(" ", http.get("/health").json())
 
-        section("POST /v1/memories/  写入两条（content 形式）")
+        section("POST /v1/memories/  写入两条（content，省略 app_id）")
         for text in ["用户偏好深色主题界面", "用户的母语是中文，第二语言是英语"]:
             r = http.post(
                 "/v1/memories/",
-                json={"content": text, "app_id": "default", "user_id": "dave"},
+                json={"content": text, "user_id": "dave"},
             )
             body = r.json()
             print(f"  {r.status_code}  id={body['memory_id'][:8]}  "
@@ -44,7 +44,6 @@ def main() -> None:
                     {"role": "user", "content": "顺便提一下，我用 Mac 的快捷键比 Windows 熟练。"},
                     {"role": "assistant", "content": "好的，记下来了。"},
                 ],
-                "app_id": "default",
                 "user_id": "dave",
             },
         )
@@ -55,7 +54,6 @@ def main() -> None:
             "/v1/memories/search",
             json={
                 "query": "用户会哪些语言？",
-                "app_ids": ["default"],
                 "user_id": "dave",
                 "min_score": 0.0,
             },
@@ -66,7 +64,7 @@ def main() -> None:
             print(f"    - ({m['category']} score={m['score']}) {m['content']}")
 
         section("GET /v1/memories/  列表")
-        r = http.get("/v1/memories/", params={"app_id": "default", "user_id": "dave"})
+        r = http.get("/v1/memories/", params={"user_id": "dave"})
         items = r.json()
         print("  count:", len(items))
         first_id = items[0]["memory_id"]
@@ -81,7 +79,7 @@ def main() -> None:
         ).json())
 
         section("GET /v1/scopes/  列出租户 scope")
-        print(" ", http.get("/v1/scopes/", params={"app_id": "default"}).json())
+        print(" ", http.get("/v1/scopes/").json())
 
         section("GET /v1/capabilities  工具清单（npm MCP codegen）")
         caps = http.get("/v1/capabilities").json()

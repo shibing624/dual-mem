@@ -8,12 +8,10 @@ from dual_mem import SyncMemoryClient
 with SyncMemoryClient(mode="system1", storage_dir="./.dual_mem_data") as client:
     client.add(
         content="我最爱的编程语言是 Java，已经用了5年。",
-        app_id="my_app",
         user_id="alice",
     )
     res = client.search(
         query="用户的编程语言偏好",
-        app_ids=["my_app"],
         user_id="alice",
     )
     for m in res.memories.profile:
@@ -31,7 +29,7 @@ from dual_mem import MemoryClient
 
 async def main():
     client = MemoryClient(mode="system1", storage_dir="./.dual_mem_data")
-    await client.add(content="...", app_id="my_app", user_id="alice")
+    await client.add(content="...", user_id="alice")
     await client.aclose()
 
 
@@ -57,13 +55,13 @@ asyncio.run(main())
 
 | 参数 | 必填 | 含义 |
 |---|---|---|
-| `app_id` | add **是** | 应用 / 产品 / 租户命名空间（如 `"agentica"`）。自定义字符串，非密钥。REST 还校验 `app_whitelist`。 |
-| `user_id` | **是** | 终端用户 ID。读写必须 `app_id` + `user_id` 一致才能命中。 |
-| `app_ids` | search **是** | 检索范围，通常 `[app_id]`。 |
+| `user_id` | **是** | 终端用户 ID，读写必须一致才能命中。 |
+| `app_id` | 否 | 省略时用 `settings.default_app_id`（默认 `"default"`）。多产品共享同一服务时可显式传入。 |
+| `app_ids` | search 否 | 省略时用 `[default_app_id]`。 |
 | `agent_id` | 否 | 同一用户下细分 Agent 实例（多 Bot）。 |
 | `session_id` | 否 | 会话 ID，可选更细隔离或审计。 |
 
-Demo 可固定 `app_id="default"`；接 Agent 时 `app_id=产品名`，`user_id=真实用户 ID`。
+配置项 `default_app_id`（YAML / `DUAL_MEM_DEFAULT_APP_ID`）可改默认命名空间。
 
 ### `content` vs `messages`
 
@@ -81,7 +79,6 @@ await client.add(
         {"role": "assistant", "content": "好的，记住了"},
         {"role": "user", "content": "下个月要搬去北京工作"},
     ],
-    app_id="my_app",
     user_id="alice",
 )
 ```
@@ -114,7 +111,7 @@ from agentica import Agent, OpenAIChat
 from dual_mem import MemoryClient
 from dual_mem.retrieval.formatter import format_memories
 
-APP_ID = "agentica"
+APP_ID = "agentica"  # 可选；省略时用 default_app_id
 USER_ID = "demo_user"
 
 
@@ -134,7 +131,6 @@ async def main() -> None:
         for user_msg in user_turns:
             ctx = await memory.search(
                 query=user_msg,
-                app_ids=[APP_ID],
                 user_id=USER_ID,
             )
             block = format_memories(ctx.memories.to_dict())
@@ -148,7 +144,6 @@ async def main() -> None:
         session_messages = agent.working_memory.get_messages()
         write = await memory.add(
             messages=session_messages,
-            app_id=APP_ID,
             user_id=USER_ID,
         )
         print(

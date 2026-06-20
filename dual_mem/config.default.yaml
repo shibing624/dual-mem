@@ -17,6 +17,7 @@ embed_dim: 1536
 auth_disabled: true
 app_whitelist:
   - default
+default_app_id: default
 
 system2_trigger_mode: per_write
 system2_schedule_interval_sec: 300

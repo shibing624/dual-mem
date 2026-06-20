@@ -40,15 +40,15 @@ def run(args: list[str]) -> str:
 
 
 def main() -> None:
-    section("dual-mem add（写入两条）")
+    section("dual-mem add（写入两条，省略 --app-id）")
     for text in ["用户喜欢用 vim 编辑器", "用户习惯每天早上 7 点跑步"]:
-        print(run(["add", "--content", text, "--app-id", "default", "--user-id", "erin"]))
+        print(run(["add", "--content", text, "--user-id", "erin"]))
 
     section("dual-mem search（检索作息习惯）")
-    print(run(["search", "用户的运动习惯是什么？", "--app-id", "default", "--user-id", "erin"]))
+    print(run(["search", "用户的运动习惯是什么？", "--user-id", "erin"]))
 
     section("dual-mem list")
-    print(run(["list", "--app-id", "default", "--user-id", "erin"]))
+    print(run(["list", "--user-id", "erin"]))
 
 
 if __name__ == "__main__":

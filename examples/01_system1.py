@@ -20,14 +20,14 @@ from dual_mem import MemoryClient
 
 async def main() -> None:
     client = MemoryClient(mode="system1", storage_dir=fresh_storage("system1"))
-    app, user = "default", "bob"
+    user = "bob"
     try:
         section("第 1 轮：单轮 content 写入（自我介绍 + 旧偏好）")
         for text in [
             "我叫王磊，今年 30 岁，是一名后端工程师，在上海工作。",
             "我最喜欢的编程语言是 Java，已经用了五年了，非常熟练。",
         ]:
-            res = await client.add(content=text, app_id=app, user_id=user)
+            res = await client.add(content=text, user_id=user)
             print(
                 f"  + {text}\n    -> id={res.memory_id[:8]}  "
                 f"gate={res.gate_passed}/{res.gate_score}  "
@@ -41,7 +41,7 @@ async def main() -> None:
             {"role": "assistant", "content": "好的，我帮你把语言偏好更新一下。"},
             {"role": "user", "content": "我从上海搬到北京了，入职了一家新公司。"},
         ]
-        res = await client.add(messages=dialogue, app_id=app, user_id=user)
+        res = await client.add(messages=dialogue, user_id=user)
         print(
             f"  -> id={res.memory_id[:8]}  extracted={res.extracted_count}  "
             f"gate={res.gate_passed}/{res.gate_score}  "
@@ -51,19 +51,19 @@ async def main() -> None:
         section("检索：现在的编程语言（期望 Python，并带 Java→Python 演化链）")
         out = await client.search(
             query="这位用户现在主要用什么编程语言？",
-            app_ids=[app], user_id=user, limit=5, min_score=0.0,
+            user_id=user, limit=5, min_score=0.0,
         )
         show_memories(out.memories)
 
         section("检索：基础画像 / 居住地（期望 profile 命中北京）")
         out = await client.search(
             query="用户是谁？住在哪里？做什么工作？",
-            app_ids=[app], user_id=user, limit=5, min_score=0.0, profile_limit=5,
+            user_id=user, limit=5, min_score=0.0, profile_limit=5,
         )
         show_memories(out.memories)
 
         section("全部 ACTIVE 记忆")
-        for item in await client.list(app_id=app, user_id=user, limit=50):
+        for item in await client.list(user_id=user, limit=50):
             print(f"  - ({item.category}) {item.content}")
     finally:
         await client.aclose()

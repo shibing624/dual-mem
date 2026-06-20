@@ -70,7 +70,11 @@ def add(
         "--messages-json",
         help="多轮对话 JSON 字符串（与 --messages-file 二选一）",
     ),
-    app_id: str = typer.Option(..., "--app-id"),
+    app_id: str | None = typer.Option(
+        None,
+        "--app-id",
+        help="省略则使用 config 中 default_app_id（默认 default）",
+    ),
     user_id: str = typer.Option(..., "--user-id"),
     agent_id: str = typer.Option("", "--agent-id"),
     session_id: str = typer.Option("", "--session-id"),
@@ -110,7 +114,11 @@ def add(
 @app.command()
 def search(
     query: str = typer.Argument(...),
-    app_id: str = typer.Option(..., "--app-id"),
+    app_id: str | None = typer.Option(
+        None,
+        "--app-id",
+        help="省略则使用 config 中 default_app_id",
+    ),
     user_id: str = typer.Option(..., "--user-id"),
     limit: int = typer.Option(10, "--limit"),
     json_out: bool = typer.Option(False, "--json", help="输出原始 JSON 而非格式化文本"),
@@ -119,7 +127,12 @@ def search(
     """语义检索（MemoryClient.search）。"""
     client = make_client(mode)
     result = _run(
-        client.search(query=query, app_ids=[app_id], user_id=user_id, limit=limit)
+        client.search(
+            query=query,
+            app_ids=[app_id] if app_id is not None else None,
+            user_id=user_id,
+            limit=limit,
+        )
     )
     if json_out:
         _echo_json(result.to_dict())
@@ -129,7 +142,11 @@ def search(
 
 @app.command(name="list")
 def list_memories(
-    app_id: str = typer.Option(..., "--app-id"),
+    app_id: str | None = typer.Option(
+        None,
+        "--app-id",
+        help="省略则使用 config 中 default_app_id",
+    ),
     user_id: str = typer.Option(..., "--user-id"),
     agent_id: str = typer.Option("", "--agent-id"),
     limit: int = typer.Option(100, "--limit"),
@@ -171,7 +188,11 @@ def delete(memory_id: str = typer.Argument(...)):
 
 @app.command(name="delete-scope")
 def delete_scope(
-    app_id: str = typer.Option(..., "--app-id"),
+    app_id: str | None = typer.Option(
+        None,
+        "--app-id",
+        help="省略则使用 config 中 default_app_id",
+    ),
     user_id: str | None = typer.Option(None, "--user-id"),
     agent_id: str | None = typer.Option(None, "--agent-id"),
     confirm: bool = typer.Option(False, "--confirm", help="必须显式确认批量删除"),

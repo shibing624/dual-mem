@@ -88,8 +88,6 @@ def test_add_content_xor_messages(patched_client):
             "x",
             "--messages-json",
             '[{"role":"user","content":"y"}]',
-            "--app-id",
-            "app",
             "--user-id",
             "u",
         ],
@@ -98,6 +96,21 @@ def test_add_content_xor_messages(patched_client):
 
     neither = runner.invoke(
         cli_main.app,
-        ["add", "--app-id", "app", "--user-id", "u"],
+        ["add", "--user-id", "u"],
     )
     assert neither.exit_code == 1
+
+
+def test_add_search_without_app_id(patched_client):
+    added = runner.invoke(
+        cli_main.app,
+        ["add", "--content", "CLI 默认 app", "--user-id", "u_cli"],
+    )
+    assert added.exit_code == 0
+    assert "memory_id" in added.output
+
+    searched = runner.invoke(
+        cli_main.app,
+        ["search", "CLI 默认 app", "--user-id", "u_cli"],
+    )
+    assert searched.exit_code == 0

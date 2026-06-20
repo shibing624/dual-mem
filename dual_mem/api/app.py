@@ -29,7 +29,7 @@ from dual_mem.api.schemas import (
     UpdateResponse,
 )
 from dual_mem.client import MemoryClient
-from dual_mem.config import Settings
+from dual_mem.config import Settings, resolve_app_id, resolve_app_ids
 
 
 def _get_settings(request: Request) -> Settings:
@@ -113,13 +113,14 @@ def create_app(
         settings: Settings = Depends(_get_settings),
         ops: MemoryOperations = Depends(_get_ops),
     ):
-        _check_whitelist(settings, [body.app_id])
+        resolved_app_id = resolve_app_id(settings, body.app_id)
+        _check_whitelist(settings, [resolved_app_id])
         if not body.content and not body.messages:
             raise HTTPException(status_code=400, detail="content 与 messages 至少二选一")
         return await ops.memory_add(
             content=body.content,
             messages=body.messages,
-            app_id=body.app_id,
+            app_id=resolved_app_id,
             user_id=body.user_id,
             agent_id=body.agent_id,
             session_id=body.session_id,
@@ -138,10 +139,11 @@ def create_app(
         settings: Settings = Depends(_get_settings),
         ops: MemoryOperations = Depends(_get_ops),
     ):
-        _check_whitelist(settings, body.app_ids)
+        resolved_app_ids = resolve_app_ids(settings, body.app_ids)
+        _check_whitelist(settings, resolved_app_ids)
         return await ops.memory_search(
             query=body.query,
-            app_ids=body.app_ids,
+            app_ids=resolved_app_ids,
             user_id=body.user_id,
             agent_ids=body.agent_ids,
             session_ids=body.session_ids,
@@ -158,16 +160,17 @@ def create_app(
 
     @app.get("/v1/memories/", dependencies=[Depends(_verify_bearer)])
     async def memory_list(
-        app_id: str,
         user_id: str,
+        app_id: str | None = None,
         agent_id: str = "",
         limit: int = 100,
         settings: Settings = Depends(_get_settings),
         ops: MemoryOperations = Depends(_get_ops),
     ):
-        _check_whitelist(settings, [app_id])
+        resolved_app_id = resolve_app_id(settings, app_id)
+        _check_whitelist(settings, [resolved_app_id])
         return await ops.memory_list(
-            app_id=app_id, user_id=user_id, agent_id=agent_id, limit=limit
+            app_id=resolved_app_id, user_id=user_id, agent_id=agent_id, limit=limit
         )
 
     # ── memory_get ────────────────────────────────────────────────────────────
@@ -229,16 +232,17 @@ def create_app(
         dependencies=[Depends(_verify_bearer)],
     )
     async def memory_delete_scope(
-        app_id: str,
         confirm: bool = False,
+        app_id: str | None = None,
         user_id: str | None = None,
         agent_id: str | None = None,
         settings: Settings = Depends(_get_settings),
         ops: MemoryOperations = Depends(_get_ops),
     ):
-        _check_whitelist(settings, [app_id])
+        resolved_app_id = resolve_app_id(settings, app_id)
+        _check_whitelist(settings, [resolved_app_id])
         result = await ops.memory_delete_scope(
-            app_id=app_id,
+            app_id=resolved_app_id,
             user_id=user_id,
             agent_id=agent_id,
             confirm=confirm,

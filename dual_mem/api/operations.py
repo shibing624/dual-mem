@@ -17,8 +17,8 @@ class MemoryOperations:
     async def memory_add(
         self,
         *,
-        app_id: str,
         user_id: str,
+        app_id: str | None = None,
         content: str = "",
         messages: list[dict] | None = None,
         agent_id: str = "",
@@ -40,8 +40,8 @@ class MemoryOperations:
         self,
         *,
         query: str,
-        app_ids: list[str],
         user_id: str,
+        app_ids: list[str] | None = None,
         agent_ids: list[str] | None = None,
         session_ids: list[str] | None = None,
         limit: int = 10,
@@ -71,8 +71,8 @@ class MemoryOperations:
     async def memory_list(
         self,
         *,
-        app_id: str,
         user_id: str,
+        app_id: str | None = None,
         agent_id: str = "",
         limit: int = 100,
     ) -> list[dict]:
@@ -96,8 +96,8 @@ class MemoryOperations:
     async def memory_delete_scope(
         self,
         *,
-        app_id: str,
         confirm: bool,
+        app_id: str | None = None,
         user_id: str | None = None,
         agent_id: str | None = None,
     ) -> dict:

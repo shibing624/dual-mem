@@ -18,6 +18,7 @@ import asyncio
 import logging
 import time
 import uuid
+from typing import Any
 
 from dual_mem.config import Settings
 from dual_mem.isolation import build_filter
@@ -61,9 +62,9 @@ class MemoryClient:
 
     Tenant scope on ``add`` / ``search``:
 
-    - ``app_id`` (required on add): product / tenant namespace, e.g. ``"agentica"`` — not a secret.
-    - ``user_id`` (required): end-user id; reads and writes must share the same pair.
-    - ``app_ids`` (required on search): list, usually ``[app_id]``.
+    - ``app_id`` (optional): defaults to ``settings.default_app_id`` (``"default"``).
+    - ``user_id`` (required): end-user id; reads and writes must share the same scope.
+    - ``app_ids`` (optional on search): defaults to ``[default_app_id]``.
     - ``agent_id`` / ``session_id`` (optional): finer isolation within one user.
 
     Lifecycle: reuse one client per process (FastAPI lifespan / agent runtime). Call
@@ -100,6 +101,31 @@ class MemoryClient:
         self._build_writer()
         self.reader = Reader(factory=self.factory)
         self._write_locks = LockRegistry()
+
+    @classmethod
+    def from_config(
+        cls,
+        config_dict: dict[str, Any],
+        *,
+        mode: str | None = None,
+        embed=None,
+        llm=None,
+    ) -> MemoryClient:
+        """Create a client from a mem0/Hy-style config dict (see ``Settings.from_dict``).
+
+        Usage::
+
+            client = MemoryClient.from_config({
+                "mode": "dual",
+                "default_app_id": "my_app",
+                "llm": {"model": "gpt-4o-mini", "api_key": "sk-..."},
+                "embedder": {"model": "text-embedding-3-small", "api_key": "sk-..."},
+            })
+        """
+        settings = Settings.from_dict(config_dict)
+        if mode is not None:
+            settings = settings.model_copy(update={"mode": mode})
+        return cls(settings=settings, embed=embed, llm=llm)
 
     @classmethod
     async def acreate(
@@ -145,6 +171,10 @@ class MemoryClient:
         else:
             self.writer = MemoryWriter(factory=self.factory)
 
+    def _resolve_app_id(self, app_id: str | None) -> str:
+        """Return explicit ``app_id`` or ``settings.default_app_id``."""
+        return app_id if app_id is not None else self.settings.default_app_id
+
     def _user_write_lock(self, app_id: str, user_id: str) -> asyncio.Lock:
         """Return the per-user write lock, creating it lazily on first access."""
         return self._write_locks.get(f"{app_id}::{user_id}")
@@ -154,7 +184,7 @@ class MemoryClient:
         *,
         content: str = "",
         messages: list[dict] | list[ChatMessage] | None = None,
-        app_id: str,
+        app_id: str | None = None,
         user_id: str,
         agent_id: str = "",
         session_id: str = "",
@@ -164,7 +194,8 @@ class MemoryClient:
 
         Pass either ``content`` (single blob) or ``messages`` (multi-turn chat) — same API.
 
-        ``app_id`` and ``user_id`` are **required** isolation keys. With ``messages``,
+        ``app_id`` defaults to ``settings.default_app_id`` when omitted.
+        ``user_id`` is required. With ``messages``,
         only ``role=='user'`` turns drive Gate vector novelty (max across turns); L1_RAW
         and the extractor still see the full dialogue; the last assistant turn feeds Gate LLM context.
 
@@ -174,6 +205,7 @@ class MemoryClient:
         """
         request_id = str(uuid.uuid4())
         start = time.perf_counter()
+        resolved_app_id = self._resolve_app_id(app_id)
 
         user_queries: list[str] = []
         agent_context: str | None = None
@@ -185,13 +217,13 @@ class MemoryClient:
 
         logger.info(
             "add app=%s user=%s mode=%s len=%d turns=%d",
-            app_id, user_id, self.mode, len(content), len(user_queries),
+            resolved_app_id, user_id, self.mode, len(content), len(user_queries),
         )
 
-        async with self._user_write_lock(app_id, user_id):
+        async with self._user_write_lock(resolved_app_id, user_id):
             result = await self.writer.write(
                 content=content,
-                app_id=app_id,
+                app_id=resolved_app_id,
                 user_id=user_id,
                 agent_id=agent_id,
                 session_id=session_id,
@@ -216,7 +248,7 @@ class MemoryClient:
         self,
         *,
         query: str,
-        app_ids: list[str],
+        app_ids: list[str] | None = None,
         user_id: str,
         agent_ids: list[str] | None = None,
         session_ids: list[str] | None = None,
@@ -231,7 +263,8 @@ class MemoryClient:
     ) -> SearchResult:
         """Semantic search; returns profile / proactive / normal groups.
 
-        ``app_ids`` and ``user_id`` scope the query (must match values used in ``add``).
+        ``app_ids`` defaults to ``[settings.default_app_id]`` when omitted.
+        ``user_id`` scope the query (must match values used in ``add``).
         Read path uses embedding + hybrid retrieval — no LLM. Safe to call every user turn
         in an agent loop before generation.
 
@@ -239,14 +272,15 @@ class MemoryClient:
         """
         request_id = request_id or str(uuid.uuid4())
         start = time.perf_counter()
+        resolved_app_ids = app_ids if app_ids is not None else [self.settings.default_app_id]
         logger.info(
             "search app=%s user=%s query=%r limit=%d debug=%s",
-            (app_ids[0] if app_ids else ""), user_id, query, limit, debug,
+            (resolved_app_ids[0] if resolved_app_ids else ""), user_id, query, limit, debug,
         )
         if debug:
             memories, trace = await self.reader.search_with_trace(
                 query=query,
-                app_ids=app_ids,
+                app_ids=resolved_app_ids,
                 user_id=user_id,
                 agent_ids=agent_ids,
                 session_ids=session_ids,
@@ -261,7 +295,7 @@ class MemoryClient:
         else:
             memories = await self.reader.search(
                 query=query,
-                app_ids=app_ids,
+                app_ids=resolved_app_ids,
                 user_id=user_id,
                 agent_ids=agent_ids,
                 session_ids=session_ids,
@@ -308,11 +342,12 @@ class MemoryClient:
         return Reader.memory_node_to_item(node)
 
     async def list(
-        self, *, app_id: str, user_id: str, agent_id: str = "", limit: int = 100
+        self, *, app_id: str | None = None, user_id: str, agent_id: str = "", limit: int = 100
     ) -> list[MemoryItem]:
         """List ACTIVE memories under the given app/user (optionally agent) scope."""
+        resolved_app_id = self._resolve_app_id(app_id)
         where = build_filter(
-            app_ids=[app_id],
+            app_ids=[resolved_app_id],
             user_id=user_id,
             agent_ids=[agent_id],
             statuses=[MemoryStatus.ACTIVE],
@@ -357,7 +392,7 @@ class MemoryClient:
     async def delete_bulk(
         self,
         *,
-        app_id: str,
+        app_id: str | None = None,
         user_id: str | None = None,
         agent_id: str | None = None,
         confirm: bool = False,
@@ -365,7 +400,8 @@ class MemoryClient:
         """Delete every memory in a scope; requires confirm=True as a safety guard."""
         if confirm is not True:
             return DeleteBulkResult(success=False, error_code=400)
-        where: dict = {"app_id": {"$in": [app_id]}}
+        resolved_app_id = self._resolve_app_id(app_id)
+        where: dict = {"app_id": {"$in": [resolved_app_id]}}
         if user_id is not None:
             where["user_id"] = user_id
         if agent_id is not None:

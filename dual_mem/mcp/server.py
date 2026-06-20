@@ -4,6 +4,8 @@
 @description: MCP server — registers the same memory_* tools as REST (MemoryOperations).
 """
 import argparse
+import sys
+from typing import Literal, cast
 
 from dual_mem.api.operations import MemoryOperations
 from dual_mem.client import MemoryClient
@@ -43,20 +45,21 @@ def build_mcp(
     @mcp.tool(
         description=(
             "写入记忆。content 与 messages 二选一；"
-            "messages 为 [{role, content}, ...] 多轮对话。必填 app_id + user_id。"
+            "messages 为 [{role, content}, ...] 多轮对话。必填 user_id；"
+            "app_id 省略则用 default_app_id。"
         )
     )
     async def memory_add(
-        app_id: str,
         user_id: str,
+        app_id: str | None = None,
         content: str = "",
         messages: list[dict] | None = None,
         agent_id: str = "",
         session_id: str = "",
     ) -> dict:
         return await ops.memory_add(
-            app_id=app_id,
             user_id=user_id,
+            app_id=app_id,
             content=content,
             messages=messages,
             agent_id=agent_id,
@@ -66,8 +69,8 @@ def build_mcp(
     @mcp.tool(description=f"语义检索。{_SEARCH_DOC}")
     async def memory_search(
         query: str,
-        app_ids: list[str],
         user_id: str,
+        app_ids: list[str] | None = None,
         agent_ids: list[str] | None = None,
         limit: int = 10,
         min_score: float = 0.4,
@@ -75,8 +78,8 @@ def build_mcp(
     ) -> dict:
         return await ops.memory_search(
             query=query,
-            app_ids=app_ids,
             user_id=user_id,
+            app_ids=app_ids,
             agent_ids=agent_ids,
             limit=limit,
             min_score=min_score,
@@ -85,13 +88,14 @@ def build_mcp(
 
     @mcp.tool(description="列出某 scope 下 ACTIVE 记忆。")
     async def memory_list(
-        app_id: str,
         user_id: str,
+        app_id: str | None = None,
         agent_id: str = "",
         limit: int = 100,
     ) -> list[dict]:
         return await ops.memory_list(
-            app_id=app_id, user_id=user_id, agent_id=agent_id, limit=limit
+            user_id=user_id,
+            app_id=app_id, agent_id=agent_id, limit=limit
         )
 
     @mcp.tool(description="按 memory_id 获取单条；不存在返回 null。")
@@ -107,17 +111,17 @@ def build_mcp(
         return await ops.memory_delete(memory_id)
 
     @mcp.tool(
-        description="按 scope 批量删除。必填 app_id；confirm 必须为 true。"
+        description="按 scope 批量删除。confirm 必须为 true；app_id 省略则用 default_app_id。"
     )
     async def memory_delete_scope(
-        app_id: str,
         confirm: bool,
+        app_id: str | None = None,
         user_id: str | None = None,
         agent_id: str | None = None,
     ) -> dict:
         return await ops.memory_delete_scope(
-            app_id=app_id,
             confirm=confirm,
+            app_id=app_id,
             user_id=user_id,
             agent_id=agent_id,
         )
@@ -140,8 +144,6 @@ def run_server(
     *, transport: str = "stdio", host: str = DEFAULT_HOST, port: int = DEFAULT_PORT
 ) -> None:
     """Run the MCP server with the given transport (stdio or streamable-http)."""
-    import sys
-    from typing import Literal, cast
 
     if transport == "stdio":
         # stdio MCP uses stdout for JSON-RPC — never log there; one stderr line only.

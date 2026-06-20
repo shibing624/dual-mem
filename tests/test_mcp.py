@@ -48,7 +48,7 @@ async def test_tools_registered(mcp):
 
 async def test_add_search_get_update_delete(mcp):
     added = await mcp.call_tool(
-        "memory_add", {"content": "用户喜欢喝咖啡", "app_id": "app", "user_id": "u"}
+        "memory_add", {"content": "用户喜欢喝咖啡", "user_id": "u"}
     )
     body = _payload(added)
     assert body["success"] is True
@@ -63,13 +63,13 @@ async def test_add_search_get_update_delete(mcp):
     assert _payload(updated)["success"] is True
 
     listed = await mcp.call_tool(
-        "memory_list", {"app_id": "app", "user_id": "u", "limit": 10}
+        "memory_list", {"user_id": "u", "limit": 10}
     )
     assert isinstance(_payload(listed), list)
 
     searched = await mcp.call_tool(
         "memory_search",
-        {"query": "饮品", "app_ids": ["app"], "user_id": "u", "min_score": 0.0},
+        {"query": "饮品", "user_id": "u", "min_score": 0.0},
     )
     memories = _payload(searched)["memories"]
     assert set(memories.keys()) == {"profile", "proactive", "normal"}

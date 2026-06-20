@@ -81,10 +81,31 @@ def test_update_missing_404(app_client):
 
 def test_add_requires_content_or_messages(app_client):
     resp = app_client.post(
-        "/v1/memories/", json={"app_id": "app", "user_id": "u"}
+        "/v1/memories/", json={"user_id": "u"}
     )
     assert resp.status_code == 400
     assert resp.json()["error_code"] == 400
+
+
+def test_add_search_without_app_id_uses_default(app_client):
+    added = app_client.post(
+        "/v1/memories/",
+        json={"content": "省略 app_id 的写入", "user_id": "u_default"},
+    )
+    assert added.status_code == 200
+    memory_id = added.json()["memory_id"]
+
+    searched = app_client.post(
+        "/v1/memories/search",
+        json={"query": "省略 app_id", "user_id": "u_default", "min_score": 0.0},
+    )
+    assert searched.status_code == 200
+    normal = searched.json()["memories"]["normal"]
+    assert any(m["memory_id"] == memory_id for m in normal)
+
+    listed = app_client.get("/v1/memories/", params={"user_id": "u_default"})
+    assert listed.status_code == 200
+    assert any(m["memory_id"] == memory_id for m in listed.json())
 
 
 def test_delete_missing_404(app_client):

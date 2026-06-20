@@ -29,10 +29,10 @@ dual-mem 把对话沉淀为**分层长期记忆**（L0–L7），检索时按 pr
 
 ## 归属标识（scope）
 
-每次读写必须一致：
+**单产品默认：只传 `user_id` 即可**（`app_id` 省略时用 config 的 `default_app_id`，一般为 `"default"`）。
 
-- **`app_id`** — 应用/产品命名空间（如 `"agentica"`）
-- **`user_id`** — 终端用户 ID
+- **`user_id`** — 终端用户 ID（必填）
+- **`app_id`** / **`app_ids`** — 可选；多产品共享同一 Memory 服务时再显式传入
 - 可选 **`agent_id`** / **`session_id`** — 多 Bot 或会话级隔离
 
 ## 写入方式（用户自选，SDK 不强制）
@@ -64,45 +64,45 @@ CLI：`--content` 或 `--messages-file` / `--messages-json` 二选一。
 单条：
 
 ```bash
-dual-mem add --content "用户在深圳做 ML" --app-id agentica --user-id u1
+dual-mem add --content "用户在深圳做 ML" --user-id u1
 ```
 
 会话结束批量写入多轮对话：
 
 ```bash
 # messages.json: [{"role":"user","content":"..."},{"role":"assistant","content":"..."}, ...]
-dual-mem add --messages-file messages.json --app-id agentica --user-id u1
+dual-mem add --messages-file messages.json --user-id u1
 
 # 或内联 JSON
 dual-mem add --messages-json '[{"role":"user","content":"我搬到北京了"}]' \
-  --app-id agentica --user-id u1
+  --user-id u1
 ```
 
 检索与管理：
 
 ```bash
-dual-mem search "用户做什么工作" --app-id agentica --user-id u1
-dual-mem list --app-id agentica --user-id u1
+dual-mem search "用户做什么工作" --user-id u1
+dual-mem list --user-id u1
 dual-mem get <memory_id>
 dual-mem update <memory_id> --content "新内容"
 dual-mem delete <memory_id>
-dual-mem delete-scope --app-id agentica --user-id u1 --confirm
-dual-mem list-scopes --app-id agentica
+dual-mem delete-scope --user-id u1 --confirm
+dual-mem list-scopes
 dual-mem digest   # dual 模式
 ```
 
 ## MCP 示例
 
 ```text
-memory_add(app_id="agentica", user_id="u1", content="...")
-memory_add(app_id="agentica", user_id="u1", messages=[{"role":"user","content":"..."}, ...])
-memory_search(query="...", app_ids=["agentica"], user_id="u1")
-memory_list(app_id="agentica", user_id="u1")
+memory_add(user_id="u1", content="...")
+memory_add(user_id="u1", messages=[{"role":"user","content":"..."}, ...])
+memory_search(query="...", user_id="u1")
+memory_list(user_id="u1")
 memory_get(memory_id="...")
 memory_update(memory_id="...", content="...")
 memory_delete(memory_id="...")
-memory_delete_scope(app_id="agentica", user_id="u1", confirm=true)
-memory_list_scopes(app_id="agentica")
+memory_delete_scope(user_id="u1", confirm=true)
+memory_list_scopes()
 memory_digest()
 ```
 

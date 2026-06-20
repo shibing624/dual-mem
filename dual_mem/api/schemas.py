@@ -11,7 +11,7 @@ class AddRequest(BaseModel):
 
     content: str = ""
     messages: list[dict] | None = None
-    app_id: str
+    app_id: str | None = None
     user_id: str
     agent_id: str = ""
     session_id: str = ""
@@ -31,7 +31,7 @@ class SearchRequest(BaseModel):
     """Request body for semantic search with scope and route parameters."""
 
     query: str
-    app_ids: list[str]
+    app_ids: list[str] | None = None
     user_id: str
     agent_ids: list[str] | None = None
     session_ids: list[str] | None = None

@@ -1,6 +1,7 @@
 import pytest
 
 from dual_mem import MemoryClient
+from dual_mem.config import Settings
 
 
 @pytest.fixture
@@ -69,3 +70,45 @@ async def test_delete_bulk_confirm_guard(client):
     done = await client.delete_bulk(app_id="app", user_id="u", confirm=True)
     assert done.success is True
     assert done.deleted == 2
+
+
+async def test_add_search_use_default_app_id(tmp_storage, fake_embed, fake_llm):
+    client = MemoryClient(
+        storage_dir=tmp_storage,
+        mode="system1",
+        embed=fake_embed,
+        llm=fake_llm,
+        settings=Settings(
+            default_app_id="my_tenant",
+            llm_api_key="x",
+            embed_api_key="y",
+        ),
+    )
+    added = await client.add(content="默认租户记忆", user_id="u")
+    assert added.success is True
+
+    found = await client.search(query="默认租户记忆", user_id="u", min_score=0.4)
+    assert found.success is True
+    assert any(item.memory_id == added.memory_id for item in found.memories.normal)
+
+
+async def test_from_config(tmp_storage, fake_embed, fake_llm, monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setenv("DUAL_MEM_CONFIG_FILE", str(Path(tmp_storage) / "nope.yaml"))
+    client = MemoryClient.from_config(
+        {
+            "storage_dir": tmp_storage,
+            "default_app_id": "cfg_app",
+            "llm": {"api_key": "k", "model": "m"},
+            "embedder": {"api_key": "e", "model": "em"},
+        },
+        embed=fake_embed,
+        llm=fake_llm,
+    )
+    assert client.settings.default_app_id == "cfg_app"
+    assert client.settings.storage_dir == tmp_storage
+
+    added = await client.add(content="from_config 写入", user_id="u")
+    listed = await client.list(user_id="u")
+    assert any(item.memory_id == added.memory_id for item in listed)

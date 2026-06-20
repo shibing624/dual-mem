@@ -64,13 +64,13 @@ python examples/05_scheduled_system2.py  # dual + scheduled：定时批量 Syste
 ```python
 import asyncio
 results = await asyncio.gather(
-    *(client.add(content=f, app_id=app, user_id=user) for f in facts)
+    *(client.add(content=f, user_id=user) for f in facts)
 )
 ```
 
 注意：
 
-- 同一 `(app_id, user_id)` 的并发 `add` 已被客户端内部 lock **串行化**，不会撕裂演化链；
+- 同一 `user_id` 的并发 `add` 已被客户端内部 lock **串行化**，不会撕裂演化链；
   但 dual 的 System2 聚类仍依赖同主题事实各自落库，并发写会让 reconcile 把它们
   合并成一条，**导致聚类样本不足、出不了 Schema**。
 - 因此 `02_dual.py` 刻意保持串行；`01_system1.py` 也串行，以保证 Java→Python、

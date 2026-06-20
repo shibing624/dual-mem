@@ -4,11 +4,13 @@
 @description: Runtime configuration via pydantic-settings; resolves Settings from init
 args, DUAL_MEM_* env vars and a YAML file, and derives mode-based flags.
 """
+from __future__ import annotations
+
 import logging
 import os
 from importlib import resources
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import field_validator
 from pydantic_settings import (
@@ -70,6 +72,16 @@ def ensure_storage_dir(storage_dir: str) -> Path:
     return path
 
 
+def resolve_app_id(settings: Settings, app_id: str | None) -> str:
+    """Return explicit ``app_id`` or ``settings.default_app_id``."""
+    return app_id if app_id is not None else settings.default_app_id
+
+
+def resolve_app_ids(settings: Settings, app_ids: list[str] | None) -> list[str]:
+    """Return explicit ``app_ids`` or ``[settings.default_app_id]``."""
+    return app_ids if app_ids is not None else [settings.default_app_id]
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="DUAL_MEM_",
@@ -101,6 +113,8 @@ class Settings(BaseSettings):
 
     auth_disabled: bool = True
     app_whitelist: list[str] = ["default"]
+    # Default tenant namespace when add/list/search omit app_id (single-product default).
+    default_app_id: str = "default"
 
     system2_trigger_mode: Literal["per_write", "manual", "scheduled"] = "per_write"
     # Scheduled-mode background loop period in seconds (only used when trigger_mode=scheduled).
@@ -189,3 +203,66 @@ class Settings(BaseSettings):
     def enable_graph(self) -> bool:
         """Whether the graph store is enabled (``dual`` mode only)."""
         return self.mode == "dual"
+
+    @classmethod
+    def from_dict(cls, config_dict: dict[str, Any]) -> Settings:
+        """Build ``Settings`` from a mem0/Hy-style nested dict (flat keys also accepted).
+
+        Nested sections:
+
+        - ``llm``: ``api_key`` / ``base_url`` / ``model`` → ``llm_*``
+        - ``embedder`` or ``embed``: same → ``embed_*``
+        - ``vector_store.persist_directory`` → ``storage_dir`` (when set)
+
+        Unknown top-level keys are ignored (``extra="ignore"``).
+        """
+        flat = _flatten_config_dict(config_dict)
+        return cls(**flat)
+
+
+def _flatten_config_dict(config_dict: dict[str, Any]) -> dict[str, Any]:
+    """Map mem0/Hy nested provider blocks onto flat ``Settings`` field names."""
+    flat = dict(config_dict)
+
+    llm = flat.pop("llm", None)
+    if isinstance(llm, dict):
+        _map_provider_section(llm, flat, prefix="llm")
+
+    embed_section = flat.pop("embedder", None)
+    if embed_section is None:
+        embed_section = flat.pop("embed", None)
+    if isinstance(embed_section, dict):
+        _map_provider_section(embed_section, flat, prefix="embed")
+
+    vector_store = flat.pop("vector_store", None)
+    if isinstance(vector_store, dict):
+        persist = vector_store.get("persist_directory")
+        if persist:
+            flat.setdefault("storage_dir", persist)
+        dims = vector_store.get("embedding_dims")
+        if dims is not None:
+            flat.setdefault("embed_dim", dims)
+
+    for drop_key in (
+        "graph_store",
+        "enable_graph",
+        "cache",
+        "history_store",
+        "providers",
+    ):
+        flat.pop(drop_key, None)
+
+    return flat
+
+
+def _map_provider_section(section: dict[str, Any], flat: dict[str, Any], *, prefix: str) -> None:
+    """Copy ``api_key`` / ``base_url`` / ``model`` into ``{prefix}_*`` Settings keys."""
+    mapping = {
+        "api_key": f"{prefix}_api_key",
+        "base_url": f"{prefix}_base_url",
+        "model": f"{prefix}_model",
+    }
+    for src, dst in mapping.items():
+        val = section.get(src)
+        if val is not None and val != "":
+            flat.setdefault(dst, val)

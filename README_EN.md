@@ -105,12 +105,10 @@ from dual_mem import SyncMemoryClient
 with SyncMemoryClient(mode="system1", storage_dir="./.dual_mem_data") as client:
     client.add(
         content="My favorite language is Java. I've used it for 5 years.",
-        app_id="my_app",
         user_id="alice",
     )
     res = client.search(
         query="programming language preference",
-        app_ids=["my_app"],
         user_id="alice",
     )
     for m in res.memories.profile:
@@ -126,7 +124,7 @@ from dual_mem import MemoryClient
 
 async def main():
     client = MemoryClient(mode="system1", storage_dir="./.dual_mem_data")
-    await client.add(content="...", app_id="my_app", user_id="alice")
+    await client.add(content="...", user_id="alice")
     await client.aclose()
 
 
@@ -145,7 +143,7 @@ Config lives at `~/.dual_mem/config.yaml` (**auto-created on first startup**). *
 - **Hybrid retrieval** — semantic + keyword; profile / proactive / normal routes
 - **Sync & async SDK** — `SyncMemoryClient` for scripts; `MemoryClient` for FastAPI / agents
 - **OpenAI-compatible** — any LLM / embedding endpoint
-- **Multi-tenant** — `app_id` + `user_id` isolation
+- **Single-product default** — omit `app_id` to use `default_app_id` (`"default"`); `user_id` is the primary isolation key
 
 ## Modes
 

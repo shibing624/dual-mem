@@ -66,6 +66,21 @@ class SyncMemoryClient:
         )
         self._closed = False
 
+    @classmethod
+    def from_config(
+        cls,
+        config_dict: dict[str, Any],
+        *,
+        mode: str | None = None,
+        embed=None,
+        llm=None,
+    ) -> SyncMemoryClient:
+        """Blocking client from a mem0-style config dict (see ``MemoryClient.from_config``)."""
+        settings = Settings.from_dict(config_dict)
+        if mode is not None:
+            settings = settings.model_copy(update={"mode": mode})
+        return cls(settings=settings, embed=embed, llm=llm)
+
     @property
     def settings(self) -> Settings:
         return self._client.settings
@@ -112,7 +127,7 @@ class SyncMemoryClient:
         *,
         content: str = "",
         messages: list[dict] | list[ChatMessage] | None = None,
-        app_id: str,
+        app_id: str | None = None,
         user_id: str,
         agent_id: str = "",
         session_id: str = "",
@@ -134,7 +149,7 @@ class SyncMemoryClient:
         self,
         *,
         query: str,
-        app_ids: list[str],
+        app_ids: list[str] | None = None,
         user_id: str,
         agent_ids: list[str] | None = None,
         session_ids: list[str] | None = None,
@@ -169,7 +184,7 @@ class SyncMemoryClient:
         return self._run(self._client.get(memory_id))
 
     def list(
-        self, *, app_id: str, user_id: str, agent_id: str = "", limit: int = 100
+        self, *, app_id: str | None = None, user_id: str, agent_id: str = "", limit: int = 100
     ) -> list[MemoryItem]:
         return self._run(
             self._client.list(
@@ -189,7 +204,7 @@ class SyncMemoryClient:
     def delete_bulk(
         self,
         *,
-        app_id: str,
+        app_id: str | None = None,
         user_id: str | None = None,
         agent_id: str | None = None,
         confirm: bool = False,

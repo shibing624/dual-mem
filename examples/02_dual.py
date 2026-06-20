@@ -33,7 +33,7 @@ async def main() -> None:
         cross_domain_min_basics=3,
     )
     client = MemoryClient(settings=settings)
-    app, user = "default", "carol"
+    user = "carol"
     try:
         # 给一组「互不取代但同主题」的离散事实：System2 才能聚类并归纳出行为模式。
         # 注意：这里刻意串行写入——并发会让 reconcile 把同主题事实合并成一条，
@@ -48,7 +48,7 @@ async def main() -> None:
             "下个月我要参加一场马拉松比赛，正在按周制定训练计划。",
         ]
         for text in facts:
-            res = await client.add(content=text, app_id=app, user_id=user)
+            res = await client.add(content=text, user_id=user)
             print(f"  + {text}\n    -> id={res.memory_id[:8]}")
 
         section("digest()：触发 System2 ReAct + Cross-domain sweeper")
@@ -60,7 +60,6 @@ async def main() -> None:
         section("检索：行为模式（期望 profile 召回 L6 Schema）")
         out = await client.search(
             query="这位用户在做事方式上有什么稳定的行为模式？",
-            app_ids=[app],
             user_id=user,
             limit=5,
             min_score=0.0,

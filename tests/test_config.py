@@ -8,6 +8,7 @@ def test_defaults():
     assert s.mode == "system1"
     assert s.embed_dim == 1536
     assert s.auth_disabled is True
+    assert s.default_app_id == "default"
     assert s.system2_trigger_mode == "per_write"
 
 
@@ -108,3 +109,35 @@ def test_ensure_storage_dir_creates_nested(tmp_path):
     target = tmp_path / "nested" / "dual_mem_data"
     ensure_storage_dir(str(target))
     assert target.is_dir()
+
+
+def test_settings_from_dict_mem0_style():
+    s = Settings.from_dict({
+        "mode": "dual",
+        "default_app_id": "agentica",
+        "llm": {
+            "model": "deepseek-chat",
+            "api_key": "sk-llm",
+            "base_url": "https://api.example/v1",
+        },
+        "embedder": {
+            "model": "text-embedding-v3",
+            "api_key": "sk-embed",
+            "base_url": "https://embed.example/v1",
+        },
+        "vector_store": {
+            "persist_directory": "/data/mem",
+            "embedding_dims": 768,
+        },
+        "graph_store": {"provider": "neo4j"},
+    })
+    assert s.mode == "dual"
+    assert s.default_app_id == "agentica"
+    assert s.llm_model == "deepseek-chat"
+    assert s.llm_api_key == "sk-llm"
+    assert s.llm_base_url == "https://api.example/v1"
+    assert s.embed_model == "text-embedding-v3"
+    assert s.embed_api_key == "sk-embed"
+    assert s.embed_base_url == "https://embed.example/v1"
+    assert s.storage_dir == "/data/mem"
+    assert s.embed_dim == 768
