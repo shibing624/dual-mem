@@ -48,8 +48,12 @@ class ComponentFactory:
                 api_key=self.settings.embed_api_key,
                 model=self.settings.embed_model,
                 dim=self.settings.embed_dim,
+                timeout=self.settings.embed_timeout,
                 queue_batch_size=self.settings.embed_queue_batch_size,
                 queue_batch_window_ms=self.settings.embed_queue_window_ms,
+                input_max_chars=self.settings.embed_input_max_chars,
+                retry_attempts=self.settings.embed_retry_attempts,
+                retry_base_delay=self.settings.embed_retry_base_delay,
             )
         return self._embed
 
@@ -93,6 +97,8 @@ class ComponentFactory:
                 base_url=self.settings.llm_base_url,
                 api_key=self.settings.llm_api_key,
                 model=self.settings.llm_model,
+                timeout=self.settings.llm_timeout,
                 json_mode=self.settings.llm_json_mode,
+                extra_body=self.settings.llm_extra_body or None,
             )
         return self._llm

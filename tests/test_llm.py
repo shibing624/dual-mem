@@ -3,6 +3,7 @@ import pytest
 import respx
 
 from dual_mem.providers.llm import LLMClient, is_chinese
+from dual_mem.providers.usage import UsageEvent
 
 
 def _make_client():
@@ -58,6 +59,55 @@ async def test_chat_json_sends_json_mode_by_default():
     await _make_client().chat_json(system="s", user="u")
     body = _json.loads(route.calls.last.request.content)
     assert body["response_format"] == {"type": "json_object"}
+
+
+@respx.mock
+async def test_chat_json_passes_extra_body():
+    from unittest.mock import AsyncMock, MagicMock
+
+    client = LLMClient(
+        base_url="https://api.test/v1",
+        api_key="sk-x",
+        model="gpt-test",
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock(message=MagicMock(content="{}"))]
+    create = AsyncMock(return_value=mock_resp)
+    client.client.chat.completions.create = create  # type: ignore[method-assign]
+    await client.chat_json(system="s", user="u")
+    assert create.call_args.kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+@respx.mock
+async def test_chat_json_usage_callback():
+    events: list[UsageEvent] = []
+
+    def _cb(event: UsageEvent) -> None:
+        events.append(event)
+
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                **_completion({"role": "assistant", "content": "{}"}),
+                "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+            },
+        )
+    )
+    client = LLMClient(
+        base_url="https://api.test/v1",
+        api_key="sk-x",
+        model="gpt-test",
+        usage_callback=_cb,
+    )
+    await client.chat_json(system="s", user="u")
+    assert route.called
+    assert len(events) == 1
+    assert events[0].kind == "chat_json"
+    assert events[0].prompt_tokens == 11
+    assert events[0].completion_tokens == 7
+    assert events[0].latency_ms >= 0
 
 
 @respx.mock

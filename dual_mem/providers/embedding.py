@@ -8,10 +8,20 @@ single requests into one batch within a 200ms window or 32-item threshold (which
 import asyncio
 import hashlib
 import logging
+import time
 
 from openai import AsyncOpenAI
 
+from dual_mem.providers.usage import UsageCallback, UsageEvent
+
 logger = logging.getLogger("dual_mem.embed")
+
+# Hunyuan / openai-compatible providers reject single-input >~32k chars; truncate
+# at this length on write/search side. Embedding is a retrieval anchor, not a
+# verbatim store, so head-truncation is safe.
+EMBED_INPUT_MAX_CHARS = 8000
+EMBED_RETRY_ATTEMPTS = 3
+EMBED_RETRY_BASE_DELAY = 0.5
 
 
 def embedding_api_dimensions(model: str, dim: int) -> int | None:
@@ -44,9 +54,17 @@ class EmbedService:
         queue_batch_size: int = DEFAULT_BATCH_SIZE,
         queue_batch_window_ms: float = DEFAULT_BATCH_WINDOW_MS,
         cache_size: int = DEFAULT_CACHE_SIZE,
+        input_max_chars: int = EMBED_INPUT_MAX_CHARS,
+        retry_attempts: int = EMBED_RETRY_ATTEMPTS,
+        retry_base_delay: float = EMBED_RETRY_BASE_DELAY,
+        usage_callback: UsageCallback | None = None,
     ):
         self.model = model
         self.dim = dim
+        self.input_max_chars = input_max_chars
+        self.retry_attempts = retry_attempts
+        self.retry_base_delay = retry_base_delay
+        self.usage_callback = usage_callback
         self._api_dimensions = embedding_api_dimensions(model, dim)
         if self._api_dimensions is None:
             logger.info(
@@ -77,14 +95,63 @@ class EmbedService:
         self._cache[self._cache_key(text)] = vector
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Embed a list of texts and return one vector per input; empty list short-circuits."""
+        """Embed a list of texts and return one vector per input; empty list short-circuits.
+
+        Each text >input_max_chars is head-truncated. Provider 4xx/5xx are retried
+        with exponential backoff up to retry_attempts.
+        """
         if not texts:
             return []
-        kwargs: dict = {"model": self.model, "input": texts}
+        max_chars = self.input_max_chars
+        prepared = [
+            (t if len(t) <= max_chars else t[:max_chars])
+            for t in texts
+        ]
+        truncated = sum(1 for orig, p in zip(texts, prepared) if orig is not p)
+        if truncated:
+            logger.info(
+                "embed_batch truncated %d/%d inputs to %d chars",
+                truncated,
+                len(texts),
+                max_chars,
+            )
+        kwargs: dict = {"model": self.model, "input": prepared}
         if self._api_dimensions is not None:
             kwargs["dimensions"] = self._api_dimensions
-        resp = await self.client.embeddings.create(**kwargs)
-        return [item.embedding for item in resp.data]
+
+        last_exc: Exception | None = None
+        start = time.perf_counter()
+        for attempt in range(self.retry_attempts):
+            try:
+                resp = await self.client.embeddings.create(**kwargs)
+                vectors = [item.embedding for item in resp.data]
+                if self.usage_callback is not None:
+                    elapsed_ms = (time.perf_counter() - start) * 1000
+                    self.usage_callback(
+                        UsageEvent(
+                            kind="embed_batch",
+                            model=self.model,
+                            latency_ms=elapsed_ms,
+                            text_chars=sum(len(p) for p in prepared),
+                            batch_size=len(prepared),
+                        )
+                    )
+                return vectors
+            except Exception as exc:
+                last_exc = exc
+                if attempt < self.retry_attempts - 1:
+                    delay = self.retry_base_delay * (2 ** attempt)
+                    logger.warning(
+                        "embed_batch attempt %d/%d failed (%s: %s); retry in %.1fs",
+                        attempt + 1,
+                        self.retry_attempts,
+                        type(exc).__name__,
+                        exc,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+        assert last_exc is not None
+        raise last_exc
 
     async def embed(self, text: str) -> list[float]:
         """Embed a single text directly (no queue), using the cache when possible."""

@@ -4,6 +4,7 @@ import httpx
 import respx
 
 from dual_mem.providers.embedding import EmbedService, embedding_api_dimensions
+from dual_mem.providers.usage import UsageEvent
 
 
 def _make_service(dim=4, model="embed-test"):
@@ -86,3 +87,22 @@ async def test_embed_batch_openai_sends_dimensions():
     respx.post("https://api.test/v1/embeddings").mock(side_effect=_record_request)
     await _make_service(dim=1536, model="text-embedding-3-small").embed("hello")
     assert captured["json"]["dimensions"] == 1536
+
+
+@respx.mock
+async def test_embed_batch_usage_callback():
+    events: list[UsageEvent] = []
+
+    def _cb(event: UsageEvent) -> None:
+        events.append(event)
+
+    respx.post("https://api.test/v1/embeddings").mock(
+        return_value=httpx.Response(200, json=_embed_response([[0.1, 0.2, 0.3, 0.4]]))
+    )
+    svc = _make_service()
+    svc.usage_callback = _cb
+    await svc.embed_batch(["hello"])
+    assert len(events) == 1
+    assert events[0].kind == "embed_batch"
+    assert events[0].text_chars == 5
+    assert events[0].batch_size == 1

@@ -34,8 +34,13 @@ class Extractor:
             content=content, current_time=current_time
         )
         parsed = await self.llm.chat_json(system=system, user=content)
-        if not isinstance(parsed, dict):
-            parsed = {}
+        if not isinstance(parsed, dict) or not parsed:
+            logger.warning(
+                "extract: empty/unparseable LLM output for content len=%d (preview=%r)",
+                len(content),
+                content[:120],
+            )
+            parsed = {} if not isinstance(parsed, dict) else parsed
 
         identity = parsed.get("identity") or []
         facts = parsed.get("facts") or []

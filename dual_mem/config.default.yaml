@@ -8,11 +8,19 @@ llm_base_url: https://api.openai.com/v1
 llm_api_key: ""
 llm_model: gpt-4o-mini
 llm_json_mode: true
+# Provider extensions (Volces thinking depth, etc.). Example:
+# llm_extra_body: {"thinking": {"type": "disabled"}}
+llm_extra_body: {}
+llm_timeout: 60
 
 embed_base_url: https://api.openai.com/v1
 embed_api_key: ""
 embed_model: text-embedding-3-small
 embed_dim: 1536
+embed_timeout: 30
+embed_input_max_chars: 8000
+embed_retry_attempts: 3
+embed_retry_base_delay: 0.5
 
 auth_disabled: true
 app_whitelist:

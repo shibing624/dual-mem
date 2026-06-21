@@ -105,11 +105,18 @@ class Settings(BaseSettings):
     # Use OpenAI JSON mode (response_format=json_object) for JSON-returning calls.
     # Turn off only if the endpoint does not support response_format.
     llm_json_mode: bool = True
+    # Provider-specific body (Volces thinking depth, vendor extensions, etc.).
+    llm_extra_body: dict[str, Any] = {}
+    llm_timeout: int = 60
 
     embed_base_url: str = "https://api.openai.com/v1"
     embed_api_key: str = ""
     embed_model: str = "text-embedding-3-small"
     embed_dim: int = 1536
+    embed_timeout: int = 30
+    embed_input_max_chars: int = 8000
+    embed_retry_attempts: int = 3
+    embed_retry_base_delay: float = 0.5
 
     auth_disabled: bool = True
     app_whitelist: list[str] = ["default"]
@@ -256,11 +263,17 @@ def _flatten_config_dict(config_dict: dict[str, Any]) -> dict[str, Any]:
 
 
 def _map_provider_section(section: dict[str, Any], flat: dict[str, Any], *, prefix: str) -> None:
-    """Copy ``api_key`` / ``base_url`` / ``model`` into ``{prefix}_*`` Settings keys."""
+    """Copy provider keys into ``{prefix}_*`` Settings fields."""
     mapping = {
         "api_key": f"{prefix}_api_key",
         "base_url": f"{prefix}_base_url",
         "model": f"{prefix}_model",
+        "json_mode": f"{prefix}_json_mode",
+        "extra_body": f"{prefix}_extra_body",
+        "timeout": f"{prefix}_timeout",
+        "input_max_chars": f"{prefix}_input_max_chars",
+        "retry_attempts": f"{prefix}_retry_attempts",
+        "retry_base_delay": f"{prefix}_retry_base_delay",
     }
     for src, dst in mapping.items():
         val = section.get(src)

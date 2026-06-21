@@ -6,6 +6,7 @@ typed objects internally (IDE-friendly attribute access, refactor-safe) and only
 plain dicts at REST/MCP/CLI boundaries via .to_dict().
 """
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -115,6 +116,25 @@ class MemoryItem:
             out["evolution_chain"] = [item.to_dict() for item in self.evolution_chain]
         return out
 
+    def to_search_result(self) -> dict[str, Any]:
+        """Flat search hit for external QA / benchmark pipelines (current fact only).
+
+        ``content`` is always the evolution-chain head (``is_latest``). Superseded
+        versions are omitted so downstream LLMs are not confused by stale values.
+        """
+        ts = self.memory_at or self.gmt_created
+        created_at = ""
+        if ts:
+            created_at = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        return {
+            "memory": self.content,
+            "score": self.score,
+            "id": self.memory_id,
+            "memory_id": self.memory_id,
+            "created_at": created_at,
+            "category": self.category,
+        }
+
 
 @dataclass
 class SearchMemories:
@@ -131,6 +151,18 @@ class SearchMemories:
             "proactive": [item.to_dict() for item in self.proactive],
             "normal": [item.to_dict() for item in self.normal],
         }
+
+    def flatten(self, *, limit: int | None = None) -> list[MemoryItem]:
+        """Merge profile/proactive/normal and sort by score descending."""
+        items = [*self.profile, *self.proactive, *self.normal]
+        items.sort(key=lambda x: x.score, reverse=True)
+        if limit is not None and limit >= 0:
+            return items[:limit]
+        return items
+
+    def to_search_results(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        """Current-state search hits for QA pipelines (see ``MemoryItem.to_search_result``)."""
+        return [item.to_search_result() for item in self.flatten(limit=limit)]
 
 
 @dataclass
