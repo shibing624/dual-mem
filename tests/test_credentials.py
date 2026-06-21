@@ -46,19 +46,3 @@ def test_missing_embed_key_raises(tmp_storage):
     )
     with pytest.raises(MissingCredentialsError, match="embed_api_key"):
         MemoryClient(settings=settings, llm=FakeLLMClient(responses={}))
-
-
-def test_legacy_emb_mode_rejected(tmp_storage, fake_embed):
-    """Passing the removed mode='emb' is rejected by Settings validation."""
-    with pytest.raises(ValueError, match="removed"):
-        Settings(storage_dir=tmp_storage, mode="emb")
-
-
-def test_legacy_pro_alias_still_resolves(tmp_storage, fake_embed):
-    """The 'pro' alias is deprecated but still resolves to system1."""
-    client = MemoryClient(
-        settings=Settings(storage_dir=tmp_storage, mode="pro"),
-        embed=fake_embed,
-        llm=FakeLLMClient(responses={}),
-    )
-    assert client.settings.mode == "system1"

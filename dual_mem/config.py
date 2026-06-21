@@ -22,12 +22,6 @@ from pydantic_settings import (
 
 logger = logging.getLogger("dual_mem.config")
 
-# Legacy alias mapping for users who still pass pro/ultra (or the older emb/lite). The
-# embedding-only / no-LLM ``emb`` (a.k.a. ``lite``) mode has been removed; passing it now
-# raises so users notice and supply LLM credentials instead of getting a silent downgrade.
-_MODE_ALIASES = {"pro": "system1", "ultra": "dual"}
-_REMOVED_MODES = {"lite", "emb"}
-
 DEFAULT_CONFIG_PATH = Path.home() / ".dual_mem" / "config.yaml"
 
 
@@ -88,14 +82,10 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Mode (paper-aligned naming):
-    #   system1 — synchronous System1 cognition: gate -> LLM extract -> fast-write into
-    #             L0-L4 (was "pro"). This is the default.
-    #   dual    — System1 + asynchronous System2 distillation/graph (L6 schema / L7
-    #             intention, reconcile worker, ReAct agent; was "ultra"). The full
-    #             dual-system pipeline that gives the SDK its name.
-    # Both modes require an LLM API key and an embedding API key; missing credentials
-    # cause MemoryClient to raise on construction.
+    # Mode:
+    #   system1 — synchronous System1 cognition: gate -> LLM extract -> fast-write L0-L4.
+    #   dual    — System1 + async System2 distillation/graph (L6 schema / L7 intention).
+    # Both modes require LLM and embedding API keys; missing credentials fail at construction.
     mode: Literal["system1", "dual"] = "system1"
     storage_dir: str = "./.dual_mem_data"
 
@@ -161,28 +151,6 @@ class Settings(BaseSettings):
     # V2 read pipeline: hybrid (default) = QueryUnderstanding -> AnchorSearch (5 paths) ->
     # GraphExpander -> FusionScorer; legacy = original three-route + bm25 RRF rerank baseline.
     reader_mode: Literal["hybrid", "legacy"] = "hybrid"
-
-    @field_validator("mode", mode="before")
-    @classmethod
-    def _normalize_mode(cls, v):
-        """Map legacy pro/ultra to system1/dual; reject removed emb/lite modes."""
-        if isinstance(v, str):
-            key = v.strip().lower()
-            if key in _REMOVED_MODES:
-                raise ValueError(
-                    f"Settings.mode={v!r} (embedding-only / no-LLM mode) has been removed. "
-                    "dual-mem now requires both LLM and embedding API keys; "
-                    "use mode='system1' (default) or mode='dual'."
-                )
-            if key in _MODE_ALIASES:
-                canonical = _MODE_ALIASES[key]
-                logger.warning(
-                    "Settings.mode=%r is deprecated; use %r instead.",
-                    v,
-                    canonical,
-                )
-                return canonical
-        return v
 
     @field_validator("app_whitelist", mode="before")
     @classmethod

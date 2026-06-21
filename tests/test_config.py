@@ -27,27 +27,10 @@ def test_enable_graph_derived():
     assert Settings(mode="dual").enable_graph is True
 
 
-def test_mode_aliases(caplog):
-    """Legacy pro/ultra aliases are still accepted with a deprecation warning."""
-    import logging
-
-    with caplog.at_level(logging.WARNING, logger="dual_mem.config"):
-        assert Settings(mode="pro").mode == "system1"
-        assert Settings(mode="ultra").mode == "dual"
-    assert any("deprecated" in r.message for r in caplog.records)
-
-
-def test_emb_mode_removed():
-    """The embedding-only modes (emb / lite) have been removed; constructing them must raise."""
-    with pytest.raises(ValueError, match="removed"):
-        Settings(mode="emb")
-    with pytest.raises(ValueError, match="removed"):
-        Settings(mode="lite")
-
-
-def test_invalid_mode_raises():
+@pytest.mark.parametrize("bad_mode", ["turbo", "pro", "ultra", "emb", "lite"])
+def test_invalid_mode_raises(bad_mode):
     with pytest.raises(ValueError):
-        Settings(mode="turbo")
+        Settings(mode=bad_mode)
 
 
 def test_env_prefix(monkeypatch):
