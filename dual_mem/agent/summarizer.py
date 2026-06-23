@@ -24,9 +24,16 @@ class Summarizer:
         """Summarize content into one short paragraph, or None if below the length threshold."""
         if len(content) < MIN_CONTENT_LENGTH:
             return None
-        system = prompts.pick(prompts.SUMMARY_ZH, prompts.SUMMARY_EN, content).format(
-            content=content, current_time=current_time
-        )
-        summary = (await self.llm.chat_text(system=system, user=content)).strip()
+        tmpl = prompts.pick(prompts.SUMMARY_ZH, prompts.SUMMARY_EN, content)
+
+        def _build_system(chunk: str) -> str:
+            return tmpl.format(content=chunk, current_time=current_time)
+
+        summary = (
+            await self.llm.chat_text_for_content(
+                content=content,
+                build_system=_build_system,
+            )
+        ).strip()
         logger.debug("summarize content_len=%d summary_len=%d", len(content), len(summary))
         return summary or None

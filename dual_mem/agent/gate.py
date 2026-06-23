@@ -8,7 +8,7 @@ is fused after text scoring.
 import logging
 from dataclasses import dataclass
 
-from dual_mem.providers.llm import LLMClient
+from dual_mem.providers.llm import LLMClient, merge_gate_results
 from dual_mem.sdk_models import GateResult
 
 logger = logging.getLogger("dual_mem.agent.gate")
@@ -159,14 +159,17 @@ class AttentionalGate:
         else:
             context_section = ""
 
-        system = prompts.pick(prompts.GATE_ZH, prompts.GATE_EN, content).format(
-            content=content,
-            context_section=context_section,
-        )
+        def _build_system(chunk: str) -> str:
+            return prompts.pick(prompts.GATE_ZH, prompts.GATE_EN, chunk).format(
+                content=chunk,
+                context_section=context_section,
+            )
+
         try:
-            data = await self.llm.chat_json(
-                system=system,
-                user=content,
+            data = await self.llm.chat_json_for_content(
+                content=content,
+                build_system=_build_system,
+                merge_results=merge_gate_results,
                 temperature=self.config.llm_temperature,
             )
         except Exception as exc:

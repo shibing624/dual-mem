@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Callable
 from json.decoder import JSONDecoder
 from typing import Any
 
@@ -28,6 +29,161 @@ _call_seq = itertools.count(1)
 # rely on prose JSON which silently truncates without an explicit max_tokens.
 DEFAULT_CHAT_JSON_MAX_TOKENS = 4096
 
+TRUNC_MARKER = "\n...[truncated]...\n"
+
+
+def truncate_middle(text: str, max_len: int) -> str:
+    """Keep head and tail; drop the middle when ``text`` exceeds ``max_len``.
+
+    Legacy helper for benchmark QA clients; SDK write-path uses chunk+merge instead.
+    """
+    if max_len <= 0:
+        return ""
+    if len(text) <= max_len:
+        return text
+    if max_len <= len(TRUNC_MARKER) + 2:
+        return text[:max_len]
+    body = max_len - len(TRUNC_MARKER)
+    head_len = body // 2
+    tail_len = body - head_len
+    return text[:head_len] + TRUNC_MARKER + text[-tail_len:]
+
+
+def fit_chat_prompt(system: str, user: str, *, max_chars: int) -> tuple[str, str]:
+    """Keep ``system`` intact; middle-truncate ``user`` to fit ``max_chars``.
+
+    Used by benchmark QA clients only; SDK ``LLMClient`` chunks long prompts instead.
+    """
+    if max_chars <= 0 or len(system) + len(user) <= max_chars:
+        return system, user
+    user_budget = max_chars - len(system)
+    if user_budget <= 0:
+        return system, ""
+    return system, truncate_middle(user, user_budget)
+
+
+def chunk_text_for_llm(text: str, max_chars: int) -> list[str]:
+    """Split *text* into non-overlapping chunks, preferring paragraph/line boundaries."""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return [text]
+    chunks: list[str] = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + max_chars, n)
+        if end < n:
+            split_at = text.rfind("\n\n", start, end)
+            if split_at <= start:
+                split_at = text.rfind("\n", start, end)
+            if split_at <= start:
+                split_at = end
+        else:
+            split_at = end
+        chunk = text[start:split_at]
+        if not chunk and split_at < n:
+            split_at = min(start + max_chars, n)
+            chunk = text[start:split_at]
+        if chunk:
+            chunks.append(chunk)
+        start = max(split_at, start + 1) if split_at == start else split_at
+    return chunks or [text[:max_chars]]
+
+
+def _dedupe_memory_items(items: list) -> list:
+    seen: set[str] = set()
+    out: list = []
+    for item in items:
+        if isinstance(item, str):
+            key = item.strip()
+            payload: Any = item
+        elif isinstance(item, dict):
+            key = str(item.get("content") or "").strip()
+            payload = item
+        else:
+            continue
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(payload)
+    return out
+
+
+def merge_extract_results(parts: list[dict]) -> dict:
+    """Merge chunked extractor JSON payloads (union lists, dedupe by content)."""
+    merged: dict[str, Any] = {
+        "identity": [],
+        "facts": [],
+        "intentions": [],
+        "emotion": {"valence": 0.0, "arousal": 0.0, "dominant_emotion": None},
+        "is_ephemeral": True,
+        "basic_info": {},
+    }
+    valences: list[float] = []
+    arousals: list[float] = []
+    dominant: str | None = None
+    best_arousal = -1.0
+    for part in parts:
+        if not isinstance(part, dict) or not part:
+            continue
+        if not part.get("is_ephemeral", False):
+            merged["is_ephemeral"] = False
+        merged["identity"].extend(part.get("identity") or [])
+        merged["facts"].extend(part.get("facts") or [])
+        merged["intentions"].extend(part.get("intentions") or [])
+        emo = part.get("emotion") or {}
+        if isinstance(emo, dict):
+            try:
+                valences.append(float(emo.get("valence", 0.0)))
+                arousal = float(emo.get("arousal", 0.0))
+                arousals.append(arousal)
+                if arousal > best_arousal and emo.get("dominant_emotion"):
+                    best_arousal = arousal
+                    dominant = str(emo["dominant_emotion"])
+            except (TypeError, ValueError):
+                pass
+        basic_info = part.get("basic_info")
+        if isinstance(basic_info, dict):
+            merged["basic_info"].update(basic_info)
+    merged["identity"] = _dedupe_memory_items(merged["identity"])
+    merged["facts"] = _dedupe_memory_items(merged["facts"])
+    merged["intentions"] = _dedupe_memory_items(merged["intentions"])
+    if valences:
+        merged["emotion"]["valence"] = sum(valences) / len(valences)
+    if arousals:
+        merged["emotion"]["arousal"] = sum(arousals) / len(arousals)
+    merged["emotion"]["dominant_emotion"] = dominant
+    return merged
+
+
+def merge_gate_results(parts: list[dict]) -> dict:
+    """Merge chunked gate scores — take max per dimension across chunks."""
+    best = {
+        "novelty": 0.0,
+        "biographical_relevance": 0.0,
+        "emotional_arousal": 0.0,
+        "reason": "",
+    }
+    reasons: list[str] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        for key in ("novelty", "biographical_relevance", "emotional_arousal"):
+            try:
+                best[key] = max(best[key], float(part.get(key, 0.0)))
+            except (TypeError, ValueError):
+                pass
+        reason = str(part.get("reason", "")).strip()
+        if reason:
+            reasons.append(reason)
+    if reasons:
+        best["reason"] = "; ".join(reasons)
+    return best
+
+
+def merge_text_chunks(parts: list[str]) -> str:
+    """Join chunked text completions (e.g. map-reduce summarizer)."""
+    return "\n\n".join(p.strip() for p in parts if p and p.strip())
+
 
 def is_chinese(text: str) -> bool:
     """Heuristically decide whether text is Chinese by CJK character ratio."""
@@ -38,15 +194,7 @@ def is_chinese(text: str) -> bool:
 
 
 def _parse_json(content: str):
-    """Parse JSON from model output, with partial-recovery fallbacks.
-
-    Recovery order:
-      1. strip ``` fences and try strict json.loads
-      2. greedy match {…} or […] and try again
-      3. for truncated extractor responses, recover string list values for top-level
-         keys (facts / identity / intentions / memories) by scanning closed strings
-         before the parse breaks.
-    """
+    """Parse JSON from model output, with partial-recovery fallbacks."""
     text = content.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
@@ -66,8 +214,6 @@ def _parse_json(content: str):
     recovered = _recover_partial_object(text)
     if recovered is not None:
         return recovered
-    # last resort: empty dict so downstream code (extractor) treats as "nothing extracted"
-    # while the LLM call counts as a failure for telemetry. Caller may still log raw output.
     logger.warning("chat_json output unparseable, returning empty object (len=%d)", len(content))
     return {}
 
@@ -76,12 +222,7 @@ _RECOVERABLE_KEYS = ("facts", "identity", "intentions", "memories", "updates", "
 
 
 def _recover_partial_object(text: str) -> dict | None:
-    """Recover string list values for known keys from truncated JSON.
-
-    Returns ``{key: [str, ...]}`` for any key in _RECOVERABLE_KEYS whose value array
-    we can salvage (closed strings before the truncation point). Returns None if
-    no key matched at all — caller decides whether to fall back to empty dict.
-    """
+    """Recover string list values for known keys from truncated JSON."""
     out: dict = {}
     for key in _RECOVERABLE_KEYS:
         m = re.search(rf'"{key}"\s*:\s*\[', text)
@@ -123,12 +264,21 @@ class LLMClient:
         json_mode: bool = True,
         extra_body: dict[str, Any] | None = None,
         usage_callback: UsageCallback | None = None,
+        input_max_chars: int = 0,
     ):
         self.model = model
         self.json_mode = json_mode
         self.extra_body = extra_body or {}
         self.usage_callback = usage_callback
+        self.input_max_chars = input_max_chars
         self.client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+
+    def _content_char_budget(self, build_system: Callable[[str], str]) -> int:
+        """Per-chunk char budget when system+user both embed the same content."""
+        if self.input_max_chars <= 0:
+            return 0
+        overhead = len(build_system(""))
+        return max(1, (self.input_max_chars - overhead) // 2)
 
     def _completion_kwargs(self, **kwargs: Any) -> dict[str, Any]:
         """Merge caller kwargs with configured extra_body (e.g. thinking depth)."""
@@ -160,22 +310,15 @@ class LLMClient:
             )
         )
 
-    async def chat_json(
+    async def _chat_json_once(
         self,
         *,
         system: str,
         user: str,
-        temperature: float = 0.2,
-        json_object: bool | None = None,
-        max_tokens: int = DEFAULT_CHAT_JSON_MAX_TOKENS,
-    ):
-        """Run a chat completion and parse the reply as JSON.
-
-        json_object overrides the client default: True forces OpenAI JSON mode (object only),
-        None uses self.json_mode. Callers expecting a top-level array pass json_object=False.
-        max_tokens is required to avoid silent truncation of large extractor outputs on
-        providers that do not support response_format=json_object.
-        """
+        temperature: float,
+        json_object: bool | None,
+        max_tokens: int,
+    ) -> dict:
         use_json_mode = self.json_mode if json_object is None else json_object
         kwargs: dict = {"max_tokens": max_tokens}
         if use_json_mode:
@@ -192,10 +335,88 @@ class LLMClient:
         )
         self._after_call("chat_json", resp, start)
         content = resp.choices[0].message.content or ""
-        return _parse_json(content)
+        parsed = _parse_json(content)
+        return parsed if isinstance(parsed, dict) else {}
 
-    async def chat_text(self, *, system: str, user: str, temperature: float = 0.2) -> str:
-        """Run a chat completion and return the raw text reply."""
+    async def chat_json(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float = 0.2,
+        json_object: bool | None = None,
+        max_tokens: int = DEFAULT_CHAT_JSON_MAX_TOKENS,
+    ) -> dict:
+        """Run a chat completion and parse the reply as JSON (single-shot, no chunking)."""
+        return await self._chat_json_once(
+            system=system,
+            user=user,
+            temperature=temperature,
+            json_object=json_object,
+            max_tokens=max_tokens,
+        )
+
+    async def chat_json_for_content(
+        self,
+        *,
+        content: str,
+        build_system: Callable[[str], str],
+        merge_results: Callable[[list[dict]], dict],
+        user: str | None = None,
+        temperature: float = 0.2,
+        json_object: bool | None = None,
+        max_tokens: int = DEFAULT_CHAT_JSON_MAX_TOKENS,
+    ) -> dict:
+        """Chunk long *content*, run JSON extract per chunk, merge with *merge_results*."""
+        user_text = content if user is None else user
+        budget = self._content_char_budget(build_system)
+        if self.input_max_chars <= 0 or len(build_system(user_text)) + len(user_text) <= self.input_max_chars:
+            system = build_system(user_text)
+            return await self._chat_json_once(
+                system=system,
+                user=user_text,
+                temperature=temperature,
+                json_object=json_object,
+                max_tokens=max_tokens,
+            )
+
+        chunks = chunk_text_for_llm(user_text, budget)
+        if len(chunks) == 1:
+            system = build_system(chunks[0])
+            return await self._chat_json_once(
+                system=system,
+                user=chunks[0],
+                temperature=temperature,
+                json_object=json_object,
+                max_tokens=max_tokens,
+            )
+
+        logger.info(
+            "chat_json_for_content chunked %d parts (budget=%d chars)",
+            len(chunks),
+            budget,
+        )
+        parts: list[dict] = []
+        for chunk in chunks:
+            system = build_system(chunk)
+            parts.append(
+                await self._chat_json_once(
+                    system=system,
+                    user=chunk,
+                    temperature=temperature,
+                    json_object=json_object,
+                    max_tokens=max_tokens,
+                )
+            )
+        return merge_results(parts)
+
+    async def _chat_text_once(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float,
+    ) -> str:
         start = time.perf_counter()
         resp = await self.client.chat.completions.create(
             model=self.model,
@@ -209,6 +430,51 @@ class LLMClient:
         self._after_call("chat_text", resp, start)
         return resp.choices[0].message.content or ""
 
+    async def chat_text(self, *, system: str, user: str, temperature: float = 0.2) -> str:
+        """Run a chat completion and return the raw text reply (single-shot)."""
+        return await self._chat_text_once(system=system, user=user, temperature=temperature)
+
+    async def chat_text_for_content(
+        self,
+        *,
+        content: str,
+        build_system: Callable[[str], str],
+        merge_text: Callable[[list[str]], str] = merge_text_chunks,
+        temperature: float = 0.2,
+    ) -> str:
+        """Chunk long *content*, summarize each chunk, merge text (map-reduce)."""
+        budget = self._content_char_budget(build_system)
+        if self.input_max_chars <= 0 or len(build_system(content)) + len(content) <= self.input_max_chars:
+            return await self._chat_text_once(
+                system=build_system(content),
+                user=content,
+                temperature=temperature,
+            )
+
+        chunks = chunk_text_for_llm(content, budget)
+        if len(chunks) == 1:
+            return await self._chat_text_once(
+                system=build_system(chunks[0]),
+                user=chunks[0],
+                temperature=temperature,
+            )
+
+        logger.info(
+            "chat_text_for_content chunked %d parts (budget=%d chars)",
+            len(chunks),
+            budget,
+        )
+        parts: list[str] = []
+        for chunk in chunks:
+            parts.append(
+                await self._chat_text_once(
+                    system=build_system(chunk),
+                    user=chunk,
+                    temperature=temperature,
+                )
+            )
+        return merge_text(parts)
+
     async def chat_with_tools(
         self,
         *,
@@ -217,12 +483,7 @@ class LLMClient:
         tool_choice: str = "auto",
         temperature: float = 0.2,
     ) -> dict:
-        """Run a tool-calling chat completion; return ``{content, tool_calls}`` from one turn.
-
-        Used by the System2 ReAct loop: caller maintains the messages list, appends the
-        assistant turn (with tool_calls) plus role=tool replies, and re-invokes until the
-        model emits no more tool_calls.
-        """
+        """Run a tool-calling chat completion; return ``{content, tool_calls}`` from one turn."""
         start = time.perf_counter()
         resp = await self.client.chat.completions.create(
             model=self.model,
@@ -237,9 +498,7 @@ class LLMClient:
         tool_calls: list[dict] = []
         if msg.tool_calls:
             for tc in msg.tool_calls:
-                fn = getattr(tc, "function", None)
-                if fn is None:
-                    continue
+                fn = tc.function
                 tool_calls.append(
                     {
                         "id": tc.id,

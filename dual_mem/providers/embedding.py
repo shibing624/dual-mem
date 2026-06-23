@@ -8,32 +8,72 @@ single requests into one batch within a 200ms window or 32-item threshold (which
 import asyncio
 import hashlib
 import logging
+import math
 import time
 
 from openai import AsyncOpenAI
 
+from dual_mem.config import (
+    CHARS_PER_TOKEN,
+    EMBED_MAX_TOKENS,
+    EMBED_RETRY_ATTEMPTS,
+    EMBED_RETRY_BASE_DELAY,
+)
 from dual_mem.providers.usage import UsageCallback, UsageEvent
 
 logger = logging.getLogger("dual_mem.embed")
-
-# Hunyuan / openai-compatible providers reject single-input >~32k chars; truncate
-# at this length on write/search side. Embedding is a retrieval anchor, not a
-# verbatim store, so head-truncation is safe.
-EMBED_INPUT_MAX_CHARS = 8000
-EMBED_RETRY_ATTEMPTS = 3
-EMBED_RETRY_BASE_DELAY = 0.5
 
 
 def embedding_api_dimensions(model: str, dim: int) -> int | None:
     """Return ``dimensions`` for OpenAI embeddings API, or None to omit the parameter.
 
-    qwen3-embedding and *-for-online* endpoints reject ``dimensions``; the model returns
-    its native vector size (configure ``embed_dim`` to match, e.g. 4096 for qwen3-embedding-8b).
+    qwen3-embedding / bge-m3 (vLLM served as ``embed``) reject matryoshka ``dimensions``.
     """
     name = (model or "").lower()
     if "qwen3-embedding" in name or "-for-online" in name:
         return None
+    if name in ("embed",) or "bge-m3" in name or "bge_m3" in name:
+        return None
     return dim if dim > 0 else None
+
+
+def _chunk_text(text: str, max_chars: int) -> list[str]:
+    """Split *text* into non-overlapping chunks of at most *max_chars*."""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return [text]
+    chunks: list[str] = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + max_chars, n)
+        if end < n:
+            split_at = text.rfind("\n\n", start, end)
+            if split_at <= start:
+                split_at = text.rfind("\n", start, end)
+            if split_at <= start:
+                split_at = end
+        else:
+            split_at = end
+        chunk = text[start:split_at]
+        if not chunk and split_at < n:
+            split_at = min(start + max_chars, n)
+            chunk = text[start:split_at]
+        if chunk:
+            chunks.append(chunk)
+        start = split_at if split_at > start else end
+    return chunks or [text[:max_chars]]
+
+
+def _mean_pool_vectors(vectors: list[list[float]]) -> list[float]:
+    """Mean-pool chunk vectors and L2-normalize for cosine retrieval."""
+    if len(vectors) == 1:
+        return vectors[0]
+    dim = len(vectors[0])
+    pooled = [sum(v[i] for v in vectors) / len(vectors) for i in range(dim)]
+    norm = math.sqrt(sum(x * x for x in pooled))
+    if norm > 0:
+        pooled = [x / norm for x in pooled]
+    return pooled
 
 
 class EmbedService:
@@ -54,14 +94,17 @@ class EmbedService:
         queue_batch_size: int = DEFAULT_BATCH_SIZE,
         queue_batch_window_ms: float = DEFAULT_BATCH_WINDOW_MS,
         cache_size: int = DEFAULT_CACHE_SIZE,
-        input_max_chars: int = EMBED_INPUT_MAX_CHARS,
+        input_max_tokens: int = EMBED_MAX_TOKENS,
+        chars_per_token: float = CHARS_PER_TOKEN,
         retry_attempts: int = EMBED_RETRY_ATTEMPTS,
         retry_base_delay: float = EMBED_RETRY_BASE_DELAY,
         usage_callback: UsageCallback | None = None,
-    ):
+    ) -> None:
         self.model = model
         self.dim = dim
-        self.input_max_chars = input_max_chars
+        self.input_max_tokens = input_max_tokens
+        self.chars_per_token = chars_per_token
+        self.input_max_chars = int(input_max_tokens * chars_per_token)
         self.retry_attempts = retry_attempts
         self.retry_base_delay = retry_base_delay
         self.usage_callback = usage_callback
@@ -94,27 +137,8 @@ class EmbedService:
             return
         self._cache[self._cache_key(text)] = vector
 
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Embed a list of texts and return one vector per input; empty list short-circuits.
-
-        Each text >input_max_chars is head-truncated. Provider 4xx/5xx are retried
-        with exponential backoff up to retry_attempts.
-        """
-        if not texts:
-            return []
-        max_chars = self.input_max_chars
-        prepared = [
-            (t if len(t) <= max_chars else t[:max_chars])
-            for t in texts
-        ]
-        truncated = sum(1 for orig, p in zip(texts, prepared) if orig is not p)
-        if truncated:
-            logger.info(
-                "embed_batch truncated %d/%d inputs to %d chars",
-                truncated,
-                len(texts),
-                max_chars,
-            )
+    async def _embed_prepared_batch(self, prepared: list[str]) -> list[list[float]]:
+        """Call the embeddings API for *prepared* strings (already chunked)."""
         kwargs: dict = {"model": self.model, "input": prepared}
         if self._api_dimensions is not None:
             kwargs["dimensions"] = self._api_dimensions
@@ -153,6 +177,42 @@ class EmbedService:
         assert last_exc is not None
         raise last_exc
 
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Embed a list of texts and return one vector per input; empty list short-circuits.
+
+        Each text longer than ``embed_max_tokens`` (via char budget) is split into chunks,
+        embedded separately, and mean-pooled into one L2-normalized vector.
+        """
+        if not texts:
+            return []
+        max_chars = self.input_max_chars
+        chunk_groups = [_chunk_text(t, max_chars) for t in texts]
+        n_chunked = sum(1 for chunks in chunk_groups if len(chunks) > 1)
+        if n_chunked:
+            logger.info(
+                "embed_batch chunked %d/%d inputs (max_tokens=%d, ~%d chars/chunk)",
+                n_chunked,
+                len(texts),
+                self.input_max_tokens,
+                max_chars,
+            )
+
+        flat_chunks: list[str] = []
+        group_sizes: list[int] = []
+        for chunks in chunk_groups:
+            group_sizes.append(len(chunks))
+            flat_chunks.extend(chunks)
+
+        flat_vectors = await self._embed_prepared_batch(flat_chunks)
+
+        results: list[list[float]] = []
+        idx = 0
+        for size in group_sizes:
+            group_vecs = flat_vectors[idx : idx + size]
+            idx += size
+            results.append(_mean_pool_vectors(group_vecs))
+        return results
+
     async def embed(self, text: str) -> list[float]:
         """Embed a single text directly (no queue), using the cache when possible."""
         cached = self._cache.get(self._cache_key(text))
@@ -164,12 +224,7 @@ class EmbedService:
         return vector
 
     async def embed_queued(self, text: str) -> list[float]:
-        """Embed a single text via the write-side queue: batches concurrent calls.
-
-        Concurrent embed_queued calls are coalesced; a flush triggers when the pending list
-        reaches queue_batch_size or queue_batch_window_ms elapses, whichever first.
-        Cache hits short-circuit and never enter the queue.
-        """
+        """Embed a single text via the write-side queue: batches concurrent calls."""
         cached = self._cache.get(self._cache_key(text))
         if cached is not None:
             return cached

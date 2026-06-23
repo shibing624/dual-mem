@@ -93,9 +93,26 @@ class FakeLLMClient:
             return self._resolve("reconcile", [], system=system, user=user)
         return self._resolve("json", {"facts": [], "identity": []}, system=system, user=user)
 
+    async def chat_json_for_content(
+        self,
+        *,
+        content: str,
+        build_system,
+        merge_results,
+        user: str | None = None,
+        **kw,
+    ):
+        user_text = content if user is None else user
+        system = build_system(user_text)
+        return await self.chat_json(system=system, user=user_text, **kw)
+
     async def chat_text(self, *, system: str, user: str, **kw) -> str:
         self.calls.append({"type": "chat_text", "system": system, "user": user, "kw": kw})
         return self._resolve("text", "", system=system, user=user)
+
+    async def chat_text_for_content(self, *, content: str, build_system, merge_text=None, **kw) -> str:
+        system = build_system(content)
+        return await self.chat_text(system=system, user=content, **kw)
 
     async def chat_with_tools(
         self,

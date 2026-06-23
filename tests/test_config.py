@@ -1,12 +1,26 @@
 import pytest
 
-from dual_mem.config import Settings
+from dual_mem.config import (
+    CHARS_PER_TOKEN,
+    EMBED_MAX_TOKENS,
+    LLM_COMPLETION_RESERVE,
+    LLM_CONTEXT_WINDOW,
+    Settings,
+)
 
 
 def test_defaults():
     s = Settings()
     assert s.mode == "system1"
     assert s.embed_dim == 1536
+    assert s.llm_context_window == LLM_CONTEXT_WINDOW
+    assert s.llm_completion_reserve == LLM_COMPLETION_RESERVE
+    assert s.chars_per_token == CHARS_PER_TOKEN
+    assert s.embed_max_tokens == EMBED_MAX_TOKENS
+    assert s.llm_input_max_chars == int(
+        (LLM_CONTEXT_WINDOW - LLM_COMPLETION_RESERVE) * CHARS_PER_TOKEN
+    )
+    assert s.embed_input_max_chars == int(EMBED_MAX_TOKENS * CHARS_PER_TOKEN)
     assert s.auth_disabled is True
     assert s.default_app_id == "default"
     assert s.system2_trigger_mode == "per_write"
@@ -124,3 +138,25 @@ def test_settings_from_dict_mem0_style():
     assert s.embed_base_url == "https://embed.example/v1"
     assert s.storage_dir == "/data/mem"
     assert s.embed_dim == 768
+
+
+def test_settings_from_dict_mem0_config_blocks():
+    s = Settings.from_dict({
+        "embedder": {
+            "provider": "openai",
+            "config": {
+                "model": "text-embedding-3-small",
+                "embedding_dims": 1024,
+            },
+        },
+        "vector_store": {
+            "provider": "qdrant",
+            "config": {
+                "embedding_model_dims": 1024,
+                "persist_directory": "/data/nested",
+            },
+        },
+    })
+    assert s.embed_model == "text-embedding-3-small"
+    assert s.embed_dim == 1024
+    assert s.storage_dir == "/data/nested"

@@ -1,4 +1,9 @@
-from dual_mem.retrieval.formatter import format_memories, format_memory_timestamp
+from dual_mem.retrieval.formatter import (
+    format_evolution_timeline,
+    format_memories,
+    format_memory_timestamp,
+    format_search_hit_line,
+)
 from dual_mem.sdk_models import EvolutionItem, MemoryItem, SearchMemories
 
 
@@ -98,3 +103,35 @@ def test_search_memories_to_search_results():
 def test_format_memory_timestamp():
     assert format_memory_timestamp(None) == ""
     assert format_memory_timestamp(1_700_000_000) == "2023-11-14"
+
+
+def test_format_search_hit_line_with_chain():
+    hit = {
+        "content": "Now likes tea",
+        "category": "fact",
+        "memory_at": 1_700_000_000,
+        "evolution_chain": [
+            {"node_id": "a", "content": "Now likes tea", "memory_at": 1_700_000_000},
+            {"node_id": "b", "content": "Used to like coffee", "memory_at": 1_600_000_000},
+        ],
+    }
+    text = format_search_hit_line(hit, include_evolution=True)
+    assert "Now likes tea" in text
+    assert "Used to like coffee" in text
+
+
+def test_format_evolution_timeline():
+    hits = [
+        {
+            "content": "Current",
+            "score": 1.0,
+            "evolution_chain": [
+                {"node_id": "a", "content": "Current", "memory_at": 2},
+                {"node_id": "b", "content": "Old", "memory_at": 1},
+            ],
+        }
+    ]
+    text = format_evolution_timeline(hits, header="Timeline:")
+    assert "Timeline:" in text
+    assert "Old" in text
+    assert "CURRENT" in text

@@ -1,50 +1,141 @@
-# dual-mem 默认配置（首次启动 MemoryClient 时自动写入 ~/.dual_mem/config.yaml）
-# 按需修改 llm_api_key / embed_api_key / base_url。
+# dual-mem 默认配置模板
+# 首次构造 MemoryClient 时，若 ~/.dual_mem/config.yaml 不存在会自动复制本文件。
+#
+# 配置优先级（高 → 低）：
+#   1. MemoryClient(...) / Settings(...) 显式传参
+#   2. 环境变量 DUAL_MEM_*（见下方说明；字段名转大写，如 llm_api_key → DUAL_MEM_LLM_API_KEY）
+#   3. YAML 文件（默认 ~/.dual_mem/config.yaml；路径可用 DUAL_MEM_CONFIG_FILE 覆盖）
+#   4. 代码内默认值
+#
+# 常用环境变量示例：
+#   export DUAL_MEM_LLM_API_KEY=sk-...
+#   export DUAL_MEM_EMBED_API_KEY=sk-...
+#   export DUAL_MEM_MODE=dual
+#   export DUAL_MEM_CONFIG_FILE=/path/to/my.yaml   # 仅指定 YAML 路径，不参与 Settings 字段映射
 
+# ---------------------------------------------------------------------------
+# 运行模式与存储
+# ---------------------------------------------------------------------------
+
+# system1：同步 System1（Gate → Extract → 快写 L0–L4）
+# dual：System1 + 异步 System2（图 / L6 schema / L7 intention）
 mode: system1
+
+# 数据目录（Chroma / SQLite / Kuzu 均在此下）
 storage_dir: ./.dual_mem_data
+
+# ---------------------------------------------------------------------------
+# LLM（写入 Gate / Extract / Reconcile / Summarize 等）
+# ---------------------------------------------------------------------------
 
 llm_base_url: https://api.openai.com/v1
 llm_api_key: ""
 llm_model: gpt-4o-mini
+
+# 是否启用 OpenAI JSON mode（response_format=json_object）；部分自建端点需设为 false
 llm_json_mode: true
-# Provider extensions (Volces thinking depth, etc.). Example:
+
+# 厂商扩展参数（如 Volces thinking depth 等），示例：
 # llm_extra_body: {"thinking": {"type": "disabled"}}
 llm_extra_body: {}
+
 llm_timeout: 60
+
+# 模型最大 context（tokens）。超长 prompt 会按块多次调用再 merge，而非截断
+llm_context_window: 32768
+
+# 预留给 completion 的 token 数（从 context_window 中扣除）
+llm_completion_reserve: 4096
+
+# token → 字符估算系数（LLM 分块与 embed 分块共用）
+chars_per_token: 2.5
+
+# ---------------------------------------------------------------------------
+# Embedding（向量检索锚点；超长文本分块 embed 后 mean-pool）
+# ---------------------------------------------------------------------------
 
 embed_base_url: https://api.openai.com/v1
 embed_api_key: ""
 embed_model: text-embedding-3-small
+
+# 向量维度，须与 embed 模型输出一致（如 bge-m3→1024，text-embedding-3-small→1536）
 embed_dim: 1536
+
 embed_timeout: 30
-embed_input_max_chars: 8000
+
+# 单次 embed 请求最大 input tokens；更长文本自动切分 + 均值池化（bge-m3 vLLM 约 8k）
+embed_max_tokens: 8000
+
+# embed API 失败重试
 embed_retry_attempts: 3
 embed_retry_base_delay: 0.5
 
+# ---------------------------------------------------------------------------
+# REST 鉴权（仅 dual-mem serve 时生效）
+# ---------------------------------------------------------------------------
+
+# true：跳过 Bearer / appkey 校验（本地开发）
 auth_disabled: true
+
+# 允许的 app_id 列表（逗号分隔字符串或 YAML 列表均可）
 app_whitelist:
   - default
+
+# add/list/search 未传 app_id 时的默认租户
 default_app_id: default
 
+# ---------------------------------------------------------------------------
+# System2 异步管线（仅 mode=dual）
+# ---------------------------------------------------------------------------
+
+# per_write：每次写入后后台跑 reconcile → S2 agent
+# manual：仅 client.digest() 触发
+# scheduled：定时循环（间隔见 system2_schedule_interval_sec）
 system2_trigger_mode: per_write
 system2_schedule_interval_sec: 300
+
+# true：写入路径同步跑 Reconcile（强一致，延迟约 +1 次 LLM）
 reconcile_sync: false
+
+# System2 ReAct 最大轮数（无 tool_calls 时提前结束）
+system2_max_iters: 10
+
+# Reconciler 是否额外生成搜索 query（默认关，省一次 LLM）
+reconcile_search_query: false
+
+# System2 聚类 cosine 阈值（两阶段 DBSCAN）
+cluster_stage1_sim: 0.42
+cluster_stage2_sim: 0.55
+
+# ---------------------------------------------------------------------------
+# Attentional Gate（写入前过滤低价值内容）
+# ---------------------------------------------------------------------------
 
 gate_enabled: true
 gate_threshold: 0.3
 
-cluster_stage1_sim: 0.42
-cluster_stage2_sim: 0.55
-reconcile_search_query: false
-system2_max_iters: 10
+# ---------------------------------------------------------------------------
+# 读路径
+# ---------------------------------------------------------------------------
 
+# hybrid：QueryUnderstanding → 五路 AnchorSearch → 融合（默认）
+# legacy：三路由 + BM25/RRF 基线
 reader_mode: hybrid
+
+# ---------------------------------------------------------------------------
+# Embed 写入侧攒批（不影响 search 侧直接 embed）
+# ---------------------------------------------------------------------------
 
 embed_queue_batch_size: 32
 embed_queue_window_ms: 200.0
-# messages 写入：true = L1+Gate user 轮一次 embed_batch（低延迟，绕过攒批）；false = 默认，高并发友好
+
+# messages 写入时：true = L1 对话 + Gate user 轮合并为一次 embed_batch（低延迟）；
+# false = 走 embed_queued 攒批（高并发友好，默认）
 embed_merge_l1_gate: false
+
+# ---------------------------------------------------------------------------
+# Cross-domain Sweeper（默认关；将多个 base schema 归纳为核心 schema）
+# ---------------------------------------------------------------------------
 
 cross_domain_enable: false
 cross_domain_min_basics: 5

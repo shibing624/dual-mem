@@ -51,7 +51,8 @@ class ComponentFactory:
                 timeout=self.settings.embed_timeout,
                 queue_batch_size=self.settings.embed_queue_batch_size,
                 queue_batch_window_ms=self.settings.embed_queue_window_ms,
-                input_max_chars=self.settings.embed_input_max_chars,
+                input_max_tokens=self.settings.embed_max_tokens,
+                chars_per_token=self.settings.chars_per_token,
                 retry_attempts=self.settings.embed_retry_attempts,
                 retry_base_delay=self.settings.embed_retry_base_delay,
             )
@@ -100,5 +101,6 @@ class ComponentFactory:
                 timeout=self.settings.llm_timeout,
                 json_mode=self.settings.llm_json_mode,
                 extra_body=self.settings.llm_extra_body or None,
+                input_max_chars=self.settings.llm_input_max_chars,
             )
         return self._llm

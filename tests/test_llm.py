@@ -2,7 +2,15 @@ import httpx
 import pytest
 import respx
 
-from dual_mem.providers.llm import LLMClient, is_chinese
+from dual_mem.providers.llm import (
+    LLMClient,
+    TRUNC_MARKER,
+    chunk_text_for_llm,
+    fit_chat_prompt,
+    is_chinese,
+    merge_extract_results,
+    truncate_middle,
+)
 from dual_mem.providers.usage import UsageEvent
 
 
@@ -141,3 +149,62 @@ async def test_chat_json_disabled_json_mode_omits_response_format():
 )
 def test_is_chinese(text, expected):
     assert is_chinese(text) is expected
+
+
+def test_fit_chat_prompt_keeps_system_truncates_user_middle():
+    system = "s" * 3000
+    user = "u" * 5000
+    out_system, out_user = fit_chat_prompt(system, user, max_chars=6000)
+    assert out_system == system
+    assert len(out_system) + len(out_user) <= 6000
+    assert out_user.startswith("u")
+    assert out_user.endswith("u")
+    assert TRUNC_MARKER in out_user
+
+
+def test_truncate_middle_head_tail():
+    text = "a" * 100
+    out = truncate_middle(text, 40)
+    assert len(out) == 40
+    assert out.startswith("a")
+    assert out.endswith("a")
+    assert TRUNC_MARKER in out
+
+
+@respx.mock
+async def test_chat_json_chunks_oversized_content():
+    import json as _json
+
+    calls: list[dict] = []
+
+    def _record(request: httpx.Request) -> httpx.Response:
+        body = _json.loads(request.content)
+        calls.append(body)
+        idx = len(calls)
+        letter = chr(ord("a") + idx - 1)
+        content = f'{{"facts": [{{"content": "fact-{letter}", "tags": []}}]}}'
+        return httpx.Response(200, json=_completion({"role": "assistant", "content": content}))
+
+    respx.post("https://api.test/v1/chat/completions").mock(side_effect=_record)
+    client = LLMClient(
+        base_url="https://api.test/v1",
+        api_key="sk-x",
+        model="gpt-test",
+        input_max_chars=80,
+    )
+    tmpl = "SYS:{content}"
+    result = await client.chat_json_for_content(
+        content="y" * 120,
+        build_system=lambda c: tmpl.format(content=c),
+        merge_results=merge_extract_results,
+    )
+    assert len(calls) >= 2
+    assert len(result["facts"]) >= 2
+    assert TRUNC_MARKER not in calls[0]["messages"][1]["content"]
+
+
+def test_chunk_text_for_llm_prefers_newlines():
+    text = ("line\n" * 30).strip()
+    chunks = chunk_text_for_llm(text, 40)
+    assert len(chunks) >= 2
+    assert "".join(chunks).replace("\n", "") == text.replace("\n", "")

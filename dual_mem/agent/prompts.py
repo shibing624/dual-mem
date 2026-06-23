@@ -174,12 +174,24 @@ EXTRACT_ZH = """你是一位专业的记忆分析专家。请从以下对话中�
 ### 跨层重叠记忆
 一段对话可能同时产出多条 facts + identity 记忆，内容可能有重叠——这是正常的。
 
-### 合并——优先完整思想而非碎片
-在每个层级（identity、facts）内，避免过度拆分。当对话中的多个句子描述同一件事的不同方面（同一个偏好、同一个事件、同一种态度、同一个计划）时，生成**一条**自包含的记忆来捕捉全貌，而不是多条碎片化的记忆。
+### 粒度规则（全局默认）
 
-只在各方面确实独立时（不同话题、不同维度）才拆分为不同记忆。当你犹豫两个要点是否应该合并时，倾向于合并——后续的 reconcile 可以拆分，但无法恢复因过度拆分而丢失的信息。
+- 每条 memory 应是一个**可独立检索**的单元：一个事实、事件、计划或偏好**状态**。
+- **仅**当多个句子表达**同一时刻、同一语义**的同一信息（换说法）时才合并为一条。
+- **必须拆分**当：
+  - 用户的偏好、观点或处境**发生变化**（以前 vs 现在、不再、改成、instead、but now）；
+  - 不同的事件、日期、地点或实体；
+  - 同一主题的不同方面（如饮食偏好 vs 烹饪习惯）。
+- 不要把一次偏好演变总结成一条长 narrative；下游 reconcile 会处理演化链。
+- **facts (L2)**：短句、原子化陈述，每个可检索 fact 一条。
+- **identity (L4)**：每条只表达一个态度/偏好；演变中的偏好拆成多条，而非一条概括整个演变过程。
 
-每条记忆应该有连贯的内在逻辑——一个完整的想法，而不是碎片。
+**示例 — 偏好变化应拆分**：
+对话："我以前更喜欢喝茶，但最近改喝手冲咖啡了，周末还会去咖啡馆。"
+✅ identity: "用户以前更喜欢喝茶。"
+✅ identity: "用户现在更偏好手冲咖啡。"
+✅ facts: "用户最近开始喝手冲咖啡，周末会去咖啡馆。"
+❌ 不要合并为一条："用户以前喜欢茶但现在改喝咖啡并周末去咖啡馆。"
 
 ## emotion 与 is_ephemeral
 
@@ -265,8 +277,24 @@ Stable attributes (name, age, location, occupation, employer) go into the `basic
 
 Exception: a basic attribute with rich narrative context (e.g. "The user became a product manager in 2023 after 5 years as an engineer") goes into `identity`; the bare fact still goes into `basic_info`.
 
-### Consolidation — prefer whole thoughts over fragments
-Within each layer, when several sentences describe different aspects of the same thing, emit ONE self-contained memory. Split only when aspects are genuinely independent.
+### Granularity (default for all conversations)
+
+- Emit ONE memory per distinct, retrievable unit: a fact, event, plan, or preference **state**.
+- Merge ONLY when multiple sentences express the **same** information at the **same** time (rephrasing).
+- ALWAYS split when:
+  - the user's preference, opinion, or situation **changes** (before vs after; no longer; instead; but now);
+  - different events, dates, places, or entities;
+  - different aspects of the same topic (e.g. food preference vs cooking habit).
+- Do NOT bundle a preference arc into one long narrative; the reconciler builds evolution chains downstream.
+- **facts (L2)**: short, atomic statements — one retrievable fact per item.
+- **identity (L4)**: one attitude/preference per item; split evolving preferences across items.
+
+**Example — preference change should split**:
+Dialogue: "I used to prefer tea, but lately I've switched to pour-over coffee and visit cafés on weekends."
+✅ identity: "The user used to prefer tea."
+✅ identity: "The user now prefers pour-over coffee."
+✅ facts: "The user recently started drinking pour-over coffee and visits cafés on weekends."
+❌ Do NOT merge into one item covering the whole arc.
 
 ## emotion and is_ephemeral
 

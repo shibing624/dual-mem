@@ -80,14 +80,16 @@ class MemoryClient:
         mode: str | None = None,
         embed=None,
         llm=None,
-    ):
+    ) -> None:
+        overrides = {}
+        if storage_dir is not None:
+            overrides["storage_dir"] = storage_dir
+        if mode is not None:
+            overrides["mode"] = mode
         if settings is None:
-            overrides = {}
-            if storage_dir is not None:
-                overrides["storage_dir"] = storage_dir
-            if mode is not None:
-                overrides["mode"] = mode
             settings = Settings(**overrides)
+        elif overrides:
+            settings = settings.model_copy(update=overrides)
         self.settings = settings
         self.mode = mode or settings.mode
 

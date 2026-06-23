@@ -76,6 +76,20 @@ def resolve_app_ids(settings: Settings, app_ids: list[str] | None) -> list[str]:
     return app_ids if app_ids is not None else [settings.default_app_id]
 
 
+# Token→char estimate shared by LLM prompt budgeting and embed chunk sizing.
+CHARS_PER_TOKEN = 2.5
+LLM_CHARS_PER_TOKEN = CHARS_PER_TOKEN
+
+# LLM context budgeting — override via YAML or DUAL_MEM_LLM_CONTEXT_WINDOW etc.
+LLM_CONTEXT_WINDOW = 32768
+LLM_COMPLETION_RESERVE = 4096
+
+# Embed input chunk budget (tokens per API call before split + mean-pool).
+EMBED_MAX_TOKENS = 8000
+EMBED_RETRY_ATTEMPTS = 3
+EMBED_RETRY_BASE_DELAY = 0.5
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="DUAL_MEM_",
@@ -98,15 +112,22 @@ class Settings(BaseSettings):
     # Provider-specific body (Volces thinking depth, vendor extensions, etc.).
     llm_extra_body: dict[str, Any] = {}
     llm_timeout: int = 60
+    # Model context window (total tokens). Used with completion_reserve to derive
+    # per-call char budget; long prompts are split into chunks + merged (not truncated).
+    llm_context_window: int = LLM_CONTEXT_WINDOW
+    llm_completion_reserve: int = LLM_COMPLETION_RESERVE
+    chars_per_token: float = CHARS_PER_TOKEN
 
     embed_base_url: str = "https://api.openai.com/v1"
     embed_api_key: str = ""
     embed_model: str = "text-embedding-3-small"
+    # Vector dimension — set to your embedding model's native output size (e.g. 1536, 1024).
     embed_dim: int = 1536
     embed_timeout: int = 30
-    embed_input_max_chars: int = 8000
-    embed_retry_attempts: int = 3
-    embed_retry_base_delay: float = 0.5
+    # Max input tokens per embed API call; longer texts are split + mean-pooled.
+    embed_max_tokens: int = EMBED_MAX_TOKENS
+    embed_retry_attempts: int = EMBED_RETRY_ATTEMPTS
+    embed_retry_base_delay: float = EMBED_RETRY_BASE_DELAY
 
     auth_disabled: bool = True
     app_whitelist: list[str] = ["default"]
@@ -160,6 +181,47 @@ class Settings(BaseSettings):
             return [item.strip() for item in v.split(",") if item.strip()]
         return v
 
+    @field_validator("llm_context_window")
+    @classmethod
+    def _llm_context_window_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("llm_context_window must be positive")
+        return v
+
+    @field_validator("llm_completion_reserve")
+    @classmethod
+    def _llm_completion_reserve_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("llm_completion_reserve must be >= 0")
+        return v
+
+    @field_validator("chars_per_token")
+    @classmethod
+    def _chars_per_token_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("chars_per_token must be positive")
+        return v
+
+    @field_validator("embed_max_tokens")
+    @classmethod
+    def _embed_max_tokens_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("embed_max_tokens must be positive")
+        return v
+
+    @property
+    def llm_input_max_chars(self) -> int:
+        """Estimated prompt char budget from context window minus completion reserve."""
+        usable_tokens = self.llm_context_window - self.llm_completion_reserve
+        if usable_tokens <= 0:
+            return 0
+        return int(usable_tokens * self.chars_per_token)
+
+    @property
+    def embed_input_max_chars(self) -> int:
+        """Char chunk size derived from ``embed_max_tokens`` × ``chars_per_token``."""
+        return int(self.embed_max_tokens * self.chars_per_token)
+
     @classmethod
     def settings_customise_sources(
         cls,
@@ -211,10 +273,15 @@ def _flatten_config_dict(config_dict: dict[str, Any]) -> dict[str, Any]:
 
     vector_store = flat.pop("vector_store", None)
     if isinstance(vector_store, dict):
+        vector_config = vector_store.get("config")
+        if isinstance(vector_config, dict):
+            vector_store = {**vector_config, **vector_store}
         persist = vector_store.get("persist_directory")
         if persist:
             flat.setdefault("storage_dir", persist)
         dims = vector_store.get("embedding_dims")
+        if dims is None:
+            dims = vector_store.get("embedding_model_dims")
         if dims is not None:
             flat.setdefault("embed_dim", dims)
 
@@ -232,6 +299,10 @@ def _flatten_config_dict(config_dict: dict[str, Any]) -> dict[str, Any]:
 
 def _map_provider_section(section: dict[str, Any], flat: dict[str, Any], *, prefix: str) -> None:
     """Copy provider keys into ``{prefix}_*`` Settings fields."""
+    provider_config = section.get("config")
+    if isinstance(provider_config, dict):
+        section = {**provider_config, **section}
+
     mapping = {
         "api_key": f"{prefix}_api_key",
         "base_url": f"{prefix}_base_url",
@@ -239,10 +310,17 @@ def _map_provider_section(section: dict[str, Any], flat: dict[str, Any], *, pref
         "json_mode": f"{prefix}_json_mode",
         "extra_body": f"{prefix}_extra_body",
         "timeout": f"{prefix}_timeout",
-        "input_max_chars": f"{prefix}_input_max_chars",
         "retry_attempts": f"{prefix}_retry_attempts",
         "retry_base_delay": f"{prefix}_retry_base_delay",
+        "chars_per_token": "chars_per_token",
     }
+    if prefix == "llm":
+        mapping["context_window"] = "llm_context_window"
+        mapping["max_model_len"] = "llm_context_window"
+        mapping["completion_reserve"] = "llm_completion_reserve"
+    if prefix == "embed":
+        mapping["max_tokens"] = "embed_max_tokens"
+        mapping["embedding_dims"] = "embed_dim"
     for src, dst in mapping.items():
         val = section.get(src)
         if val is not None and val != "":

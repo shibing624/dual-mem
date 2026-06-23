@@ -8,7 +8,7 @@ deferred to MemAgent so L0/L2/L4 embeddings can be batched post-extract.
 import logging
 
 from dual_mem.agent import prompts
-from dual_mem.providers.llm import LLMClient
+from dual_mem.providers.llm import LLMClient, merge_extract_results
 
 logger = logging.getLogger("dual_mem.agent.extract")
 
@@ -30,10 +30,16 @@ class Extractor:
         session_id: str,
     ) -> dict:
         """Return extracted fields; ``basic_info`` is persisted later by MemAgent."""
-        system = prompts.pick(prompts.EXTRACT_ZH, prompts.EXTRACT_EN, content).format(
-            content=content, current_time=current_time
+        tmpl = prompts.pick(prompts.EXTRACT_ZH, prompts.EXTRACT_EN, content)
+
+        def _build_system(chunk: str) -> str:
+            return tmpl.format(content=chunk, current_time=current_time)
+
+        parsed = await self.llm.chat_json_for_content(
+            content=content,
+            build_system=_build_system,
+            merge_results=merge_extract_results,
         )
-        parsed = await self.llm.chat_json(system=system, user=content)
         if not isinstance(parsed, dict) or not parsed:
             logger.warning(
                 "extract: empty/unparseable LLM output for content len=%d (preview=%r)",

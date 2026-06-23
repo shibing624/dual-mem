@@ -6,7 +6,7 @@
 ## 前置
 
 dual-mem 需要 **同时配置 LLM 与 Embedding 两套 API key**（缺一者 `MemoryClient(...)` 即报错），
-首次 `MemoryClient(...)` 会在 **`~/.dual_mem/config.yaml`** 自动创建默认配置（与仓库根 `config.example.yaml` 一致），填入 API key 即可：
+首次 `MemoryClient(...)` 会在 **`~/.dual_mem/config.yaml`** 自动创建默认配置（与包内 `dual_mem/config.default.yaml` 一致），填入 API key 即可：
 
 ```yaml
 llm_base_url: https://api5.xhub.chat/v1
