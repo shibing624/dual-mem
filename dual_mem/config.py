@@ -169,6 +169,12 @@ class Settings(BaseSettings):
     cross_domain_min_basics: int = 5
     cross_domain_threshold: float = 0.7
 
+    # Append-only history.db audit log (ADD/SUPERSEDE/DELETE snapshots). Off by default —
+    # not used on the read path; enable for compliance / debugging.
+    persist_history: bool = False
+    # Drop reconcile/s2 queue rows after digest drains them (keeps cache.db small).
+    purge_done_queues: bool = True
+
     # V2 read pipeline: hybrid (default) = QueryUnderstanding -> AnchorSearch (5 paths) ->
     # GraphExpander -> FusionScorer; legacy = original three-route + bm25 RRF rerank baseline.
     reader_mode: Literal["hybrid", "legacy"] = "hybrid"

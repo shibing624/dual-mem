@@ -8,6 +8,8 @@ import json
 import sqlite3
 import time
 
+from dual_mem.storage.sqlite_util import connect_sqlite
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS history (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,13 +26,14 @@ CREATE TABLE IF NOT EXISTS history (
 class HistoryStore:
     """Append-only audit log of memory lifecycle events."""
 
-    def __init__(self, storage_dir: str):
-        self.conn = sqlite3.connect(
-            f"{storage_dir}/history.db", check_same_thread=False
-        )
-        self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(_DDL)
-        self.conn.commit()
+    def __init__(self, storage_dir: str, *, persist: bool = True):
+        self._persist = persist
+        self.conn = None
+        if persist:
+            self.conn = connect_sqlite(f"{storage_dir}/history.db")
+            self.conn.row_factory = sqlite3.Row
+            self.conn.executescript(_DDL)
+            self.conn.commit()
 
     def append(
         self,
@@ -42,6 +45,8 @@ class HistoryStore:
         new: dict | None,
     ) -> None:
         """Append one history event with optional old/new metadata snapshots."""
+        if not self._persist or self.conn is None:
+            return
         self.conn.execute(
             "INSERT INTO history (event, node_id, user_id, old, new, ts) "
             "VALUES (?, ?, ?, ?, ?, ?)",
@@ -58,6 +63,8 @@ class HistoryStore:
 
     def list_for_node(self, node_id: str) -> list[dict]:
         """Return all history events for a node in chronological order, snapshots decoded."""
+        if not self._persist or self.conn is None:
+            return []
         rows = self.conn.execute(
             "SELECT * FROM history WHERE node_id = ? ORDER BY id ASC", (node_id,)
         ).fetchall()

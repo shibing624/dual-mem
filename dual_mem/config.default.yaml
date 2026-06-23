@@ -140,3 +140,9 @@ embed_merge_l1_gate: false
 cross_domain_enable: false
 cross_domain_min_basics: 5
 cross_domain_threshold: 0.7
+
+# 写入审计 history.db（默认关；读路径不用，benchmark 建议保持 false）
+persist_history: false
+
+# digest 后删除已完成的 reconcile/s2 队列行（默认 true，防止 cache.db 膨胀）
+purge_done_queues: true

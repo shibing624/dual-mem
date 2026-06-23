@@ -411,14 +411,22 @@ class MemoryClient:
         nodes = self.factory.vector.get_many(where)
         node_ids = [node.node_id for node in nodes]
         self.factory.vector.delete(node_ids)
-        for node in nodes:
-            self.factory.history.append(
-                event="DELETE",
-                node_id=node.node_id,
-                user_id=node.user_id,
-                old=node.to_metadata(),
-                new=None,
+        graph = self.factory.graph
+        if graph is not None:
+            graph.delete_scope(
+                app_id=resolved_app_id,
+                user_id=user_id,
+                agent_id=agent_id,
             )
+        if self.settings.persist_history:
+            for node in nodes:
+                self.factory.history.append(
+                    event="DELETE",
+                    node_id=node.node_id,
+                    user_id=node.user_id,
+                    old=node.to_metadata(),
+                    new=None,
+                )
         return DeleteBulkResult(success=True, deleted=len(node_ids))
 
     async def list_scopes(
@@ -458,6 +466,8 @@ class MemoryClient:
                 result = await sweeper.run(app_id=app_id, user_id=user_id)
                 if result.get("cores"):
                     cores += int(result["cores"])
+        if self.settings.purge_done_queues:
+            self.factory.cache.purge_done_queues()
         return DigestResult(success=True, processed=processed, cores_created=cores)
 
     async def aclose(self) -> None:

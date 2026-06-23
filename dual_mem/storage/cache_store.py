@@ -8,6 +8,8 @@ import json
 import sqlite3
 import time
 
+from dual_mem.storage.sqlite_util import connect_sqlite
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS profile_cache (
     iso_key TEXT PRIMARY KEY,
@@ -66,7 +68,7 @@ class CacheStore:
     """SQLite store for profile caches, async task queues, pipeline logs, op records and access counters."""
 
     def __init__(self, storage_dir: str):
-        self.conn = sqlite3.connect(f"{storage_dir}/cache.db", check_same_thread=False)
+        self.conn = connect_sqlite(f"{storage_dir}/cache.db")
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_DDL)
         self._migrate_s2_queue()
@@ -212,6 +214,15 @@ class CacheStore:
             "SELECT COUNT(*) AS n FROM reconcile_queue WHERE status = 'pending'"
         ).fetchone()
         return int(row["n"]) if row else 0
+
+    def purge_done_queues(self) -> int:
+        """Delete drained reconcile/s2 rows; return rows removed."""
+        cur = self.conn.execute("DELETE FROM reconcile_queue WHERE status = 'done'")
+        n_reconcile = cur.rowcount
+        cur = self.conn.execute("DELETE FROM s2_queue WHERE status = 'done'")
+        n_s2 = cur.rowcount
+        self.conn.commit()
+        return n_reconcile + n_s2
 
     # ---- Pipeline logs --------------------------------------------------------------
 

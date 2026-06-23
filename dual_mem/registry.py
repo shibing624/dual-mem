@@ -76,7 +76,10 @@ class ComponentFactory:
     def history(self) -> HistoryStore:
         """The history/audit store, constructed on first access."""
         if self._history is None:
-            self._history = HistoryStore(self.settings.storage_dir)
+            self._history = HistoryStore(
+                self.settings.storage_dir,
+                persist=self.settings.persist_history,
+            )
         return self._history
 
     @property

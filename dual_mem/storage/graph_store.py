@@ -88,6 +88,15 @@ class GraphStore(ABC):
         self, *, tag: str, user_id: str, app_ids: list[str]
     ) -> list[str]: ...
 
+    @abstractmethod
+    def delete_scope(
+        self,
+        *,
+        app_id: str,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> int: ...
+
 
 class KuzuGraphStore(GraphStore):
     """Kuzu-embedded-database implementation of the memory knowledge graph."""
@@ -230,3 +239,32 @@ class KuzuGraphStore(GraphStore):
         while result.has_next():
             ids.append(result.get_next()[0])
         return ids
+
+    def delete_scope(
+        self,
+        *,
+        app_id: str,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> int:
+        """Remove memory graph nodes (and their edges) for a tenant scope; return rows deleted.
+
+        Single pass: collect matches, return their count, then detach-delete — avoids the
+        extra count-only MATCH that ran the same scan twice.
+        """
+        clauses = ["m.app_id = $app_id"]
+        params: dict = {"app_id": app_id}
+        if user_id is not None:
+            clauses.append("m.user_id = $user_id")
+            params["user_id"] = user_id
+        if agent_id is not None:
+            clauses.append("m.agent_id = $agent_id")
+            params["agent_id"] = agent_id
+        where = " AND ".join(clauses)
+        result = self.conn.execute(
+            f"MATCH (m:Memory) WHERE {where} DETACH DELETE m RETURN count(m)",
+            params,
+        )
+        if result.has_next():
+            return int(result.get_next()[0])
+        return 0

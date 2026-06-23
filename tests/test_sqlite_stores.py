@@ -39,7 +39,7 @@ def test_record_operation(tmp_storage):
 
 
 def test_history_append_and_list(tmp_storage):
-    h = HistoryStore(tmp_storage)
+    h = HistoryStore(tmp_storage, persist=True)
     h.append(event="ADD", node_id="n1", user_id="u", old=None, new={"content": "x"})
     h.append(
         event="SUPERSEDE",
@@ -53,3 +53,19 @@ def test_history_append_and_list(tmp_storage):
     assert rows[0]["event"] == "ADD"
     assert rows[0]["old"] is None
     assert rows[1]["new"] == {"content": "y"}
+
+
+def test_history_disabled_is_noop(tmp_storage):
+    h = HistoryStore(tmp_storage, persist=False)
+    h.append(event="ADD", node_id="n1", user_id="u", old=None, new={"content": "x"})
+    assert h.list_for_node("n1") == []
+
+
+def test_purge_done_queues(tmp_storage):
+    c = CacheStore(tmp_storage)
+    c.enqueue_reconcile_task(app_id="app", user_id="u", agent_id="", node_ids=["a"])
+    task = c.dequeue_reconcile_task(app_id="app", user_id="u")
+    assert task is not None
+    assert c.purge_done_queues() == 1
+    row = c.conn.execute("SELECT COUNT(*) AS n FROM reconcile_queue").fetchone()
+    assert int(row["n"]) == 0
