@@ -68,7 +68,6 @@ class Extractor:
                 build_system=_build_system,
                 merge_results=merge_extract_results,
                 temperature=0.5,
-                json_object=True,
             )
 
         if not isinstance(parsed, dict) or not parsed:

@@ -94,10 +94,6 @@ class MemAgent:
             datetime.fromtimestamp(memory_at).isoformat(timespec="seconds") if memory_at else ""
         )
 
-        summary_task = asyncio.create_task(
-            self._maybe_summarize(content=content, current_time=current_time),
-        )
-
         use_combined = self.settings.combined_gate_extract and self.settings.gate_enabled
 
         if use_combined:
@@ -114,20 +110,26 @@ class MemAgent:
                 existing_similarities=sims,
             )
             include_gate = shortcircuited is None
-            extracted, summary = await asyncio.gather(
-                self.extractor.extract(
-                    content=content,
-                    current_time=current_time,
-                    app_id=app_id,
-                    user_id=user_id,
-                    agent_id=agent_id,
-                    session_id=session_id,
-                    include_gate=include_gate,
-                ),
-                summary_task,
+            extracted = await self.extractor.extract(
+                content=content,
+                current_time=current_time,
+                app_id=app_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                session_id=session_id,
+                include_gate=include_gate,
             )
             if shortcircuited is not None:
                 gate_result = shortcircuited
+                if not (
+                    extracted.get("identity")
+                    or extracted.get("facts")
+                    or extracted.get("intentions")
+                ):
+                    logger.warning(
+                        "gate short-circuit PASS but extract empty (content len=%d)",
+                        len(content),
+                    )
             else:
                 gate_result = await self.gate.finalize_from_llm(
                     content=content,
@@ -147,20 +149,15 @@ class MemAgent:
                 gate_turn_embeddings=gate_turn_embeddings,
             )
             if self.settings.gate_enabled and not gate_result.passed:
-                summary_task.cancel()
-                await asyncio.gather(summary_task, return_exceptions=True)
                 return [], gate_result, False
 
-            extracted, summary = await asyncio.gather(
-                self.extractor.extract(
-                    content=content,
-                    current_time=current_time,
-                    app_id=app_id,
-                    user_id=user_id,
-                    agent_id=agent_id,
-                    session_id=session_id,
-                ),
-                summary_task,
+            extracted = await self.extractor.extract(
+                content=content,
+                current_time=current_time,
+                app_id=app_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                session_id=session_id,
             )
 
         try:
@@ -183,9 +180,6 @@ class MemAgent:
             gate_result.gate_score, gate_result.novelty, gate_result.reason,
         )
         if self.settings.gate_enabled and not gate_result.passed:
-            if not summary_task.done():
-                summary_task.cancel()
-                await asyncio.gather(summary_task, return_exceptions=True)
             return [], gate_result, False
 
         try:
@@ -210,6 +204,10 @@ class MemAgent:
         )
         if extracted.get("is_ephemeral"):
             return [], gate_result, True
+
+        summary_task = asyncio.create_task(
+            self._maybe_summarize(content=content, current_time=current_time),
+        )
 
         emotion = extracted.get("emotion") or {}
         new_memories, new_meta = self._collect_new_memories(extracted)
@@ -288,6 +286,8 @@ class MemAgent:
                 )
             except Exception:
                 pass
+
+        summary = await summary_task
 
         # ---- Step 4: L7 intentions + L3 summary (one embed batch when possible) ------
         intention_items = [

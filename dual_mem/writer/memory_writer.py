@@ -18,8 +18,14 @@ from dual_mem.types import Layer, MemoryNode, MemoryStatus
 logger = logging.getLogger("dual_mem.writer")
 
 
-def _content_iso_key(*, app_id: str, user_id: str, agent_id: str) -> str:
-    return f"{app_id}::{user_id}::{agent_id}"
+def _content_iso_key(
+    *,
+    app_id: str,
+    user_id: str,
+    agent_id: str,
+    session_id: str,
+) -> str:
+    return f"{app_id}::{user_id}::{agent_id}::{session_id}"
 
 
 @dataclass
@@ -58,7 +64,12 @@ class MemoryWriter:
         them for novelty=max-across-turns. None means single-turn (fall back to ``content``).
         """
         settings = self.factory.settings
-        iso_key = _content_iso_key(app_id=app_id, user_id=user_id, agent_id=agent_id)
+        iso_key = _content_iso_key(
+            app_id=app_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+        )
         content_hash: str | None = None
         if settings.content_hash_dedup:
             content_hash = hashlib.md5(content.encode()).hexdigest()

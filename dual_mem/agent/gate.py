@@ -104,13 +104,12 @@ class AttentionalGate:
             return None
 
         vector_novelty = self._vector_novelty_from_sims(existing_similarities)
-        _, h_relevance, h_arousal = self._heuristic_score(text)
+        h_novelty, h_relevance, h_arousal = self._heuristic_score(text)
         if vector_novelty < self.config.shortcircuit_novelty:
             return None
         if h_relevance < self.config.shortcircuit_relevance:
             return None
 
-        h_novelty, _, _ = self._heuristic_score(text)
         return await self.finalize_from_llm(
             content=text,
             llm_scores={

@@ -76,6 +76,54 @@ async def test_combined_gate_extract_one_llm_call(tmp_storage, fake_embed):
     assert gate_calls == []
 
 
+async def test_combined_gate_reject_skips_summarizer(tmp_storage, fake_embed):
+    """Gate REJECT must not start summarizer (combined path)."""
+    long_text = "x" * 1600
+    extract_reject = {
+        **EXTRACT_RESPONSE,
+        "identity": [],
+        "facts": [],
+        "gate_decision": {
+            "novelty": 0.05,
+            "biographical_relevance": 0.05,
+            "emotional_arousal": 0.0,
+            "reason": "low value",
+        },
+    }
+    llm = FakeLLMClient(responses={"extract": extract_reject, "text": "不应被调用"})
+    factory = ComponentFactory(
+        settings=Settings(
+            mode="system1",
+            storage_dir=tmp_storage,
+            gate_enabled=True,
+            combined_gate_extract=True,
+            summarizer_enabled=True,
+            summarizer_min_content_length=1500,
+        ),
+        embed=fake_embed,
+        llm=llm,
+    )
+    agent = MemAgent(factory=factory)
+    raw = _raw(fake_embed, long_text)
+    factory.vector.upsert([raw])
+
+    stored_ids, gate_result, _ = await agent.run(
+        raw_node=raw,
+        content=long_text,
+        embedding=raw.embedding,
+        app_id="app",
+        user_id="u",
+        agent_id="ag",
+        session_id="se",
+        request_id="req-reject",
+        memory_at=None,
+    )
+
+    assert gate_result.passed is False
+    assert stored_ids == []
+    assert not any(c["type"] == "chat_text" for c in llm.calls)
+
+
 async def test_run_produces_l2_l4(tmp_storage, fake_embed):
     factory = _factory(tmp_storage, fake_embed, {"extract": EXTRACT_RESPONSE, "search_query": []})
     agent = MemAgent(factory=factory)

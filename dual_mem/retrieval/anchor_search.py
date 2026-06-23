@@ -230,13 +230,15 @@ class AnchorSearchEngine:
         )
         node_by_id = {n.node_id: n for n in pool}
         out: list[AnchorNode] = []
-        for nid, bm25_score in ranked:
-            if bm25_score <= 0:
+        for nid, bm25_norm in ranked:
+            if bm25_norm <= 0:
                 continue
             node = node_by_id.get(nid)
             if node is None:
                 continue
-            score = min(0.9, 0.3 + 0.6 * bm25_score)
+            # bm25_norm is already max-normalized 0–1; map to semantic-comparable range
+            # without clamping every hit to ~0.9 (which would dominate fusion max()).
+            score = 0.25 + 0.45 * bm25_norm
             out.append(AnchorNode(node=node, score=score, source_path=PATH_ENTITY))
         return out[:20]
 
