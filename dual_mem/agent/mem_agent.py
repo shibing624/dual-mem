@@ -95,6 +95,7 @@ class MemAgent:
         )
 
         use_combined = self.settings.combined_gate_extract and self.settings.gate_enabled
+        summary_task: asyncio.Task | None = None
 
         if use_combined:
             sims = await self._gate_similarity_context(
@@ -110,6 +111,10 @@ class MemAgent:
                 existing_similarities=sims,
             )
             include_gate = shortcircuited is None
+            summary_task = self._begin_summarize_task(
+                content=content,
+                current_time=current_time,
+            )
             extracted = await self.extractor.extract(
                 content=content,
                 current_time=current_time,
@@ -151,6 +156,10 @@ class MemAgent:
             if self.settings.gate_enabled and not gate_result.passed:
                 return [], gate_result, False
 
+            summary_task = self._begin_summarize_task(
+                content=content,
+                current_time=current_time,
+            )
             extracted = await self.extractor.extract(
                 content=content,
                 current_time=current_time,
@@ -180,6 +189,7 @@ class MemAgent:
             gate_result.gate_score, gate_result.novelty, gate_result.reason,
         )
         if self.settings.gate_enabled and not gate_result.passed:
+            await self._cancel_summarize_task(summary_task)
             return [], gate_result, False
 
         try:
@@ -203,11 +213,8 @@ class MemAgent:
             bool(extracted.get("is_ephemeral")),
         )
         if extracted.get("is_ephemeral"):
+            await self._cancel_summarize_task(summary_task)
             return [], gate_result, True
-
-        summary_task = asyncio.create_task(
-            self._maybe_summarize(content=content, current_time=current_time),
-        )
 
         emotion = extracted.get("emotion") or {}
         new_memories, new_meta = self._collect_new_memories(extracted)
@@ -287,7 +294,7 @@ class MemAgent:
             except Exception:
                 pass
 
-        summary = await summary_task
+        summary = await summary_task if summary_task is not None else None
 
         # ---- Step 4: L7 intentions + L3 summary (one embed batch when possible) ------
         intention_items = [
@@ -346,6 +353,28 @@ class MemAgent:
             stored_ids.append(summary_node.node_id)
 
         return stored_ids, gate_result, False
+
+    def _begin_summarize_task(
+        self,
+        *,
+        content: str,
+        current_time: str,
+    ) -> asyncio.Task | None:
+        """Start summarizer early so it can overlap extract / fast_write; cancel on reject."""
+        if not self.settings.summarizer_enabled:
+            return None
+        if len(content) < self.settings.summarizer_min_content_length:
+            return None
+        return asyncio.create_task(
+            self.summarizer.summarize(content=content, current_time=current_time),
+        )
+
+    @staticmethod
+    async def _cancel_summarize_task(task: asyncio.Task | None) -> None:
+        if task is None or task.done():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     async def _maybe_summarize(self, *, content: str, current_time: str) -> str | None:
         if not self.settings.summarizer_enabled:

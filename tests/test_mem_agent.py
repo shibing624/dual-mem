@@ -1,3 +1,5 @@
+import asyncio
+
 from dual_mem.agent.mem_agent import MemAgent
 from dual_mem.config import Settings
 from dual_mem.registry import ComponentFactory
@@ -76,8 +78,8 @@ async def test_combined_gate_extract_one_llm_call(tmp_storage, fake_embed):
     assert gate_calls == []
 
 
-async def test_combined_gate_reject_skips_summarizer(tmp_storage, fake_embed):
-    """Gate REJECT must not start summarizer (combined path)."""
+async def test_combined_gate_reject_discards_extract(tmp_storage, fake_embed):
+    """Gate REJECT on combined path: no stored nodes (summary may start speculatively)."""
     long_text = "x" * 1600
     extract_reject = {
         **EXTRACT_RESPONSE,
@@ -121,7 +123,67 @@ async def test_combined_gate_reject_skips_summarizer(tmp_storage, fake_embed):
 
     assert gate_result.passed is False
     assert stored_ids == []
-    assert not any(c["type"] == "chat_text" for c in llm.calls)
+
+
+async def test_combined_pass_summarizer_overlaps_extract(tmp_storage, fake_embed):
+    """Long PASS turn: summarizer starts before extract returns (speculative overlap)."""
+    long_text = "x" * 1600
+    order: list[str] = []
+
+    llm = FakeLLMClient(responses={"extract": EXTRACT_RESPONSE, "text": "摘要"})
+    factory = ComponentFactory(
+        settings=Settings(
+            mode="system1",
+            storage_dir=tmp_storage,
+            gate_enabled=True,
+            combined_gate_extract=True,
+            summarizer_enabled=True,
+            summarizer_min_content_length=1500,
+        ),
+        embed=fake_embed,
+        llm=llm,
+    )
+    agent = MemAgent(factory=factory)
+    raw = _raw(fake_embed, long_text)
+    factory.vector.upsert([raw])
+
+    original_extract = agent.extractor.extract
+
+    async def timed_extract(**kwargs):
+        order.append("extract_start")
+        await asyncio.sleep(0)
+        result = await original_extract(**kwargs)
+        order.append("extract_end")
+        return result
+
+    agent.extractor.extract = timed_extract  # type: ignore[method-assign]
+
+    original_summarize = agent.summarizer.summarize
+
+    async def timed_summarize(**kwargs):
+        order.append("summary_start")
+        result = await original_summarize(**kwargs)
+        order.append("summary_end")
+        return result
+
+    agent.summarizer.summarize = timed_summarize  # type: ignore[method-assign]
+
+    stored_ids, gate_result, _ = await agent.run(
+        raw_node=raw,
+        content=long_text,
+        embedding=raw.embedding,
+        app_id="app",
+        user_id="u",
+        agent_id="ag",
+        session_id="se",
+        request_id="req-overlap",
+        memory_at=None,
+    )
+
+    assert gate_result.passed is True
+    assert len(stored_ids) >= 2
+    assert "summary_start" in order and "extract_start" in order
+    assert order.index("summary_start") < order.index("extract_end")
 
 
 async def test_run_produces_l2_l4(tmp_storage, fake_embed):
