@@ -221,6 +221,7 @@ __marimo__/
 # docs
 docs/hy-memory-test/
 docs/superpowers/
+exp/
 
 # scratch / smoke demos
 tmp/
