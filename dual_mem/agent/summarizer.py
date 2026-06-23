@@ -2,7 +2,7 @@
 """
 @author:XuMing(xuming624@qq.com)
 @description: Async summarizer that produces L3_SUMMARY text for long conversations,
-skipping inputs shorter than a minimum length threshold.
+skipping inputs shorter than a configurable minimum length threshold.
 """
 import logging
 
@@ -11,18 +11,17 @@ from dual_mem.providers.llm import LLMClient
 
 logger = logging.getLogger("dual_mem.agent.summarize")
 
-MIN_CONTENT_LENGTH = 500
-
 
 class Summarizer:
     """Generates a concise summary for sufficiently long content."""
 
-    def __init__(self, *, llm: LLMClient):
+    def __init__(self, *, llm: LLMClient, min_content_length: int = 800):
         self.llm = llm
+        self.min_content_length = min_content_length
 
     async def summarize(self, *, content: str, current_time: str) -> str | None:
         """Summarize content into one short paragraph, or None if below the length threshold."""
-        if len(content) < MIN_CONTENT_LENGTH:
+        if len(content) < self.min_content_length:
             return None
         tmpl = prompts.pick(prompts.SUMMARY_ZH, prompts.SUMMARY_EN, content)
 

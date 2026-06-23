@@ -113,6 +113,25 @@ cluster_stage2_sim: 0.55
 
 gate_enabled: true
 gate_threshold: 0.3
+# 合并 Gate+Extract 为一次 LLM（每 turn 省 1 次 RTT）
+combined_gate_extract: true
+# 向量 novelty 高 + 启发式 relevance 高时跳过 Gate LLM
+gate_heuristic_shortcircuit: true
+gate_shortcircuit_novelty: 0.8
+gate_shortcircuit_relevance: 0.5
+# 同用户重复 content 跳过 extract（benchmark batch 收益大）
+content_hash_dedup: true
+
+# L3 摘要：默认 1500 字符以上才触发
+summarizer_enabled: true
+summarizer_min_content_length: 1500
+
+# Extract 长输入截断（0=不截断；benchmark 建议 10000）
+extract_max_content_chars: 0
+extract_retry_on_failure: true
+
+# Merge L1 + Gate user-turn embeds into one API call (benchmark / low-concurrency latency)
+embed_merge_l1_gate: true
 
 # ---------------------------------------------------------------------------
 # 读路径
@@ -122,16 +141,21 @@ gate_threshold: 0.3
 # legacy：三路由 + BM25/RRF 基线
 reader_mode: hybrid
 
+# 读侧 reconsolidation：0 = 每次 search 都跑；>0 = 同 user 最小间隔（秒）
+reconsolidation_enabled: true
+reconsolidation_min_interval_sec: 0
+
 # ---------------------------------------------------------------------------
 # Embed 写入侧攒批（不影响 search 侧直接 embed）
 # ---------------------------------------------------------------------------
 
 embed_queue_batch_size: 32
 embed_queue_window_ms: 200.0
+embed_cache_size: 10000
 
 # messages 写入时：true = L1 对话 + Gate user 轮合并为一次 embed_batch（低延迟）；
-# false = 走 embed_queued 攒批（高并发友好，默认）
-embed_merge_l1_gate: false
+# false = 走 embed_queued 攒批（高并发友好）
+# （默认已在 Gate 段设为 true，benchmark 低并发场景推荐开启）
 
 # ---------------------------------------------------------------------------
 # Cross-domain Sweeper（默认关；将多个 base schema 归纳为核心 schema）

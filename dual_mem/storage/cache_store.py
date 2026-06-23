@@ -61,6 +61,17 @@ CREATE TABLE IF NOT EXISTS memory_access (
     access_count     INTEGER NOT NULL DEFAULT 0,
     last_accessed_at REAL    NOT NULL
 );
+CREATE TABLE IF NOT EXISTS content_hash_cache (
+    iso_key      TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    outcome_json TEXT NOT NULL,
+    ts           REAL NOT NULL,
+    PRIMARY KEY (iso_key, content_hash)
+);
+CREATE TABLE IF NOT EXISTS reconsolidation_throttle (
+    iso_key TEXT PRIMARY KEY,
+    last_ts REAL NOT NULL
+);
 """
 
 
@@ -278,3 +289,61 @@ class CacheStore:
             (node_id,),
         ).fetchone()
         return dict(row) if row else None
+
+    def get_access_batch(self, node_ids: list[str]) -> dict[str, dict]:
+        """Batch fetch access stats keyed by node_id."""
+        if not node_ids:
+            return {}
+        placeholders = ",".join("?" * len(node_ids))
+        rows = self.conn.execute(
+            f"SELECT node_id, access_count, last_accessed_at FROM memory_access "
+            f"WHERE node_id IN ({placeholders})",
+            node_ids,
+        ).fetchall()
+        return {str(row["node_id"]): dict(row) for row in rows}
+
+    # ---- Content-hash write dedup ---------------------------------------------------
+
+    def get_content_hash_outcome(self, iso_key: str, content_hash: str) -> dict | None:
+        """Return cached WriterOutcome fields for (scope, content_hash), or None."""
+        row = self.conn.execute(
+            "SELECT outcome_json FROM content_hash_cache WHERE iso_key = ? AND content_hash = ?",
+            (iso_key, content_hash),
+        ).fetchone()
+        if not row:
+            return None
+        return json.loads(row["outcome_json"])
+
+    def set_content_hash_outcome(
+        self,
+        iso_key: str,
+        content_hash: str,
+        outcome: dict,
+    ) -> None:
+        """Persist write outcome for duplicate-content short-circuit."""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO content_hash_cache (iso_key, content_hash, outcome_json, ts) "
+            "VALUES (?, ?, ?, ?)",
+            (iso_key, content_hash, json.dumps(outcome, ensure_ascii=False), time.time()),
+        )
+        self.conn.commit()
+
+    # ---- Reconsolidation throttle ---------------------------------------------------
+
+    def should_run_reconsolidation(self, iso_key: str, min_interval_sec: float) -> bool:
+        """Return True if reconsolidation may run; updates last_ts when allowed."""
+        if min_interval_sec <= 0:
+            return True
+        now = time.time()
+        row = self.conn.execute(
+            "SELECT last_ts FROM reconsolidation_throttle WHERE iso_key = ?",
+            (iso_key,),
+        ).fetchone()
+        if row and (now - float(row["last_ts"])) < min_interval_sec:
+            return False
+        self.conn.execute(
+            "INSERT OR REPLACE INTO reconsolidation_throttle (iso_key, last_ts) VALUES (?, ?)",
+            (iso_key, now),
+        )
+        self.conn.commit()
+        return True

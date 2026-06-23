@@ -99,9 +99,16 @@ class FusionScorer:
                 if anchor.source_path not in scored.source_paths:
                     scored.source_paths.append(anchor.source_path)
 
+        access_rows: dict[str, dict] = {}
+        if self.cache is not None:
+            try:
+                access_rows = self.cache.get_access_batch(list(node_map.keys()))
+            except Exception:
+                access_rows = {}
+
         for nid, scored in node_map.items():
             scored.time_decay = self._time_decay(scored.node, now_ts)
-            scored.frequency = self._frequency(nid)
+            scored.frequency = self._frequency(nid, access_rows.get(nid))
             scored.arousal = self._arousal(scored.node)
             scored.schema_boost = self._schema_boost(scored.node, activated)
             scored.rrf_score = self._rrf(nid, path_rankings)
@@ -125,14 +132,14 @@ class FusionScorer:
         delta_days = max(0.0, (now_ts - ref) / 86400.0)
         return math.exp(-self.config.time_decay_lambda_per_day * delta_days)
 
-    def _frequency(self, node_id: str) -> float:
+    def _frequency(self, node_id: str, access_row: dict | None = None) -> float:
         """log(1 + access_count) normalized to [0, 1] via log(101)."""
-        if self.cache is None:
-            return 0.0
-        try:
-            row = self.cache.get_access(node_id)
-        except Exception:
-            return 0.0
+        row = access_row
+        if row is None and self.cache is not None:
+            try:
+                row = self.cache.get_access(node_id)
+            except Exception:
+                return 0.0
         if not row:
             return 0.0
         count = int(row.get("access_count", 0) or 0)

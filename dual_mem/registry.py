@@ -55,6 +55,7 @@ class ComponentFactory:
                 chars_per_token=self.settings.chars_per_token,
                 retry_attempts=self.settings.embed_retry_attempts,
                 retry_base_delay=self.settings.embed_retry_base_delay,
+                cache_size=self.settings.embed_cache_size,
             )
         return self._embed
 

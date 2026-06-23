@@ -7,6 +7,7 @@ both inside the synchronous write path (reconcile_sync=True) and from the System
 """
 import json
 import logging
+import asyncio
 from dataclasses import dataclass, field
 
 from dual_mem.agent import prompts
@@ -97,19 +98,33 @@ class Reconciler:
 
         candidate_map: dict = {}
         candidate_scores: dict = {}
-        for text in [*new_memories, *search_queries]:
-            embedding = await self.embed.embed(text)
-            for node in self.vector.query(embedding=embedding, where=where, top_k=self.SEARCH_TOPK):
-                if node.score < self.SEARCH_THRESHOLD:
-                    continue
-                nid = node.node_id
-                if nid in excluded:
-                    continue
-                if nid not in candidate_map:
-                    candidate_map[nid] = node
-                    candidate_scores[nid] = node.score
-                else:
-                    candidate_scores[nid] = max(candidate_scores[nid], node.score)
+        recall_texts = [*new_memories, *search_queries]
+        if recall_texts:
+            embeddings = await self.embed.embed_batch(recall_texts)
+
+            async def _query_hits(embedding: list[float]) -> list:
+                return await asyncio.to_thread(
+                    self.vector.query,
+                    embedding=embedding,
+                    where=where,
+                    top_k=self.SEARCH_TOPK,
+                )
+
+            hit_lists = await asyncio.gather(
+                *[_query_hits(emb) for emb in embeddings],
+            )
+            for nodes in hit_lists:
+                for node in nodes:
+                    if node.score < self.SEARCH_THRESHOLD:
+                        continue
+                    nid = node.node_id
+                    if nid in excluded:
+                        continue
+                    if nid not in candidate_map:
+                        candidate_map[nid] = node
+                        candidate_scores[nid] = node.score
+                    else:
+                        candidate_scores[nid] = max(candidate_scores[nid], node.score)
 
         if not candidate_map:
             return [

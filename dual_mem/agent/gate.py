@@ -24,6 +24,9 @@ class GateConfig:
     arousal_weight: float = 0.20
     novelty_similarity_cap: float = 0.95
     llm_temperature: float = 0.1
+    heuristic_shortcircuit: bool = True
+    shortcircuit_novelty: float = 0.8
+    shortcircuit_relevance: float = 0.5
 
 
 class AttentionalGate:
@@ -69,20 +72,80 @@ class AttentionalGate:
                 scoring_method="rule",
             )
 
-        llm_scores = await self._llm_score(text, agent_context) if self.llm is not None else None
+        shortcircuited = await self.try_shortcircuit_pass(
+            content=text,
+            existing_similarities=existing_similarities,
+        )
+        if shortcircuited is not None:
+            return shortcircuited
 
-        if llm_scores is not None:
-            novelty = llm_scores["novelty"]
-            relevance = llm_scores["biographical_relevance"]
-            arousal = llm_scores["emotional_arousal"]
-            llm_reason = llm_scores.get("reason", "")
-            scoring_method = "llm"
-        else:
-            if self.llm is not None:
-                logger.warning("Gate LLM scoring failed, falling back to heuristic")
+        llm_scores = await self._llm_score(text, agent_context) if self.llm is not None else None
+        if llm_scores is None and self.llm is not None:
+            logger.warning("Gate LLM scoring failed, falling back to heuristic")
+
+        return await self.finalize_from_llm(
+            content=text,
+            llm_scores=llm_scores,
+            existing_similarities=existing_similarities,
+            scoring_method="llm" if llm_scores is not None else "heuristic",
+        )
+
+    async def try_shortcircuit_pass(
+        self,
+        *,
+        content: str,
+        existing_similarities: list[dict] | list[list[dict]] | None = None,
+    ) -> GateResult | None:
+        """If vector novelty + heuristic relevance are clearly high, PASS without gate LLM."""
+        if not self.config.heuristic_shortcircuit:
+            return None
+        text = (content or "").strip()
+        if not text:
+            return None
+
+        vector_novelty = self._vector_novelty_from_sims(existing_similarities)
+        _, h_relevance, h_arousal = self._heuristic_score(text)
+        if vector_novelty < self.config.shortcircuit_novelty:
+            return None
+        if h_relevance < self.config.shortcircuit_relevance:
+            return None
+
+        h_novelty, _, _ = self._heuristic_score(text)
+        return await self.finalize_from_llm(
+            content=text,
+            llm_scores={
+                "novelty": min(h_novelty, vector_novelty),
+                "biographical_relevance": h_relevance,
+                "emotional_arousal": h_arousal,
+                "reason": "heuristic short-circuit",
+            },
+            existing_similarities=existing_similarities,
+            scoring_method="heuristic_shortcircuit",
+        )
+
+    async def finalize_from_llm(
+        self,
+        *,
+        content: str,
+        llm_scores: dict | None,
+        existing_similarities: list[dict] | list[list[dict]] | None = None,
+        scoring_method: str = "llm",
+        llm_reason: str = "",
+    ) -> GateResult:
+        """Fuse LLM/heuristic dimension scores with vector novelty into a GateResult."""
+        text = (content or "").strip()
+        if llm_scores is None:
             novelty, relevance, arousal = self._heuristic_score(text)
-            llm_reason = "heuristic fallback" if self.llm is not None else ""
             scoring_method = "heuristic"
+            llm_reason = llm_reason or "heuristic fallback"
+        else:
+            novelty = _clamp(float(llm_scores.get("novelty", 0.5)), 0.0, 1.0)
+            relevance = _clamp(
+                float(llm_scores.get("biographical_relevance", 0.0)), 0.0, 1.0
+            )
+            arousal = _clamp(float(llm_scores.get("emotional_arousal", 0.0)), 0.0, 1.0)
+            if not llm_reason:
+                llm_reason = str(llm_scores.get("reason", ""))
 
         top_id: str | None = None
         top_score = 0.0
@@ -275,6 +338,28 @@ class AttentionalGate:
         cap = self.config.novelty_similarity_cap
         novelty = max(0.0, min(1.0, 1.0 - min(max_sim, cap)))
         return novelty, top_id, max_sim
+
+    def _vector_novelty_from_sims(
+        self,
+        existing_similarities: list[dict] | list[list[dict]] | None,
+    ) -> float:
+        """Max vector novelty across single- or multi-turn similarity hits."""
+        if not existing_similarities:
+            return 1.0
+        first = existing_similarities[0]
+        if isinstance(first, list):
+            turns: list[list[dict]] = existing_similarities  # type: ignore[assignment]
+            best = 0.0
+            for turn_sims in turns:
+                if turn_sims:
+                    vec_n, _, _ = self._vector_novelty(turn_sims)
+                    best = max(best, vec_n)
+                else:
+                    best = max(best, 1.0)
+            return best
+        sims: list[dict] = existing_similarities  # type: ignore[assignment]
+        vec_n, _, _ = self._vector_novelty(sims)
+        return vec_n
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:

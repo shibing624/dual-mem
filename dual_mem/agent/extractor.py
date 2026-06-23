@@ -8,16 +8,26 @@ deferred to MemAgent so L0/L2/L4 embeddings can be batched post-extract.
 import logging
 
 from dual_mem.agent import prompts
-from dual_mem.providers.llm import LLMClient, merge_extract_results
+from dual_mem.providers.llm import LLMClient, merge_extract_results, truncate_middle
 
 logger = logging.getLogger("dual_mem.agent.extract")
+
+_EXTRACT_RETRY_MIN_CONTENT_LEN = 200
 
 
 class Extractor:
     """Extracts identity/fact/intention memories from one LLM JSON call."""
 
-    def __init__(self, *, llm: LLMClient):
+    def __init__(
+        self,
+        *,
+        llm: LLMClient,
+        max_content_chars: int = 0,
+        retry_on_failure: bool = True,
+    ):
         self.llm = llm
+        self.max_content_chars = max_content_chars
+        self.retry_on_failure = retry_on_failure
 
     async def extract(
         self,
@@ -28,18 +38,39 @@ class Extractor:
         user_id: str,
         agent_id: str,
         session_id: str,
+        include_gate: bool = False,
     ) -> dict:
         """Return extracted fields; ``basic_info`` is persisted later by MemAgent."""
         tmpl = prompts.pick(prompts.EXTRACT_ZH, prompts.EXTRACT_EN, content)
+        if include_gate:
+            tmpl += prompts.pick(
+                prompts.EXTRACT_GATE_APPEND_ZH,
+                prompts.EXTRACT_GATE_APPEND_EN,
+                content,
+            )
 
         def _build_system(chunk: str) -> str:
             return tmpl.format(content=chunk, current_time=current_time)
 
+        llm_content = self._prepare_content(content)
         parsed = await self.llm.chat_json_for_content(
-            content=content,
+            content=llm_content,
             build_system=_build_system,
             merge_results=merge_extract_results,
         )
+        if self.retry_on_failure and self._should_retry(parsed, content_len=len(llm_content)):
+            logger.warning(
+                "extract: retry after empty/unparseable LLM output (content len=%d)",
+                len(content),
+            )
+            parsed = await self.llm.chat_json_for_content(
+                content=llm_content,
+                build_system=_build_system,
+                merge_results=merge_extract_results,
+                temperature=0.5,
+                json_object=True,
+            )
+
         if not isinstance(parsed, dict) or not parsed:
             logger.warning(
                 "extract: empty/unparseable LLM output for content len=%d (preview=%r)",
@@ -57,6 +88,10 @@ class Extractor:
         if not isinstance(basic_info, dict):
             basic_info = {}
 
+        gate_decision = parsed.get("gate_decision")
+        if not isinstance(gate_decision, dict):
+            gate_decision = None
+
         logger.debug(
             "extract identity=%d facts=%d intentions=%d ephemeral=%s basic_info=%s",
             len(identity) if isinstance(identity, list) else 0,
@@ -66,7 +101,7 @@ class Extractor:
             bool(basic_info),
         )
 
-        return {
+        out: dict = {
             "identity": identity if isinstance(identity, list) else [],
             "facts": facts if isinstance(facts, list) else [],
             "intentions": intentions if isinstance(intentions, list) else [],
@@ -74,3 +109,24 @@ class Extractor:
             "is_ephemeral": is_ephemeral,
             "basic_info": basic_info,
         }
+        if gate_decision is not None:
+            out["gate_decision"] = gate_decision
+        return out
+
+    def _prepare_content(self, content: str) -> str:
+        if self.max_content_chars <= 0 or len(content) <= self.max_content_chars:
+            return content
+        logger.info(
+            "extract: truncating content %d -> %d chars",
+            len(content),
+            self.max_content_chars,
+        )
+        return truncate_middle(content, self.max_content_chars)
+
+    @staticmethod
+    def _should_retry(parsed: dict | list | None, *, content_len: int) -> bool:
+        if content_len < _EXTRACT_RETRY_MIN_CONTENT_LEN:
+            return False
+        if not isinstance(parsed, dict):
+            return True
+        return not parsed

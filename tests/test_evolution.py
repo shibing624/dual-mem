@@ -9,6 +9,9 @@ class FakeVector:
     def get(self, node_id: str) -> MemoryNode | None:
         return self._by_id.get(node_id)
 
+    def get_by_ids(self, node_ids: list[str]) -> dict[str, MemoryNode]:
+        return {nid: self._by_id[nid] for nid in node_ids if nid in self._by_id}
+
 
 def _node(node_id, gmt, *, is_latest, supersedes=(), superseded_by=(), content=""):
     return MemoryNode(

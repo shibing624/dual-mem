@@ -6,6 +6,7 @@
 write path stays light. When reconcile_sync=True we run reconcile inline for strong-consistency
 contracts. Also handles L7 intentions (dual graph), L0 basic profile, and L3 summary.
 """
+import asyncio
 import logging
 import time
 import uuid
@@ -13,7 +14,7 @@ from datetime import datetime
 
 from dual_mem.agent.basic_profile import BasicProfileTool
 from dual_mem.agent.extractor import Extractor
-from dual_mem.agent.gate import AttentionalGate
+from dual_mem.agent.gate import AttentionalGate, GateConfig
 from dual_mem.agent.reconciler import ReconcileOp, Reconciler
 from dual_mem.agent.summarizer import Summarizer
 from dual_mem.isolation import build_filter
@@ -38,8 +39,15 @@ class MemAgent:
         llm = factory.llm
         assert llm is not None, "MemAgent requires factory.llm (system1/dual mode)"
         self.basic_profile_tool = BasicProfileTool(vector=self.vector, embed=self.embed)
-        self.extractor = Extractor(llm=llm)
-        self.summarizer = Summarizer(llm=llm)
+        self.extractor = Extractor(
+            llm=llm,
+            max_content_chars=self.settings.extract_max_content_chars,
+            retry_on_failure=self.settings.extract_retry_on_failure,
+        )
+        self.summarizer = Summarizer(
+            llm=llm,
+            min_content_length=self.settings.summarizer_min_content_length,
+        )
         self.reconciler = Reconciler(
             llm=llm,
             embed=self.embed,
@@ -49,6 +57,12 @@ class MemAgent:
         self.gate = AttentionalGate(
             threshold=self.settings.gate_threshold,
             llm=llm,
+            config=GateConfig(
+                threshold=self.settings.gate_threshold,
+                heuristic_shortcircuit=self.settings.gate_heuristic_shortcircuit,
+                shortcircuit_novelty=self.settings.gate_shortcircuit_novelty,
+                shortcircuit_relevance=self.settings.gate_shortcircuit_relevance,
+            ),
         )
 
     async def run(
@@ -80,17 +94,75 @@ class MemAgent:
             datetime.fromtimestamp(memory_at).isoformat(timespec="seconds") if memory_at else ""
         )
 
-        # ---- Step 1: Attentional gate -------------------------------------------------
-        gate_result = await self._evaluate_gate(
-            content=content,
-            embedding=embedding,
-            app_id=app_id,
-            user_id=user_id,
-            agent_id=agent_id,
-            user_queries=user_queries,
-            agent_context=agent_context,
-            gate_turn_embeddings=gate_turn_embeddings,
+        summary_task = asyncio.create_task(
+            self._maybe_summarize(content=content, current_time=current_time),
         )
+
+        use_combined = self.settings.combined_gate_extract and self.settings.gate_enabled
+
+        if use_combined:
+            sims = await self._gate_similarity_context(
+                embedding=embedding,
+                app_id=app_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                user_queries=user_queries,
+                gate_turn_embeddings=gate_turn_embeddings,
+            )
+            shortcircuited = await self.gate.try_shortcircuit_pass(
+                content=content,
+                existing_similarities=sims,
+            )
+            include_gate = shortcircuited is None
+            extracted, summary = await asyncio.gather(
+                self.extractor.extract(
+                    content=content,
+                    current_time=current_time,
+                    app_id=app_id,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    include_gate=include_gate,
+                ),
+                summary_task,
+            )
+            if shortcircuited is not None:
+                gate_result = shortcircuited
+            else:
+                gate_result = await self.gate.finalize_from_llm(
+                    content=content,
+                    llm_scores=extracted.get("gate_decision"),
+                    existing_similarities=sims,
+                    scoring_method="llm",
+                )
+        else:
+            gate_result = await self._evaluate_gate(
+                content=content,
+                embedding=embedding,
+                app_id=app_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                user_queries=user_queries,
+                agent_context=agent_context,
+                gate_turn_embeddings=gate_turn_embeddings,
+            )
+            if self.settings.gate_enabled and not gate_result.passed:
+                summary_task.cancel()
+                await asyncio.gather(summary_task, return_exceptions=True)
+                return [], gate_result, False
+
+            extracted, summary = await asyncio.gather(
+                self.extractor.extract(
+                    content=content,
+                    current_time=current_time,
+                    app_id=app_id,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    session_id=session_id,
+                ),
+                summary_task,
+            )
+
         try:
             self.cache.log_pipeline(
                 request_id=request_id,
@@ -100,6 +172,7 @@ class MemAgent:
                     "score": gate_result.gate_score,
                     "novelty": gate_result.novelty,
                     "reason": gate_result.reason,
+                    "combined": use_combined,
                 },
             )
         except Exception:
@@ -110,17 +183,11 @@ class MemAgent:
             gate_result.gate_score, gate_result.novelty, gate_result.reason,
         )
         if self.settings.gate_enabled and not gate_result.passed:
+            if not summary_task.done():
+                summary_task.cancel()
+                await asyncio.gather(summary_task, return_exceptions=True)
             return [], gate_result, False
 
-        # ---- Step 2: Extract identity / facts / intentions / emotion / basic_info -----
-        extracted = await self.extractor.extract(
-            content=content,
-            current_time=current_time,
-            app_id=app_id,
-            user_id=user_id,
-            agent_id=agent_id,
-            session_id=session_id,
-        )
         try:
             self.cache.log_pipeline(
                 request_id=request_id,
@@ -222,9 +289,32 @@ class MemAgent:
             except Exception:
                 pass
 
-        # ---- Step 4: L7 intentions into graph (dual only) ---------------------------
-        intention_ids = await self._write_intentions(
-            extracted.get("intentions") or [],
+        # ---- Step 4: L7 intentions + L3 summary (one embed batch when possible) ------
+        intention_items = [
+            intent
+            for intent in (extracted.get("intentions") or [])
+            if isinstance(intent, dict)
+            and isinstance(intent.get("content"), str)
+            and intent.get("content", "").strip()
+        ]
+        tail_texts: list[str] = []
+        if summary:
+            tail_texts.append(summary)
+        tail_texts.extend(str(i["content"]).strip() for i in intention_items)
+
+        tail_embeddings: list[list[float]] = []
+        if tail_texts:
+            tail_embeddings = await self.embed.embed_batch(tail_texts)
+
+        emb_idx = 0
+        summary_embedding: list[float] | None = None
+        if summary:
+            summary_embedding = tail_embeddings[emb_idx]
+            emb_idx += 1
+
+        intention_ids = self._write_intentions_with_embeddings(
+            intention_items,
+            embeddings=tail_embeddings[emb_idx:],
             app_id=app_id,
             user_id=user_id,
             agent_id=agent_id,
@@ -232,9 +322,7 @@ class MemAgent:
         )
         stored_ids.extend(intention_ids)
 
-        # ---- Step 5: L3 summary for long content -------------------------------------
-        summary = await self.summarizer.summarize(content=content, current_time=current_time)
-        if summary:
+        if summary and summary_embedding is not None:
             summary_node = MemoryNode(
                 content=summary,
                 layer=Layer.L3_SUMMARY,
@@ -246,7 +334,7 @@ class MemAgent:
                 is_latest=True,
                 memory_at=memory_at,
             )
-            summary_node.embedding = await self.embed.embed_queued(summary)
+            summary_node.embedding = summary_embedding
             self.vector.upsert([summary_node])
             self.history.append(
                 event="ADD",
@@ -258,6 +346,11 @@ class MemAgent:
             stored_ids.append(summary_node.node_id)
 
         return stored_ids, gate_result, False
+
+    async def _maybe_summarize(self, *, content: str, current_time: str) -> str | None:
+        if not self.settings.summarizer_enabled:
+            return None
+        return await self.summarizer.summarize(content=content, current_time=current_time)
 
     # ---- Internal helpers ------------------------------------------------------------
 
@@ -273,12 +366,7 @@ class MemAgent:
         agent_context: str | None = None,
         gate_turn_embeddings: list[list[float]] | None = None,
     ) -> GateResult:
-        """Evaluate the attentional gate using existing L2 hits as similarity context.
-
-        For multi-turn input the per-turn user texts are embedded individually so novelty =
-        max(1 - max_sim) across turns. Single-turn falls back to one similarity probe on the
-        precomputed ``embedding``.
-        """
+        """Evaluate the attentional gate using existing L2/L4 hits as similarity context."""
         if not self.settings.gate_enabled:
             return GateResult(
                 passed=True,
@@ -290,9 +378,38 @@ class MemAgent:
                 scoring_method="bypass",
             )
 
-        # Pull a small similarity context for the novelty signal (no extra LLM cost).
-        # Probe both fact and identity layers — repeated identity statements should not be
-        # judged "novel" just because L2 misses them.
+        sims = await self._gate_similarity_context(
+            embedding=embedding,
+            app_id=app_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            user_queries=user_queries,
+            gate_turn_embeddings=gate_turn_embeddings,
+        )
+        if isinstance(sims, list) and sims and isinstance(sims[0], list):
+            per_turn_sims: list[list[dict]] = sims  # type: ignore[assignment]
+            return await self.gate.evaluate(
+                content=content,
+                existing_similarities=per_turn_sims,
+                agent_context=agent_context,
+            )
+        return await self.gate.evaluate(
+            content=content,
+            existing_similarities=sims,  # type: ignore[arg-type]
+            agent_context=agent_context,
+        )
+
+    async def _gate_similarity_context(
+        self,
+        *,
+        embedding: list[float],
+        app_id: str,
+        user_id: str,
+        agent_id: str,
+        user_queries: list[str] | None = None,
+        gate_turn_embeddings: list[list[float]] | None = None,
+    ) -> list[dict] | list[list[dict]]:
+        """Vector similarity hits for gate novelty (multi-turn or single-turn)."""
         where = build_filter(
             app_ids=[app_id],
             user_id=user_id,
@@ -309,32 +426,40 @@ class MemAgent:
                     turn_embs = await self.embed.embed_batch(user_queries)
                 except Exception:
                     turn_embs = [embedding]
-            per_turn_sims: list[list[dict]] = []
-            for emb in turn_embs:
+
+            async def _hits_for_emb(emb: list[float]) -> list[dict]:
                 try:
-                    hits = self.vector.query(embedding=emb, where=where, top_k=5)
-                    per_turn_sims.append(
-                        [{"node_id": h.node_id, "score": h.score} for h in hits if h.score >= 0.3]
+                    nodes = await asyncio.to_thread(
+                        self.vector.query,
+                        embedding=emb,
+                        where=where,
+                        top_k=5,
                     )
+                    return [
+                        {"node_id": h.node_id, "score": h.score}
+                        for h in nodes
+                        if h.score >= 0.3
+                    ]
                 except Exception:
-                    per_turn_sims.append([])
-            return await self.gate.evaluate(
-                content=content,
-                existing_similarities=per_turn_sims,
-                agent_context=agent_context,
-            )
+                    return []
+
+            per_turn = await asyncio.gather(*[_hits_for_emb(e) for e in turn_embs])
+            return list(per_turn)
 
         try:
-            hits = self.vector.query(embedding=embedding, where=where, top_k=5)
-            sims = [{"node_id": h.node_id, "score": h.score} for h in hits if h.score >= 0.3]
+            nodes = await asyncio.to_thread(
+                self.vector.query,
+                embedding=embedding,
+                where=where,
+                top_k=5,
+            )
+            return [
+                {"node_id": h.node_id, "score": h.score}
+                for h in nodes
+                if h.score >= 0.3
+            ]
         except Exception:
-            sims = []
-
-        return await self.gate.evaluate(
-            content=content,
-            existing_similarities=sims,
-            agent_context=agent_context,
-        )
+            return []
 
     @staticmethod
     def _collect_new_memories(extracted: dict) -> tuple[list[str], list[dict]]:
@@ -541,10 +666,11 @@ class MemAgent:
 
         return stored_ids
 
-    async def _write_intentions(
+    def _write_intentions_with_embeddings(
         self,
         intentions: list[dict],
         *,
+        embeddings: list[list[float]],
         app_id: str,
         user_id: str,
         agent_id: str,
@@ -554,14 +680,18 @@ class MemAgent:
         graph = self.factory.graph
         if graph is None or not intentions:
             return []
+        if len(embeddings) != len(intentions):
+            logger.warning(
+                "intention embed count mismatch: %d items vs %d vectors",
+                len(intentions),
+                len(embeddings),
+            )
+            return []
 
         ids: list[str] = []
-        for intent in intentions:
-            content = intent.get("content") if isinstance(intent, dict) else None
-            if not isinstance(content, str) or not content.strip():
-                continue
+        for intent, embedding in zip(intentions, embeddings, strict=True):
+            content = intent.get("content", "").strip()
             node_id = str(uuid.uuid4())
-            embedding = await self.embed.embed_queued(content)
             graph.add_node(
                 GraphNode(
                     node_id=node_id,

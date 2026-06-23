@@ -24,7 +24,7 @@ from dual_mem.retrieval.intent import (
     classify_intent,
     extract_keywords,
 )
-from dual_mem.retrieval.query_understanding import understand
+from dual_mem.retrieval.query_understanding import QueryUnderstanding, understand
 from dual_mem.retrieval.reconsolidation import ReconsolidationHook
 from dual_mem.sdk_models import EvolutionItem, MemoryItem, ReadResult, SearchMemories
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
@@ -227,6 +227,7 @@ class Reader:
                 profile_min_score=profile_min_score,
                 intention_limit=intention_limit,
                 created_after=created_after,
+                understanding=u,
             )
         else:
             memories = await self._search_hybrid(
@@ -243,6 +244,7 @@ class Reader:
                 created_after=created_after,
                 request_id=rid,
                 trace=trace,
+                understanding=u,
             )
 
         # Reconsolidation Hook (fire-and-forget; never blocks the response).
@@ -251,17 +253,28 @@ class Reader:
             "proactive": [m.memory_id for m in memories.proactive],
             "normal": [m.memory_id for m in memories.normal],
         }
-        task = asyncio.create_task(
-            self.reconsolidation.process(
-                query=query,
-                recalled_by_route=recalled,
-                user_id=user_id,
-                app_id=app_ids[0] if app_ids else "",
-                agent_id="",
-            )
-        )
-        task.add_done_callback(_swallow)
-        self.last_reconsolidation_task = task
+        settings = self.factory.settings
+        if settings.reconsolidation_enabled:
+            iso_key = f"{app_ids[0] if app_ids else ''}::{user_id}"
+            if self.factory.cache.should_run_reconsolidation(
+                iso_key,
+                settings.reconsolidation_min_interval_sec,
+            ):
+                task = asyncio.create_task(
+                    self.reconsolidation.process(
+                        query=query,
+                        recalled_by_route=recalled,
+                        user_id=user_id,
+                        app_id=app_ids[0] if app_ids else "",
+                        agent_id="",
+                    )
+                )
+                task.add_done_callback(_swallow)
+                self.last_reconsolidation_task = task
+            else:
+                self.last_reconsolidation_task = None
+        else:
+            self.last_reconsolidation_task = None
 
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         if trace is not None:
@@ -290,18 +303,19 @@ class Reader:
         created_after: int | None,
         request_id: str = "search",
         trace: ReadResult | None = None,
+        understanding: QueryUnderstanding | None = None,
     ) -> SearchMemories:
         """V2 read flow: QU → Anchor 5 paths → GraphExpander → Fusion → split into routes."""
-        understanding = understand(query)
-        if created_after is None and understanding.time_from is not None:
-            created_after = understanding.time_from
+        u = understanding or understand(query)
+        if created_after is None and u.time_from is not None:
+            created_after = u.time_from
 
         embedding = await self.factory.embed.embed(query)
 
         # Multi-path anchors. QU-suggested layers PLUS the always-on profile layers
         # (L0/L4) — profile content must be reachable on every query, intent classification
         # is just a hint. The schema path queries the graph store separately.
-        suggested = list(understanding.target_layers) if understanding.target_layers else []
+        suggested = list(u.target_layers) if u.target_layers else []
         target_layers: list[Layer] = []
         seen_layers: set[Layer] = set()
         for layer in [*suggested, *_DEFAULT_VDB_LAYERS]:
@@ -311,7 +325,7 @@ class Reader:
         anchor_result = await self.anchor_engine.search(
             query=query,
             query_embedding=embedding,
-            understanding=understanding,
+            understanding=u,
             app_ids=app_ids,
             user_id=user_id,
             agent_ids=agent_ids,
@@ -460,11 +474,12 @@ class Reader:
         profile_min_score: float,
         intention_limit: int,
         created_after: int | None,
+        understanding: QueryUnderstanding | None = None,
     ) -> SearchMemories:
         """Original three-route + BM25/RRF rerank pipeline (kept as horizontal-eval baseline)."""
-        understanding = understand(query)
-        if created_after is None and understanding.time_from is not None:
-            created_after = understanding.time_from
+        u = understanding or understand(query)
+        if created_after is None and u.time_from is not None:
+            created_after = u.time_from
 
         embedding = await self.factory.embed.embed(query)
         vector = self.factory.vector

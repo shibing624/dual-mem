@@ -12,6 +12,12 @@ EXTRACT_RESPONSE = {
     "facts": [{"content": "用户昨天去了北京", "speculate": None, "tags": ["travel"]}],
     "intentions": [],
     "basic_info": {},
+    "gate_decision": {
+        "novelty": 0.9,
+        "biographical_relevance": 0.9,
+        "emotional_arousal": 0.2,
+        "reason": "test",
+    },
 }
 
 
@@ -29,6 +35,45 @@ def _raw(fake_embed, content):
     node = MemoryNode(content=content, layer=Layer.L1_RAW, app_id="app", user_id="u", agent_id="ag")
     node.embedding = fake_embed.embed_sync(content)
     return node
+
+
+async def test_combined_gate_extract_one_llm_call(tmp_storage, fake_embed):
+    """combined_gate_extract merges gate scoring into the extract JSON call."""
+    factory = ComponentFactory(
+        settings=Settings(
+            mode="system1",
+            storage_dir=tmp_storage,
+            gate_enabled=True,
+            combined_gate_extract=True,
+        ),
+        embed=fake_embed,
+        llm=FakeLLMClient(responses={"extract": EXTRACT_RESPONSE}),
+    )
+    agent = MemAgent(factory=factory)
+    raw = _raw(fake_embed, "用户喜欢喝咖啡，昨天去了北京")
+    factory.vector.upsert([raw])
+
+    stored_ids, gate_result, is_ephemeral = await agent.run(
+        raw_node=raw,
+        content="用户喜欢喝咖啡，昨天去了北京",
+        embedding=raw.embedding,
+        app_id="app",
+        user_id="u",
+        agent_id="ag",
+        session_id="se",
+        request_id="req-combined",
+        memory_at=None,
+    )
+
+    assert is_ephemeral is False
+    assert gate_result.passed is True
+    assert len(stored_ids) == 2
+    gate_calls = [
+        c for c in factory.llm.calls
+        if c["type"] == "chat_json"
+        and ("记忆价值评估" in c["system"] or "memory value gate" in c["system"])
+    ]
+    assert gate_calls == []
 
 
 async def test_run_produces_l2_l4(tmp_storage, fake_embed):
@@ -88,8 +133,8 @@ async def test_fast_write_batches_l0_with_l2_l4(tmp_storage, fake_embed):
 
 
 async def test_run_long_content_adds_l3(tmp_storage, fake_embed):
-    long_text = "用户" + "聊了很多关于旅行和美食的事情。" * 60
-    assert len(long_text) >= 500
+    long_text = "用户" + "聊了很多关于旅行和美食的事情。" * 110
+    assert len(long_text) >= 1500
     factory = _factory(
         tmp_storage,
         fake_embed,

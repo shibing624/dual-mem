@@ -38,6 +38,9 @@ class VectorStore(ABC):
     def get(self, node_id: str) -> MemoryNode | None: ...
 
     @abstractmethod
+    def get_by_ids(self, node_ids: list[str]) -> dict[str, MemoryNode]: ...
+
+    @abstractmethod
     def get_many(self, where: dict, limit: int = 1000) -> list[MemoryNode]: ...
 
     @abstractmethod
@@ -105,6 +108,24 @@ class ChromaVectorStore(VectorStore):
         embeddings = result["embeddings"]
         embedding = list(embeddings[0]) if embeddings is not None and len(embeddings) else None
         return MemoryNode.from_storage(result["documents"][0], result["metadatas"][0], embedding)
+
+    def get_by_ids(self, node_ids: list[str]) -> dict[str, MemoryNode]:
+        """Batch-fetch nodes by id (with embeddings when stored)."""
+        if not node_ids:
+            return {}
+        result = self.collection.get(
+            ids=list(node_ids),
+            include=["metadatas", "documents", "embeddings"],
+        )
+        out: dict[str, MemoryNode] = {}
+        embeddings = result.get("embeddings")
+        for i, nid in enumerate(result["ids"]):
+            emb = None
+            if embeddings is not None and i < len(embeddings) and embeddings[i] is not None:
+                emb = list(embeddings[i])
+            node = MemoryNode.from_storage(result["documents"][i], result["metadatas"][i], emb)
+            out[nid] = node
+        return out
 
     def get_many(self, where: dict, limit: int = 1000) -> list[MemoryNode]:
         """Fetch all nodes matching a metadata filter (no embeddings), up to limit."""

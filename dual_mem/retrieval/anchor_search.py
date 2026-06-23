@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from dual_mem.isolation import build_filter
 from dual_mem.registry import ComponentFactory
+from dual_mem.retrieval import bm25
 from dual_mem.retrieval.query_understanding import QueryUnderstanding
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
@@ -71,6 +72,7 @@ class AnchorSearchEngine:
         schema_threshold: float = 0.3,
         intention_threshold: float = 0.4,
         semantic_threshold: float = 0.3,
+        entity_pool_limit: int = 200,
     ):
         self.factory = factory
         self.semantic_limit = semantic_limit
@@ -79,6 +81,7 @@ class AnchorSearchEngine:
         self.schema_threshold = schema_threshold
         self.intention_threshold = intention_threshold
         self.semantic_threshold = semantic_threshold
+        self.entity_pool_limit = entity_pool_limit
 
     async def search(
         self,
@@ -182,7 +185,8 @@ class AnchorSearchEngine:
             statuses=[MemoryStatus.ACTIVE],
             created_after=created_after,
         )
-        nodes = self.factory.vector.query(
+        nodes = await asyncio.to_thread(
+            self.factory.vector.query,
             embedding=query_embedding,
             where=where,
             top_k=math.ceil(self.semantic_limit * 1.5),
@@ -203,7 +207,7 @@ class AnchorSearchEngine:
         session_ids: list[str] | None,
         layers: list[Layer],
     ) -> list[AnchorNode]:
-        """Path 2: keyword-substring lookup over content (zero-LLM, complements semantic)."""
+        """Path 2: BM25 keyword scoring over a bounded candidate pool (replaces substring scan)."""
         where = build_filter(
             app_ids=app_ids,
             user_id=user_id,
@@ -212,22 +216,28 @@ class AnchorSearchEngine:
             layers=layers,
             statuses=[MemoryStatus.ACTIVE],
         )
-        # Pull a candidate pool then intersect by keyword.
-        pool = self.factory.vector.get_many(where, limit=200)
+        pool = await asyncio.to_thread(
+            self.factory.vector.get_many,
+            where,
+            self.entity_pool_limit,
+        )
+        if not pool:
+            return []
+
+        ranked = bm25.score_and_rank(
+            keywords,
+            [(n.node_id, n.content) for n in pool],
+        )
+        node_by_id = {n.node_id: n for n in pool}
         out: list[AnchorNode] = []
-        for node in pool:
-            content_lower = node.content.lower()
-            hits = sum(
-                1
-                for kw in keywords
-                if kw.lower() in content_lower or kw in node.content
-            )
-            if hits == 0:
+        for nid, bm25_score in ranked:
+            if bm25_score <= 0:
                 continue
-            # Score by hit ratio; bounded to [0.3, 0.9].
-            score = min(0.9, 0.3 + 0.15 * hits)
+            node = node_by_id.get(nid)
+            if node is None:
+                continue
+            score = min(0.9, 0.3 + 0.6 * bm25_score)
             out.append(AnchorNode(node=node, score=score, source_path=PATH_ENTITY))
-        out.sort(key=lambda a: a.score, reverse=True)
         return out[:20]
 
     async def _temporal(
@@ -252,8 +262,11 @@ class AnchorSearchEngine:
             statuses=[MemoryStatus.ACTIVE],
             created_after=created_after,
         )
-        nodes = self.factory.vector.get_many(where, limit=self.temporal_limit)
-        # Stable temporal ordering (newest first).
+        nodes = await asyncio.to_thread(
+            self.factory.vector.get_many,
+            where,
+            self.temporal_limit,
+        )
         nodes.sort(key=lambda n: n.gmt_created or 0, reverse=True)
         return [
             AnchorNode(node=n, score=0.5, source_path=PATH_TEMPORAL)
@@ -272,7 +285,8 @@ class AnchorSearchEngine:
         if graph is None:
             return []
         try:
-            hits = graph.query_by_embedding(
+            hits = await asyncio.to_thread(
+                graph.query_by_embedding,
                 layer=Layer.L6_SCHEMA.value,
                 user_id=user_id,
                 app_ids=app_ids,
@@ -301,7 +315,8 @@ class AnchorSearchEngine:
         if graph is None:
             return []
         try:
-            hits = graph.query_by_embedding(
+            hits = await asyncio.to_thread(
+                graph.query_by_embedding,
                 layer=Layer.L7_INTENTION.value,
                 user_id=user_id,
                 app_ids=app_ids,

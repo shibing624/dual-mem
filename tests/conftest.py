@@ -81,9 +81,21 @@ class FakeLLMClient:
                 user=user,
             )
         if "记忆分析专家" in system or "memory analyst" in system:
+            default_extract = {
+                "facts": [],
+                "identity": [],
+                "intentions": [],
+                "is_ephemeral": False,
+                "gate_decision": {
+                    "novelty": 0.8,
+                    "biographical_relevance": 0.8,
+                    "emotional_arousal": 0.3,
+                    "reason": "test gate pass",
+                },
+            }
             return self._resolve(
                 "extract",
-                {"facts": [], "identity": [], "intentions": [], "is_ephemeral": False},
+                default_extract,
                 system=system,
                 user=user,
             )

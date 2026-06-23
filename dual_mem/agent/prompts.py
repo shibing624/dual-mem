@@ -237,6 +237,33 @@ EXTRACT_ZH = """你是一位专业的记忆分析专家。请从以下对话中�
 }}
 ```"""
 
+EXTRACT_GATE_APPEND_ZH = """
+
+## gate_decision（与提取同一次输出）
+
+同时评估该对话是否值得长期记忆（三个维度 0.0–1.0）：
+- `novelty`：信息新颖度
+- `biographical_relevance`：与用户传记/偏好的相关性
+- `emotional_arousal`：情绪唤醒度
+- `reason`：简短理由
+
+在 JSON 顶层增加 `gate_decision` 对象（与 identity/facts 同级）：
+```json
+"gate_decision": {{"novelty": 0.8, "biographical_relevance": 0.7, "emotional_arousal": 0.2, "reason": "..."}}
+```"""
+
+EXTRACT_GATE_APPEND_EN = """
+
+## gate_decision (same response as extraction)
+
+Also score whether this passage is worth long-term memory (each 0.0–1.0):
+- `novelty`, `biographical_relevance`, `emotional_arousal`, `reason`
+
+Add a top-level `gate_decision` object alongside identity/facts:
+```json
+"gate_decision": {{"novelty": 0.8, "biographical_relevance": 0.7, "emotional_arousal": 0.2, "reason": "..."}}
+```"""
+
 EXTRACT_EN = """You are an expert memory analyst. Extract structured user information from the conversation below.
 
 Conversation content:

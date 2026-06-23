@@ -6,6 +6,7 @@ System1 cognition pipeline (gate -> extract -> fast-write) which queues async re
 and writes any L7 intentions / L3 summary in line. dual-mem requires LLM + embedding API
 keys; there is no embedding-only / no-LLM mode.
 """
+import hashlib
 import logging
 from dataclasses import dataclass, field
 
@@ -15,6 +16,10 @@ from dual_mem.sdk_models import GateResult
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
 logger = logging.getLogger("dual_mem.writer")
+
+
+def _content_iso_key(*, app_id: str, user_id: str, agent_id: str) -> str:
+    return f"{app_id}::{user_id}::{agent_id}"
 
 
 @dataclass
@@ -52,6 +57,27 @@ class MemoryWriter:
         ``user_queries`` carries the per-turn user texts for multi-turn writes; the gate uses
         them for novelty=max-across-turns. None means single-turn (fall back to ``content``).
         """
+        settings = self.factory.settings
+        iso_key = _content_iso_key(app_id=app_id, user_id=user_id, agent_id=agent_id)
+        content_hash: str | None = None
+        if settings.content_hash_dedup:
+            content_hash = hashlib.md5(content.encode()).hexdigest()
+            cached = self.factory.cache.get_content_hash_outcome(iso_key, content_hash)
+            if cached is not None:
+                logger.debug(
+                    "content_hash hit user=%s hash=%s memory_id=%s",
+                    user_id,
+                    content_hash[:8],
+                    cached.get("memory_id"),
+                )
+                return WriterOutcome(
+                    memory_id=str(cached["memory_id"]),
+                    extra_node_ids=list(cached.get("extra_node_ids") or []),
+                    gate_passed=bool(cached.get("gate_passed", True)),
+                    gate_score=cached.get("gate_score"),
+                    is_ephemeral=bool(cached.get("is_ephemeral", False)),
+                )
+
         node = MemoryNode(
             content=content,
             layer=Layer.L1_RAW,
@@ -64,7 +90,6 @@ class MemoryWriter:
         )
 
         gate_turn_embeddings: list[list[float]] | None = None
-        settings = self.factory.settings
         if user_queries and settings.embed_merge_l1_gate:
             # One embed RTT for L1 + Gate user turns; bypasses embed_queued coalescing — enable
             # only when single-write latency matters more than concurrent write throughput.
@@ -109,13 +134,26 @@ class MemoryWriter:
             node.status = MemoryStatus.SHADOW
             self.factory.vector.upsert([node])
 
-        return WriterOutcome(
+        outcome = WriterOutcome(
             memory_id=node.node_id,
             extra_node_ids=extra_node_ids,
             gate_passed=gate_result.passed,
             gate_score=gate_result.gate_score,
             is_ephemeral=is_ephemeral,
         )
+        if settings.content_hash_dedup and content_hash is not None:
+            self.factory.cache.set_content_hash_outcome(
+                iso_key,
+                content_hash,
+                {
+                    "memory_id": outcome.memory_id,
+                    "extra_node_ids": outcome.extra_node_ids,
+                    "gate_passed": outcome.gate_passed,
+                    "gate_score": outcome.gate_score,
+                    "is_ephemeral": outcome.is_ephemeral,
+                },
+            )
+        return outcome
 
 
 # Re-export GateResult for callers that want to inspect gate decisions on a write.

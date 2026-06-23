@@ -11,8 +11,8 @@ async def test_short_content_returns_none():
 
 
 async def test_long_content_calls_llm():
-    long_text = "用户" + "聊了很多关于旅行和美食的事情。" * 60
-    assert len(long_text) >= 500
+    long_text = "用户" + "聊了很多关于旅行和美食的事情。" * 110
+    assert len(long_text) >= 1500
     llm = FakeLLMClient(responses={"text": "用户喜欢旅行和美食。"})
     summarizer = Summarizer(llm=llm)
     out = await summarizer.summarize(content=long_text, current_time="2026-06-18")
@@ -21,7 +21,7 @@ async def test_long_content_calls_llm():
 
 
 async def test_empty_summary_returns_none():
-    long_text = "x" * 600
+    long_text = "x" * 1500
     llm = FakeLLMClient(responses={"text": "   "})
     summarizer = Summarizer(llm=llm)
     assert await summarizer.summarize(content=long_text, current_time="") is None

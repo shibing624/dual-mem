@@ -155,10 +155,28 @@ class Settings(BaseSettings):
     # Attentional gate: skip extraction for low-value content (pleasantries, no novelty).
     gate_enabled: bool = True
     gate_threshold: float = 0.3
+    # Single LLM call: extract JSON includes gate_decision (saves one gate LLM RTT per turn).
+    combined_gate_extract: bool = False
+    # High vector novelty + heuristic relevance → skip gate LLM (borderline still uses LLM).
+    gate_heuristic_shortcircuit: bool = True
+    gate_shortcircuit_novelty: float = 0.8
+    gate_shortcircuit_relevance: float = 0.5
+    # Skip extract/reconcile when identical content was already written for this user scope.
+    content_hash_dedup: bool = True
+
+    # L3 summarizer (long content only).
+    summarizer_enabled: bool = True
+    summarizer_min_content_length: int = 1500
+
+    # Extract: pre-truncate content before LLM (0 = disabled; use llm chunk+merge only).
+    extract_max_content_chars: int = 0
+    # Retry once on empty/unparseable JSON (higher temperature + forced json_object).
+    extract_retry_on_failure: bool = True
 
     # Embedding write-side batching window for embed_queued (does not affect search-side embed).
     embed_queue_batch_size: int = 32
     embed_queue_window_ms: float = 200.0
+    embed_cache_size: int = 10_000
     # Merge L1 dialogue + Gate user-turn embeds into one API call on add(messages=...).
     # Saves ~1 RTT + queue window; bypasses embed_queued coalescing — keep false for
     # high-concurrency write throughput (default).
@@ -178,6 +196,10 @@ class Settings(BaseSettings):
     # V2 read pipeline: hybrid (default) = QueryUnderstanding -> AnchorSearch (5 paths) ->
     # GraphExpander -> FusionScorer; legacy = original three-route + bm25 RRF rerank baseline.
     reader_mode: Literal["hybrid", "legacy"] = "hybrid"
+
+    # Read-side reconsolidation hook (access bump + co-recall edges + optional S2 enqueue).
+    reconsolidation_enabled: bool = True
+    reconsolidation_min_interval_sec: float = 0.0
 
     @field_validator("app_whitelist", mode="before")
     @classmethod
