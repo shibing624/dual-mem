@@ -213,15 +213,16 @@ class MemoryClient:
         agent_context: str | None = None
         if messages:
             normalized = _normalize_messages(messages)
+            cpt = self.settings.chars_per_token
             threshold_chars = int(
                 self.settings.llm_context_window
-                * self.settings.extract_history_shape_threshold_ratio
-                * self.settings.chars_per_token
+                * self.settings.extract_history_context_ratio
+                * cpt
             )
             normalized = _shape_history(
                 normalized,
                 threshold_chars=threshold_chars,
-                assistant_max_chars=self.settings.extract_assistant_max_chars,
+                assistant_max_chars=int(self.settings.extract_assistant_max_tokens * cpt),
             )
             user_queries = [m.content for m in normalized if m.role == "user" and m.content.strip()]
             content = _format_dialogue(normalized)

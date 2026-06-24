@@ -39,14 +39,15 @@ class MemAgent:
         llm = factory.llm
         assert llm is not None, "MemAgent requires factory.llm (system1/dual mode)"
         self.basic_profile_tool = BasicProfileTool(vector=self.vector, embed=self.embed)
+        cpt = self.settings.chars_per_token
         self.extractor = Extractor(
             llm=llm,
-            max_content_chars=self.settings.extract_max_content_chars,
+            max_content_chars=int(self.settings.extract_max_content_tokens * cpt),
             retry_on_failure=self.settings.extract_retry_on_failure,
         )
         self.summarizer = Summarizer(
             llm=llm,
-            min_content_length=self.settings.summarizer_min_content_length,
+            min_content_length=int(self.settings.summarizer_min_content_tokens * cpt),
         )
         self.reconciler = Reconciler(
             llm=llm,
@@ -379,7 +380,7 @@ class MemAgent:
         """Start summarizer early so it can overlap extract / fast_write; cancel on reject."""
         if not self.settings.summarizer_enabled:
             return None
-        if len(content) < self.settings.summarizer_min_content_length:
+        if len(content) < self.summarizer.min_content_length:
             return None
         return asyncio.create_task(
             self.summarizer.summarize(content=content, current_time=current_time),

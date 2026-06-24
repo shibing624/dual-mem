@@ -170,22 +170,25 @@ class Settings(BaseSettings):
     # "user" = per app/user (cross-session/agent hits, higher hit rate).
     content_hash_scope: Literal["session", "user"] = "session"
 
-    # L3 summarizer (long content only).
+    # L3 summarizer (long content only). Threshold is token-based (× chars_per_token internally).
     summarizer_enabled: bool = True
-    summarizer_min_content_length: int = 1500
+    summarizer_min_content_tokens: int = 600
 
-    # Extract: pre-truncate content before LLM (0 = disabled; use llm chunk+merge only).
-    extract_max_content_chars: int = 0
+    # Extract final-blob hard cap in tokens (0 = disabled → rely on the LLM chunk+merge path).
+    # Applies to the final content of BOTH content= and messages= (after history shaping). This
+    # is the last-resort size cap (e.g. when user turns alone are huge); it is layered ON TOP of
+    # — and does not conflict with — the role-aware history shaping below.
+    extract_max_content_tokens: int = 0
     # Retry once on empty/unparseable JSON (temperature=0 + JSON-only reinforcement prompt).
     extract_retry_on_failure: bool = True
     # Multi-turn extract input shaping (messages=...): no turn is ever dropped (a caller that
-    # batches 40 turns must get all 40). Shaping only kicks in when the WHOLE dialogue exceeds
-    # ``extract_history_shape_threshold_ratio`` × ``llm_context_window`` (token-granular budget);
-    # only then are assistant/system turns (the model's own words) truncated to
-    # ``extract_assistant_max_chars``, while user turns — the real memory signal — stay full.
-    # Short dialogues pass through untouched. ratio<=0 or chars<=0 disables shaping.
-    extract_history_shape_threshold_ratio: float = 0.7
-    extract_assistant_max_chars: int = 500
+    # batches 40 turns must get all 40). Assistant/system turns (the model's own words) are
+    # truncated to ``extract_assistant_max_tokens`` ONLY when the whole dialogue occupies more
+    # than ``extract_history_context_ratio`` of ``llm_context_window`` (token-granular budget);
+    # user turns — the real memory signal — always stay full. Short dialogues pass through
+    # untouched. ratio<=0 or tokens<=0 disables shaping.
+    extract_history_context_ratio: float = 0.7
+    extract_assistant_max_tokens: int = 200
 
     # Embedding write-side batching window for embed_queued (does not affect search-side embed).
     embed_queue_batch_size: int = 32

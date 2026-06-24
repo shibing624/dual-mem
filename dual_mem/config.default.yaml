@@ -126,17 +126,18 @@ content_hash_dedup: true
 # 去重键粒度：session（严格，按 app/user/agent/session）或 user（跨会话，命中率更高）
 content_hash_scope: session
 
-# L3 摘要：默认 1500 字符以上才触发
+# L3 摘要：默认 600 token 以上才触发（× chars_per_token 换算为字符比较）
 summarizer_enabled: true
-summarizer_min_content_length: 1500
+summarizer_min_content_tokens: 600
 
-# Extract 长输入截断（0=不截断；benchmark 建议 10000）
-extract_max_content_chars: 0
+# Extract 最终输入硬上限（token，0=不截断 → 走 LLM 分块 merge）；作用于 content= 与 messages= 整形后的
+# 最终内容，是兜底的尺寸上限（如 user 话本身极长时），与下方按角色的历史整形分层叠加、不冲突。benchmark 建议 4000
+extract_max_content_tokens: 0
 extract_retry_on_failure: true
-# 多轮 messages 输入整形：不丢任何轮；仅当整段对话超过 context window 的该比例（token 粒度）时
-# 才把 assistant/system（AI 的话）截断到字符上限，user（记忆主信号）始终全保留；短对话原样透传
-extract_history_shape_threshold_ratio: 0.7
-extract_assistant_max_chars: 500
+# 多轮 messages 输入整形：不丢任何轮；仅当整段对话占用超过 context window 的该比例（token 粒度）时
+# 才把 assistant/system（AI 的话）截断到 token 上限，user（记忆主信号）始终全保留；短对话原样透传
+extract_history_context_ratio: 0.7
+extract_assistant_max_tokens: 200
 
 # Merge L1 + Gate user-turn embeds into one API call (benchmark / low-concurrency latency)
 embed_merge_l1_gate: true
