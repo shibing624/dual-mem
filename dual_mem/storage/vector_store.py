@@ -58,7 +58,7 @@ class ChromaVectorStore(VectorStore):
     """Persistent Chroma-backed vector store using cosine distance."""
 
     def __init__(self, storage_dir: str):
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.client = chromadb.PersistentClient(
             path=f"{storage_dir}/chroma",
             settings=Settings(anonymized_telemetry=False),

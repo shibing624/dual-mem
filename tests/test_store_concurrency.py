@@ -7,7 +7,9 @@ import asyncio
 
 from dual_mem.config import Settings
 from dual_mem.registry import ComponentFactory
+from dual_mem.storage.cache_store import CacheStore
 from dual_mem.storage.graph_store import GraphNode, KuzuGraphStore
+from dual_mem.storage.history_store import HistoryStore
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
 
@@ -92,3 +94,45 @@ async def test_kuzu_parallel_query_under_lock(tmp_storage):
     schema_n, intention_n = await asyncio.gather(_schema(), _intention())
     assert schema_n == 1
     assert intention_n == 1
+
+
+async def test_cache_parallel_writes_under_lock(tmp_storage):
+    cache = CacheStore(tmp_storage)
+
+    async def _touch(i: int) -> None:
+        await asyncio.to_thread(
+            cache.log_pipeline,
+            request_id=f"req-{i}",
+            stage="TEST",
+            payload={"i": i},
+        )
+        await asyncio.to_thread(cache.bump_access, [f"node-{i}"])
+        await asyncio.to_thread(
+            cache.enqueue_reconcile_task,
+            app_id="app",
+            user_id="u",
+            agent_id="ag",
+            node_ids=[f"node-{i}"],
+        )
+
+    await asyncio.gather(*[_touch(i) for i in range(16)])
+    assert cache.reconcile_queue_size() == 16
+
+
+async def test_history_parallel_append_under_lock(tmp_storage):
+    history = HistoryStore(tmp_storage, persist=True)
+
+    async def _append(i: int) -> None:
+        await asyncio.to_thread(
+            history.append,
+            event="ADD",
+            node_id=f"n{i}",
+            user_id="u",
+            old=None,
+            new={"i": i},
+        )
+
+    await asyncio.gather(*[_append(i) for i in range(16)])
+    rows = history.list_for_node("n0")
+    assert len(rows) == 1
+    assert rows[0]["new"]["i"] == 0

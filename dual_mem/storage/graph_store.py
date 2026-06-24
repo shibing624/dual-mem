@@ -103,12 +103,23 @@ class KuzuGraphStore(GraphStore):
     """Kuzu-embedded-database implementation of the memory knowledge graph."""
 
     def __init__(self, storage_dir: str):
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.db = kuzu.Database(f"{storage_dir}/kuzu")
         self.conn = kuzu.Connection(self.db)
         with self._lock:
             for ddl in _SCHEMA_DDL:
                 self.conn.execute(ddl)
+
+    def close(self) -> None:
+        """Release the embedded Kuzu database (helps avoid stale lock files on crash)."""
+        with self._lock:
+            if self.db is None:
+                return
+            self.conn = None
+            close_db = getattr(self.db, "close", None)
+            if callable(close_db):
+                close_db()
+            self.db = None
 
     def add_node(self, node: GraphNode) -> None:
         """Upsert a memory node and link it to its tag topics."""
