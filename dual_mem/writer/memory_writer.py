@@ -24,7 +24,12 @@ def _content_iso_key(
     user_id: str,
     agent_id: str,
     session_id: str,
+    scope: str = "session",
 ) -> str:
+    """Dedup key for content_hash. ``session`` scope keys per app/user/agent/session (strict);
+    ``user`` scope keys per app/user (cross-session/agent dedup, higher hit rate)."""
+    if scope == "user":
+        return f"{app_id}::{user_id}"
     return f"{app_id}::{user_id}::{agent_id}::{session_id}"
 
 
@@ -69,6 +74,7 @@ class MemoryWriter:
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
+            scope=settings.content_hash_scope,
         )
         content_hash: str | None = None
         if settings.content_hash_dedup:

@@ -213,6 +213,16 @@ class MemoryClient:
         agent_context: str | None = None
         if messages:
             normalized = _normalize_messages(messages)
+            threshold_chars = int(
+                self.settings.llm_context_window
+                * self.settings.extract_history_shape_threshold_ratio
+                * self.settings.chars_per_token
+            )
+            normalized = _shape_history(
+                normalized,
+                threshold_chars=threshold_chars,
+                assistant_max_chars=self.settings.extract_assistant_max_chars,
+            )
             user_queries = [m.content for m in normalized if m.role == "user" and m.content.strip()]
             content = _format_dialogue(normalized)
             agent_context = _last_assistant_context(normalized)
@@ -473,12 +483,13 @@ class MemoryClient:
     async def aclose(self) -> None:
         """Release dual-mode background resources. Idempotent.
 
-        Cancels the scheduled System2 loop when ``system2_trigger_mode="scheduled"``.
-        No-op for ``system1``. Does **not** await in-flight ``per_write`` digest tasks.
-        Call once at application shutdown (not after each request).
+        Cancels the scheduled System2 loop when ``system2_trigger_mode="scheduled"`` and
+        releases the embedded Kuzu graph lock. No-op extras for ``system1``. Does **not**
+        await in-flight ``per_write`` digest tasks. Call once at application shutdown.
         """
         if isinstance(self.writer, System2Writer):
             await self.writer.aclose()
+        self.factory.close()
 
 
 def _swallow_task_exception(task: asyncio.Task) -> None:
@@ -504,6 +515,38 @@ def _normalize_messages(messages: list) -> list[ChatMessage]:
             continue
         out.append(ChatMessage(role=role, content=text))
     return out
+
+
+def _shape_history(
+    messages: list[ChatMessage],
+    *,
+    threshold_chars: int,
+    assistant_max_chars: int,
+) -> list[ChatMessage]:
+    """Shape multi-turn input before extract WITHOUT dropping any turn.
+
+    Truncation only kicks in when the whole dialogue is large: if the total content length is
+    within ``threshold_chars`` (derived from the model context window), the dialogue passes
+    through untouched — short batches keep their assistant turns in full. Above the threshold,
+    non-user turns (assistant/system — the model's own words) are truncated to
+    ``assistant_max_chars``; user turns (the real memory signal) are always preserved in full.
+
+    ``threshold_chars<=0`` or ``assistant_max_chars<=0`` disables shaping entirely.
+    """
+    if threshold_chars <= 0 or assistant_max_chars <= 0:
+        return messages
+    total_chars = sum(len(m.content) for m in messages)
+    if total_chars <= threshold_chars:
+        return messages
+    shaped: list[ChatMessage] = []
+    for msg in messages:
+        if msg.role == "user" or len(msg.content) <= assistant_max_chars:
+            shaped.append(msg)
+        else:
+            shaped.append(
+                ChatMessage(role=msg.role, content=msg.content[:assistant_max_chars] + "…")
+            )
+    return shaped
 
 
 def _format_dialogue(messages: list[ChatMessage]) -> str:

@@ -119,8 +119,12 @@ combined_gate_extract: true
 gate_heuristic_shortcircuit: true
 gate_shortcircuit_novelty: 0.8
 gate_shortcircuit_relevance: 0.5
-# 同用户重复 content 跳过 extract（benchmark batch 收益大）
+# 高度重复（向量 novelty 低于此）且无传记相关性时直接 REJECT，跳过 Gate LLM；0=关闭
+gate_shortcircuit_reject_novelty: 0.12
+# 同 scope 重复 content 跳过 extract（benchmark batch 收益大）
 content_hash_dedup: true
+# 去重键粒度：session（严格，按 app/user/agent/session）或 user（跨会话，命中率更高）
+content_hash_scope: session
 
 # L3 摘要：默认 1500 字符以上才触发
 summarizer_enabled: true
@@ -129,6 +133,10 @@ summarizer_min_content_length: 1500
 # Extract 长输入截断（0=不截断；benchmark 建议 10000）
 extract_max_content_chars: 0
 extract_retry_on_failure: true
+# 多轮 messages 输入整形：不丢任何轮；仅当整段对话超过 context window 的该比例（token 粒度）时
+# 才把 assistant/system（AI 的话）截断到字符上限，user（记忆主信号）始终全保留；短对话原样透传
+extract_history_shape_threshold_ratio: 0.7
+extract_assistant_max_chars: 500
 
 # Merge L1 + Gate user-turn embeds into one API call (benchmark / low-concurrency latency)
 embed_merge_l1_gate: true

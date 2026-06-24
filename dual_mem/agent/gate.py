@@ -27,6 +27,9 @@ class GateConfig:
     heuristic_shortcircuit: bool = True
     shortcircuit_novelty: float = 0.8
     shortcircuit_relevance: float = 0.5
+    # Vector novelty below this (near-duplicate) + low biographical relevance → REJECT
+    # without the gate LLM. 0 disables the reject short-circuit.
+    shortcircuit_reject_novelty: float = 0.12
 
 
 class AttentionalGate:
@@ -79,6 +82,13 @@ class AttentionalGate:
         if shortcircuited is not None:
             return shortcircuited
 
+        rejected = await self.try_shortcircuit_reject(
+            content=text,
+            existing_similarities=existing_similarities,
+        )
+        if rejected is not None:
+            return rejected
+
         llm_scores = await self._llm_score(text, agent_context) if self.llm is not None else None
         if llm_scores is None and self.llm is not None:
             logger.warning("Gate LLM scoring failed, falling back to heuristic")
@@ -120,6 +130,43 @@ class AttentionalGate:
             },
             existing_similarities=existing_similarities,
             scoring_method="heuristic_shortcircuit",
+        )
+
+    async def try_shortcircuit_reject(
+        self,
+        *,
+        content: str,
+        existing_similarities: list[dict] | list[list[dict]] | None = None,
+    ) -> GateResult | None:
+        """If content is a near-duplicate (very low vector novelty) of an existing memory and
+        carries no biographical relevance, REJECT without a gate LLM call. Borderline cases
+        (some novelty, or profile-relevant) still fall through to the LLM."""
+        if not self.config.heuristic_shortcircuit:
+            return None
+        if self.config.shortcircuit_reject_novelty <= 0:
+            return None
+        text = (content or "").strip()
+        if not text:
+            return None
+
+        vector_novelty = self._vector_novelty_from_sims(existing_similarities)
+        if vector_novelty >= self.config.shortcircuit_reject_novelty:
+            return None
+        h_novelty, h_relevance, h_arousal = self._heuristic_score(text)
+        # Keep anything that looks biographical / emotional — only drop true low-value dups.
+        if h_relevance >= self.config.shortcircuit_relevance or h_arousal >= 0.5:
+            return None
+
+        return await self.finalize_from_llm(
+            content=text,
+            llm_scores={
+                "novelty": vector_novelty,
+                "biographical_relevance": h_relevance,
+                "emotional_arousal": h_arousal,
+                "reason": "heuristic short-circuit (near-duplicate)",
+            },
+            existing_similarities=existing_similarities,
+            scoring_method="heuristic_shortcircuit_reject",
         )
 
     async def finalize_from_llm(

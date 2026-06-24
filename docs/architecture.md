@@ -76,6 +76,6 @@ Agent / Cursor  ──MCP──▶  MCP Server（受 Skill 指导）  ──▶ 
 | System2 / 图库 | ✗ | ✓ |
 | proactive 召回 | 空 | 有 L7 意图 |
 
-> 已知缺口（勿当作已实现）：hybrid 读路径暂未用 `query_understanding.target_layers` 路由（写死层列表）；读侧 `ReconsolidationHook` 会入队 `reconsolidation` 任务，但 System2 仅记 `RECONSOLIDATION_DRAIN` 日志后出队、无专用 ReAct，故该再巩固沉淀目前等于 no-op；`sdk_models.ReadResult`（trace 字段）已定义但 `Reader.search` 仅返回 `SearchMemories`。
+> 读路径说明：hybrid 读路径已按 `query_understanding.target_layers`（QU 建议层 ∪ 常驻 profile 层 `_DEFAULT_VDB_LAYERS`）路由并下传至 `anchor_search`；读侧 `ReconsolidationHook` 入队的 `reconsolidation` 任务由 `system2_writer._run_reconsolidation` 以**零 LLM**方式蒸馏（用 gate 启发式给召回 query 打分，与各召回节点存储的情绪比较，唤醒度差异显著则置 `custom.reactivation=True` 并刷新 `last_reactivated_at`；按设计不跑专用 ReAct）；`sdk_models.ReadResult`（trace 字段）经 `Reader.search_with_trace`（`client.search(debug=True)`）返回，`Reader.search` 仅返回 `SearchMemories`。
 
 更多接入与部署细节见 [`mcp_integration.md`](./mcp_integration.md)。

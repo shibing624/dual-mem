@@ -62,6 +62,7 @@ class MemAgent:
                 heuristic_shortcircuit=self.settings.gate_heuristic_shortcircuit,
                 shortcircuit_novelty=self.settings.gate_shortcircuit_novelty,
                 shortcircuit_relevance=self.settings.gate_shortcircuit_relevance,
+                shortcircuit_reject_novelty=self.settings.gate_shortcircuit_reject_novelty,
             ),
         )
 
@@ -110,6 +111,17 @@ class MemAgent:
                 content=content,
                 existing_similarities=sims,
             )
+            if shortcircuited is None:
+                rejected = await self.gate.try_shortcircuit_reject(
+                    content=content,
+                    existing_similarities=sims,
+                )
+                if rejected is not None:
+                    logger.info(
+                        "gate REJECT (short-circuit) score=%.3f novelty=%.3f reason=%s",
+                        rejected.gate_score, rejected.novelty, rejected.reason,
+                    )
+                    return [], rejected, False
             include_gate = shortcircuited is None
             summary_task = self._begin_summarize_task(
                 content=content,
@@ -694,14 +706,7 @@ class MemAgent:
             )
 
             for old_id in op.supersedes:
-                old = self.vector.get(old_id)
-                if old is None:
-                    continue
-                old.is_latest = False
-                if node.node_id not in old.superseded_by:
-                    old.superseded_by.append(node.node_id)
-                old.status = MemoryStatus.SUPERSEDED
-                self.vector.upsert([old])
+                self.vector.mark_superseded(old_id, superseded_by_id=node.node_id)
 
         return stored_ids
 

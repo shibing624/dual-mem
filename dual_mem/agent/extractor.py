@@ -63,11 +63,20 @@ class Extractor:
                 "extract: retry after empty/unparseable LLM output (content len=%d)",
                 len(content),
             )
+            retry_tmpl = tmpl + prompts.pick(
+                prompts.EXTRACT_RETRY_APPEND_ZH,
+                prompts.EXTRACT_RETRY_APPEND_EN,
+                content,
+            )
+
+            def _build_system_retry(chunk: str) -> str:
+                return retry_tmpl.format(content=chunk, current_time=current_time)
+
             parsed = await self.llm.chat_json_for_content(
                 content=llm_content,
-                build_system=_build_system,
+                build_system=_build_system_retry,
                 merge_results=merge_extract_results,
-                temperature=0.5,
+                temperature=0.0,
             )
 
         if not isinstance(parsed, dict) or not parsed:

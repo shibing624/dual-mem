@@ -1,7 +1,46 @@
 import pytest
 
 from dual_mem import MemoryClient
+from dual_mem.client import _shape_history
 from dual_mem.config import Settings
+from dual_mem.sdk_models import ChatMessage
+
+
+def test_shape_history_truncates_assistant_keeps_user_when_over_threshold():
+    msgs = [
+        ChatMessage(role="user", content="u" * 800),
+        ChatMessage(role="assistant", content="a" * 800),
+    ]
+    # total 1600 chars > threshold 1000 → shaping kicks in
+    shaped = _shape_history(msgs, threshold_chars=1000, assistant_max_chars=500)
+    assert shaped[0].content == "u" * 800  # user preserved in full
+    assert len(shaped[1].content) == 501  # assistant truncated to 500 + ellipsis
+    assert shaped[1].content.endswith("…")
+
+
+def test_shape_history_never_drops_turns():
+    # 40 turns batched: all 40 must survive (no turn-count limit anymore).
+    msgs = [ChatMessage(role="user", content=f"m{i}") for i in range(40)]
+    shaped = _shape_history(msgs, threshold_chars=1, assistant_max_chars=500)
+    assert len(shaped) == 40
+    assert shaped[0].content == "m0"
+    assert shaped[-1].content == "m39"
+
+
+def test_shape_history_short_dialogue_passthrough():
+    # Below threshold → assistant kept in full even if longer than assistant_max_chars cap.
+    msgs = [
+        ChatMessage(role="user", content="问题"),
+        ChatMessage(role="assistant", content="a" * 800),
+    ]
+    shaped = _shape_history(msgs, threshold_chars=100_000, assistant_max_chars=500)
+    assert shaped[1].content == "a" * 800
+
+
+def test_shape_history_disabled_passthrough():
+    msgs = [ChatMessage(role="assistant", content="a" * 800)]
+    assert _shape_history(msgs, threshold_chars=0, assistant_max_chars=500)[0].content == "a" * 800
+    assert _shape_history(msgs, threshold_chars=1, assistant_max_chars=0)[0].content == "a" * 800
 
 
 @pytest.fixture

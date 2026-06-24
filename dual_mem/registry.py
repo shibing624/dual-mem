@@ -94,6 +94,16 @@ class ComponentFactory:
             )
         return self._graph
 
+    def close(self) -> None:
+        """Release instantiated embedded stores. Idempotent; only closes what was created.
+
+        Currently the Kuzu graph store holds an on-disk lock that benefits from an explicit
+        release on shutdown; Chroma/SQLite stores are flushed per write and need no close.
+        """
+        if self._graph is not _UNSET and self._graph is not None:
+            self._graph.close()
+            self._graph = _UNSET
+
     @property
     def llm(self) -> LLMClient:
         """The LLM client. Always non-None; dual-mem requires an LLM API key."""

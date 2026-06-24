@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from dual_mem.config import Settings
 from dual_mem.registry import ComponentFactory
 from dual_mem.storage.cache_store import CacheStore
@@ -42,6 +44,35 @@ async def test_chroma_parallel_query_under_lock(tmp_storage, fake_embed):
 
     counts = await asyncio.gather(*[_query() for _ in range(8)])
     assert all(c >= 1 for c in counts)
+
+
+async def test_mark_superseded_is_atomic_and_keeps_embedding(tmp_storage, fake_embed):
+    """mark_superseded flips is_latest/status, appends superseded_by, preserves the embedding."""
+    factory = ComponentFactory(
+        settings=Settings(mode="system1", storage_dir=tmp_storage),
+        embed=fake_embed,
+        llm=None,
+    )
+    old = MemoryNode(
+        content="老事实", layer=Layer.L2_FACT, app_id="app", user_id="u",
+        status=MemoryStatus.ACTIVE, is_latest=True,
+    )
+    old.embedding = fake_embed.embed_sync(old.content)
+    factory.vector.upsert([old])
+
+    ok = factory.vector.mark_superseded(old.node_id, superseded_by_id="new-1")
+    assert ok is True
+    # Idempotent: appending the same superseder twice does not duplicate.
+    assert factory.vector.mark_superseded(old.node_id, superseded_by_id="new-1") is True
+
+    reloaded = factory.vector.get(old.node_id)
+    assert reloaded.is_latest is False
+    assert reloaded.status is MemoryStatus.SUPERSEDED
+    assert reloaded.superseded_by == ["new-1"]
+    # embedding never rewritten (float32 round-trip, so compare approximately)
+    assert reloaded.embedding == pytest.approx(old.embedding, rel=1e-4)
+
+    assert factory.vector.mark_superseded("does-not-exist", superseded_by_id="x") is False
 
 
 async def test_kuzu_parallel_query_under_lock(tmp_storage):

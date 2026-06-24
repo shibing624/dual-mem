@@ -205,11 +205,6 @@ class ReconcilerWorker:
             )
 
             for old_id in op.supersedes:
-                old = self.factory.vector.get(old_id)
-                if old is None:
-                    continue
-                old.is_latest = False
-                if new_node.node_id not in old.superseded_by:
-                    old.superseded_by.append(new_node.node_id)
-                old.status = MemoryStatus.SUPERSEDED
-                self.factory.vector.upsert([old])
+                self.factory.vector.mark_superseded(
+                    old_id, superseded_by_id=new_node.node_id
+                )

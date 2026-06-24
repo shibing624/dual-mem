@@ -79,8 +79,11 @@ async def test_extract_retries_on_empty_json():
 
     assert len(out["identity"]) == 1
     assert sum(1 for c in llm.calls if c["type"] == "chat_json") == 2
-    assert llm.calls[1]["kw"]["temperature"] == 0.5
+    # Retry runs at temperature=0 with a JSON-only reinforcement appended to the system prompt.
+    assert llm.calls[1]["kw"]["temperature"] == 0.0
     assert "json_object" not in llm.calls[1]["kw"]
+    assert "JSON" in llm.calls[1]["system"]
+    assert llm.calls[1]["system"] != llm.calls[0]["system"]
 
 
 async def test_extract_truncates_long_content():

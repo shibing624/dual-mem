@@ -10,7 +10,7 @@ import threading
 import chromadb
 from chromadb.config import Settings
 
-from dual_mem.types import MemoryNode, MemoryStatus
+from dual_mem.types import _LIST_SEP, MemoryNode, MemoryStatus
 
 _COLLECTION = "memories"
 
@@ -49,6 +49,9 @@ class VectorStore(ABC):
 
     @abstractmethod
     def update_status(self, node_id: str, status: MemoryStatus) -> None: ...
+
+    @abstractmethod
+    def mark_superseded(self, node_id: str, *, superseded_by_id: str) -> bool: ...
 
     @abstractmethod
     def delete(self, node_ids: list[str]) -> None: ...
@@ -159,6 +162,29 @@ class ChromaVectorStore(VectorStore):
     def update_status(self, node_id: str, status: MemoryStatus) -> None:
         """Update only the status field of a node."""
         self.update_payload(node_id, {"status": status.value})
+
+    def mark_superseded(self, node_id: str, *, superseded_by_id: str) -> bool:
+        """Atomically flag a node as superseded by ``superseded_by_id``.
+
+        Sets ``is_latest=False`` + ``status=SUPERSEDED`` and appends to ``superseded_by`` in a
+        single locked read-modify-write on the metadata only (the embedding is never rewritten),
+        so concurrent supersede operations on the same evolution chain cannot lose updates.
+        Returns False if the node does not exist.
+        """
+        with self._lock:
+            current = self.collection.get(ids=[node_id], include=["metadatas"])
+            if not current["ids"]:
+                return False
+            meta = dict(current["metadatas"][0])
+            existing = meta.get("superseded_by") or ""
+            ids = existing.split(_LIST_SEP) if existing else []
+            if superseded_by_id not in ids:
+                ids.append(superseded_by_id)
+            meta["superseded_by"] = _LIST_SEP.join(ids)
+            meta["is_latest"] = False
+            meta["status"] = MemoryStatus.SUPERSEDED.value
+            self.collection.update(ids=[node_id], metadatas=[meta])
+            return True
 
     def delete(self, node_ids: list[str]) -> None:
         """Physically remove the given node ids from the collection."""

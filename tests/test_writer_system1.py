@@ -85,6 +85,36 @@ async def test_content_hash_dedup_scoped_by_session(factory, fake_llm):
     assert any(n.node_id == r_b.memory_id for n in factory.vector.get_many(where_b))
 
 
+async def test_content_hash_dedup_user_scope_hits_across_sessions(factory, fake_llm):
+    """content_hash_scope='user' dedups identical content across different sessions."""
+    factory.settings = Settings(
+        mode="system1",
+        storage_dir=factory.settings.storage_dir,
+        content_hash_dedup=True,
+        content_hash_scope="user",
+        gate_enabled=False,
+    )
+    fake_llm.responses["extract"] = {
+        "facts": [{"content": "重复消息", "tags": []}],
+        "identity": [],
+        "intentions": [],
+        "is_ephemeral": False,
+    }
+    writer = MemoryWriter(factory=factory)
+    content = "完全相同的 benchmark 消息"
+
+    r_a = await writer.write(
+        content=content, app_id="app", user_id="u", agent_id="ag",
+        session_id="session-a", request_id="req-a",
+    )
+    r_b = await writer.write(
+        content=content, app_id="app", user_id="u", agent_id="ag",
+        session_id="session-b", request_id="req-b",
+    )
+    # user scope ignores session → second write is a cache hit returning the first outcome.
+    assert r_a.memory_id == r_b.memory_id
+
+
 async def test_system1_write_ephemeral_returns_only_l1(factory, fake_llm):
     """When extractor flags is_ephemeral, no extras are persisted; raw stays ACTIVE."""
     fake_llm.responses["extract"] = {

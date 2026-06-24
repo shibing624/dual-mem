@@ -264,6 +264,18 @@ Add a top-level `gate_decision` object alongside identity/facts:
 "gate_decision": {{"novelty": 0.8, "biographical_relevance": 0.7, "emotional_arousal": 0.2, "reason": "..."}}
 ```"""
 
+EXTRACT_RETRY_APPEND_ZH = """
+
+## 重要：输出格式（重试）
+
+上一次输出无法解析为 JSON。这次**只输出一个 JSON 对象**，不要任何前后说明、不要 Markdown 代码块标记、不要多余文字。第一个字符必须是 `{{`，最后一个字符必须是 `}}`。"""
+
+EXTRACT_RETRY_APPEND_EN = """
+
+## IMPORTANT: output format (retry)
+
+The previous output could not be parsed as JSON. This time output **exactly one JSON object** with no prose before/after, no Markdown code fences. The first character must be `{{` and the last `}}`."""
+
 EXTRACT_EN = """You are an expert memory analyst. Extract structured user information from the conversation below.
 
 Conversation content:

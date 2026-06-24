@@ -111,14 +111,14 @@ class KuzuGraphStore(GraphStore):
                 self.conn.execute(ddl)
 
     def close(self) -> None:
-        """Release the embedded Kuzu database (helps avoid stale lock files on crash)."""
+        """Release the embedded Kuzu connection + database (avoids stale lock files on crash)."""
         with self._lock:
             if self.db is None:
                 return
-            self.conn = None
-            close_db = getattr(self.db, "close", None)
-            if callable(close_db):
-                close_db()
+            if self.conn is not None:
+                self.conn.close()
+                self.conn = None
+            self.db.close()
             self.db = None
 
     def add_node(self, node: GraphNode) -> None:

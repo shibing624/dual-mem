@@ -161,8 +161,14 @@ class Settings(BaseSettings):
     gate_heuristic_shortcircuit: bool = True
     gate_shortcircuit_novelty: float = 0.8
     gate_shortcircuit_relevance: float = 0.5
-    # Skip extract/reconcile when identical content was already written for this user scope.
+    # High duplication (vector novelty below this) + no biographical relevance → REJECT
+    # without a gate LLM call. 0 disables the reject short-circuit (borderline always uses LLM).
+    gate_shortcircuit_reject_novelty: float = 0.12
+    # Skip extract/reconcile when identical content was already written for this scope.
     content_hash_dedup: bool = True
+    # Dedup key granularity: "session" = per app/user/agent/session (strict, fewer hits);
+    # "user" = per app/user (cross-session/agent hits, higher hit rate).
+    content_hash_scope: Literal["session", "user"] = "session"
 
     # L3 summarizer (long content only).
     summarizer_enabled: bool = True
@@ -170,8 +176,16 @@ class Settings(BaseSettings):
 
     # Extract: pre-truncate content before LLM (0 = disabled; use llm chunk+merge only).
     extract_max_content_chars: int = 0
-    # Retry once on empty/unparseable JSON (higher temperature + forced json_object).
+    # Retry once on empty/unparseable JSON (temperature=0 + JSON-only reinforcement prompt).
     extract_retry_on_failure: bool = True
+    # Multi-turn extract input shaping (messages=...): no turn is ever dropped (a caller that
+    # batches 40 turns must get all 40). Shaping only kicks in when the WHOLE dialogue exceeds
+    # ``extract_history_shape_threshold_ratio`` × ``llm_context_window`` (token-granular budget);
+    # only then are assistant/system turns (the model's own words) truncated to
+    # ``extract_assistant_max_chars``, while user turns — the real memory signal — stay full.
+    # Short dialogues pass through untouched. ratio<=0 or chars<=0 disables shaping.
+    extract_history_shape_threshold_ratio: float = 0.7
+    extract_assistant_max_chars: int = 500
 
     # Embedding write-side batching window for embed_queued (does not affect search-side embed).
     embed_queue_batch_size: int = 32

@@ -131,13 +131,7 @@ class BasicProfileTool:
 
         head = prepared.head
         if head is not None:
-            old = self.vector.get(head.node_id)
-            if old is not None:
-                old.is_latest = False
-                if new_node.node_id not in old.superseded_by:
-                    old.superseded_by.append(new_node.node_id)
-                old.status = MemoryStatus.SUPERSEDED
-                self.vector.upsert([old])
+            self.vector.mark_superseded(head.node_id, superseded_by_id=new_node.node_id)
 
         logger.debug(
             "basic_profile committed user=%s diff_keys=%s superseded=%s",
