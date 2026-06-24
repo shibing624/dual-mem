@@ -189,7 +189,7 @@ class MemAgent:
             gate_result.gate_score, gate_result.novelty, gate_result.reason,
         )
         if self.settings.gate_enabled and not gate_result.passed:
-            await self._cancel_summarize_task(summary_task)
+            await self._cancel_summarize_task(summary_task, reason="gate reject")
             return [], gate_result, False
 
         try:
@@ -213,7 +213,7 @@ class MemAgent:
             bool(extracted.get("is_ephemeral")),
         )
         if extracted.get("is_ephemeral"):
-            await self._cancel_summarize_task(summary_task)
+            await self._cancel_summarize_task(summary_task, reason="extract ephemeral")
             return [], gate_result, True
 
         emotion = extracted.get("emotion") or {}
@@ -294,7 +294,11 @@ class MemAgent:
             except Exception:
                 pass
 
-        summary = await summary_task if summary_task is not None else None
+        try:
+            summary = await summary_task if summary_task is not None else None
+        except Exception as exc:
+            logger.warning("summary task failed, continuing without L3: %s", exc)
+            summary = None
 
         # ---- Step 4: L7 intentions + L3 summary (one embed batch when possible) ------
         intention_items = [
@@ -370,9 +374,15 @@ class MemAgent:
         )
 
     @staticmethod
-    async def _cancel_summarize_task(task: asyncio.Task | None) -> None:
+    async def _cancel_summarize_task(
+        task: asyncio.Task | None,
+        *,
+        reason: str = "",
+    ) -> None:
         if task is None or task.done():
             return
+        if reason:
+            logger.info("summary cancelled after %s", reason)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 

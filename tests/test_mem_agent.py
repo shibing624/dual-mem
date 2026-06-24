@@ -186,6 +186,50 @@ async def test_combined_pass_summarizer_overlaps_extract(tmp_storage, fake_embed
     assert order.index("summary_start") < order.index("extract_end")
 
 
+async def test_summary_failure_still_persists_l2_l4(tmp_storage, fake_embed):
+    """Speculative summary failure must not abort add after fast_write."""
+    long_text = "用户" + "聊了很多关于旅行和美食的事情。" * 110
+    llm = FakeLLMClient(responses={"extract": EXTRACT_RESPONSE})
+    factory = ComponentFactory(
+        settings=Settings(
+            mode="system1",
+            storage_dir=tmp_storage,
+            gate_enabled=False,
+            summarizer_enabled=True,
+            summarizer_min_content_length=1500,
+        ),
+        embed=fake_embed,
+        llm=llm,
+    )
+    agent = MemAgent(factory=factory)
+    raw = _raw(fake_embed, long_text)
+    factory.vector.upsert([raw])
+
+    async def fail_summarize(**kwargs):
+        raise TimeoutError("summary LLM timeout")
+
+    agent.summarizer.summarize = fail_summarize  # type: ignore[method-assign]
+
+    stored_ids, gate_result, is_ephemeral = await agent.run(
+        raw_node=raw,
+        content=long_text,
+        embedding=raw.embedding,
+        app_id="app",
+        user_id="u",
+        agent_id="ag",
+        session_id="se",
+        request_id="req-summary-fail",
+        memory_at=None,
+    )
+
+    assert is_ephemeral is False
+    assert gate_result.passed is True
+    assert len(stored_ids) == 2
+    layers = {factory.vector.get(nid).layer for nid in stored_ids}
+    assert layers == {Layer.L4_IDENTITY, Layer.L2_FACT}
+    assert Layer.L3_SUMMARY not in layers
+
+
 async def test_run_produces_l2_l4(tmp_storage, fake_embed):
     factory = _factory(tmp_storage, fake_embed, {"extract": EXTRACT_RESPONSE, "search_query": []})
     agent = MemAgent(factory=factory)
