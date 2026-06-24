@@ -6,6 +6,7 @@ nodes, tag topics, evidence and cross-layer relations for dual-mode reasoning.
 """
 import json
 import math
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -102,38 +103,41 @@ class KuzuGraphStore(GraphStore):
     """Kuzu-embedded-database implementation of the memory knowledge graph."""
 
     def __init__(self, storage_dir: str):
+        self._lock = threading.Lock()
         self.db = kuzu.Database(f"{storage_dir}/kuzu")
         self.conn = kuzu.Connection(self.db)
-        for ddl in _SCHEMA_DDL:
-            self.conn.execute(ddl)
+        with self._lock:
+            for ddl in _SCHEMA_DDL:
+                self.conn.execute(ddl)
 
     def add_node(self, node: GraphNode) -> None:
         """Upsert a memory node and link it to its tag topics."""
-        self.conn.execute(
-            "MERGE (m:Memory {node_id: $nid}) "
-            "SET m.layer=$layer, m.content=$content, m.app_id=$app_id, "
-            "m.user_id=$user_id, m.agent_id=$agent_id, m.embedding=$embedding, "
-            "m.tags=$tags, m.gmt_created=$gmt_created, m.custom=$custom",
-            {
-                "nid": node.node_id,
-                "layer": node.layer,
-                "content": node.content,
-                "app_id": node.app_id,
-                "user_id": node.user_id,
-                "agent_id": node.agent_id,
-                "embedding": node.embedding,
-                "tags": node.tags,
-                "gmt_created": node.gmt_created,
-                "custom": json.dumps(node.custom or {}, ensure_ascii=False),
-            },
-        )
-        for tag in node.tags:
-            self.conn.execute("MERGE (t:Topic {name: $name})", {"name": tag})
+        with self._lock:
             self.conn.execute(
-                "MATCH (m:Memory {node_id: $nid}), (t:Topic {name: $name}) "
-                "MERGE (m)-[:TAGGED_WITH]->(t)",
-                {"nid": node.node_id, "name": tag},
+                "MERGE (m:Memory {node_id: $nid}) "
+                "SET m.layer=$layer, m.content=$content, m.app_id=$app_id, "
+                "m.user_id=$user_id, m.agent_id=$agent_id, m.embedding=$embedding, "
+                "m.tags=$tags, m.gmt_created=$gmt_created, m.custom=$custom",
+                {
+                    "nid": node.node_id,
+                    "layer": node.layer,
+                    "content": node.content,
+                    "app_id": node.app_id,
+                    "user_id": node.user_id,
+                    "agent_id": node.agent_id,
+                    "embedding": node.embedding,
+                    "tags": node.tags,
+                    "gmt_created": node.gmt_created,
+                    "custom": json.dumps(node.custom or {}, ensure_ascii=False),
+                },
             )
+            for tag in node.tags:
+                self.conn.execute("MERGE (t:Topic {name: $name})", {"name": tag})
+                self.conn.execute(
+                    "MATCH (m:Memory {node_id: $nid}), (t:Topic {name: $name}) "
+                    "MERGE (m)-[:TAGGED_WITH]->(t)",
+                    {"nid": node.node_id, "name": tag},
+                )
 
     def query_by_embedding(
         self,
@@ -145,14 +149,15 @@ class KuzuGraphStore(GraphStore):
         top_k: int = 10,
     ) -> list[GraphNode]:
         """Rank a layer's nodes for a user by cosine similarity to the query embedding."""
-        result = self.conn.execute(
-            "MATCH (m:Memory) WHERE m.layer=$layer AND m.user_id=$user_id "
-            "AND m.app_id IN $app_ids "
-            "RETURN m.node_id, m.content, m.app_id, m.user_id, m.agent_id, "
-            "m.embedding, m.tags, m.gmt_created, m.custom",
-            {"layer": layer, "user_id": user_id, "app_ids": app_ids},
-        )
-        nodes = self._rows_to_nodes(result, layer)
+        with self._lock:
+            result = self.conn.execute(
+                "MATCH (m:Memory) WHERE m.layer=$layer AND m.user_id=$user_id "
+                "AND m.app_id IN $app_ids "
+                "RETURN m.node_id, m.content, m.app_id, m.user_id, m.agent_id, "
+                "m.embedding, m.tags, m.gmt_created, m.custom",
+                {"layer": layer, "user_id": user_id, "app_ids": app_ids},
+            )
+            nodes = self._rows_to_nodes(result, layer)
         for node in nodes:
             node.score = _cosine(embedding, node.embedding)
         nodes.sort(key=lambda n: n.score, reverse=True)
@@ -162,15 +167,16 @@ class KuzuGraphStore(GraphStore):
         self, *, layer: str, user_id: str, app_ids: list[str], limit: int = 1000
     ) -> list[GraphNode]:
         """List a layer's nodes for a user in creation order, up to limit."""
-        result = self.conn.execute(
-            "MATCH (m:Memory) WHERE m.layer=$layer AND m.user_id=$user_id "
-            "AND m.app_id IN $app_ids "
-            "RETURN m.node_id, m.content, m.app_id, m.user_id, m.agent_id, "
-            "m.embedding, m.tags, m.gmt_created, m.custom "
-            "ORDER BY m.gmt_created ASC LIMIT $limit",
-            {"layer": layer, "user_id": user_id, "app_ids": app_ids, "limit": limit},
-        )
-        return self._rows_to_nodes(result, layer)
+        with self._lock:
+            result = self.conn.execute(
+                "MATCH (m:Memory) WHERE m.layer=$layer AND m.user_id=$user_id "
+                "AND m.app_id IN $app_ids "
+                "RETURN m.node_id, m.content, m.app_id, m.user_id, m.agent_id, "
+                "m.embedding, m.tags, m.gmt_created, m.custom "
+                "ORDER BY m.gmt_created ASC LIMIT $limit",
+                {"layer": layer, "user_id": user_id, "app_ids": app_ids, "limit": limit},
+            )
+            return self._rows_to_nodes(result, layer)
 
     @staticmethod
     def _rows_to_nodes(result, layer: str) -> list[GraphNode]:
@@ -196,49 +202,53 @@ class KuzuGraphStore(GraphStore):
 
     def add_evidence(self, *, schema_id: str, fact_id: str) -> None:
         """Record that a schema node was derived from a fact (DERIVED_FROM edge)."""
-        self.conn.execute("MERGE (v:VdbRef {node_id: $fid})", {"fid": fact_id})
-        self.conn.execute(
-            "MATCH (m:Memory {node_id: $sid}), (v:VdbRef {node_id: $fid}) "
-            "MERGE (m)-[:DERIVED_FROM]->(v)",
-            {"sid": schema_id, "fid": fact_id},
-        )
+        with self._lock:
+            self.conn.execute("MERGE (v:VdbRef {node_id: $fid})", {"fid": fact_id})
+            self.conn.execute(
+                "MATCH (m:Memory {node_id: $sid}), (v:VdbRef {node_id: $fid}) "
+                "MERGE (m)-[:DERIVED_FROM]->(v)",
+                {"sid": schema_id, "fid": fact_id},
+            )
 
     def evidence_of(self, schema_id: str) -> list[str]:
         """Return the fact ids that a schema node was derived from."""
-        result = self.conn.execute(
-            "MATCH (m:Memory {node_id: $sid})-[:DERIVED_FROM]->(v:VdbRef) "
-            "RETURN v.node_id",
-            {"sid": schema_id},
-        )
-        ids: list[str] = []
-        while result.has_next():
-            ids.append(result.get_next()[0])
-        return ids
+        with self._lock:
+            result = self.conn.execute(
+                "MATCH (m:Memory {node_id: $sid})-[:DERIVED_FROM]->(v:VdbRef) "
+                "RETURN v.node_id",
+                {"sid": schema_id},
+            )
+            ids: list[str] = []
+            while result.has_next():
+                ids.append(result.get_next()[0])
+            return ids
 
     def add_edge(self, *, from_id: str, to_id: str, rel: str) -> None:
         """Create a relation edge of an allowed type between two memory nodes."""
         if rel not in _REL_TYPES:
             raise ValueError(f"unsupported rel: {rel}")
-        self.conn.execute(
-            f"MATCH (a:Memory {{node_id: $from_id}}), (b:Memory {{node_id: $to_id}}) "
-            f"MERGE (a)-[:{rel}]->(b)",
-            {"from_id": from_id, "to_id": to_id},
-        )
+        with self._lock:
+            self.conn.execute(
+                f"MATCH (a:Memory {{node_id: $from_id}}), (b:Memory {{node_id: $to_id}}) "
+                f"MERGE (a)-[:{rel}]->(b)",
+                {"from_id": from_id, "to_id": to_id},
+            )
 
     def neighbors_by_tag(
         self, *, tag: str, user_id: str, app_ids: list[str]
     ) -> list[str]:
         """Return ids of a user's memory nodes tagged with the given topic."""
-        result = self.conn.execute(
-            "MATCH (m:Memory)-[:TAGGED_WITH]->(t:Topic {name: $tag}) "
-            "WHERE m.user_id=$user_id AND m.app_id IN $app_ids "
-            "RETURN m.node_id",
-            {"tag": tag, "user_id": user_id, "app_ids": app_ids},
-        )
-        ids: list[str] = []
-        while result.has_next():
-            ids.append(result.get_next()[0])
-        return ids
+        with self._lock:
+            result = self.conn.execute(
+                "MATCH (m:Memory)-[:TAGGED_WITH]->(t:Topic {name: $tag}) "
+                "WHERE m.user_id=$user_id AND m.app_id IN $app_ids "
+                "RETURN m.node_id",
+                {"tag": tag, "user_id": user_id, "app_ids": app_ids},
+            )
+            ids: list[str] = []
+            while result.has_next():
+                ids.append(result.get_next()[0])
+            return ids
 
     def delete_scope(
         self,
@@ -261,10 +271,11 @@ class KuzuGraphStore(GraphStore):
             clauses.append("m.agent_id = $agent_id")
             params["agent_id"] = agent_id
         where = " AND ".join(clauses)
-        result = self.conn.execute(
-            f"MATCH (m:Memory) WHERE {where} DETACH DELETE m RETURN count(m)",
-            params,
-        )
-        if result.has_next():
-            return int(result.get_next()[0])
-        return 0
+        with self._lock:
+            result = self.conn.execute(
+                f"MATCH (m:Memory) WHERE {where} DETACH DELETE m RETURN count(m)",
+                params,
+            )
+            if result.has_next():
+                return int(result.get_next()[0])
+            return 0
