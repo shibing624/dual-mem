@@ -8,6 +8,7 @@ keys; there is no embedding-only / no-LLM mode.
 """
 import hashlib
 import logging
+import asyncio
 from dataclasses import dataclass, field
 
 from dual_mem.agent.mem_agent import MemAgent
@@ -118,7 +119,7 @@ class MemoryWriter:
             embedding = await self.factory.embed.embed_queued(content)
 
         node.embedding = embedding
-        self.factory.vector.upsert([node])
+        await asyncio.to_thread(self.factory.vector.upsert, [node])
         self.factory.history.append(
             event="ADD",
             node_id=node.node_id,
@@ -149,7 +150,7 @@ class MemoryWriter:
 
         if extra_node_ids:
             node.status = MemoryStatus.SHADOW
-            self.factory.vector.upsert([node])
+            await asyncio.to_thread(self.factory.vector.upsert, [node])
 
         outcome = WriterOutcome(
             memory_id=node.node_id,

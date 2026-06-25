@@ -138,6 +138,14 @@ class Settings(BaseSettings):
     # Scheduled-mode background loop period in seconds (only used when trigger_mode=scheduled).
     system2_schedule_interval_sec: int = 300
 
+    # Serialize concurrent add() for the same (app_id, user_id) behind a per-user asyncio.Lock
+    # so the fast-write -> reconcile evolution chain never races. Default on (production-safe).
+    # Set False for batch ingestion where many sessions of ONE user are written concurrently
+    # and reconcile is deferred (manual/scheduled trigger) — lets per-session gate/extract
+    # overlap instead of running strictly one at a time. The vector store is internally
+    # thread-safe, so disabling the lock is safe under deferred reconcile.
+    write_serialize_per_user: bool = True
+
     # System2 聚类的相似度阈值（cosine）。低于该相似度的事实不归为一簇。
     cluster_stage1_sim: float = 0.42
     cluster_stage2_sim: float = 0.55

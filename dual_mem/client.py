@@ -15,6 +15,7 @@ client (tests, custom backends), pass it via the ``llm=`` constructor kwarg.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 import uuid
@@ -181,6 +182,16 @@ class MemoryClient:
         """Return the per-user write lock, creating it lazily on first access."""
         return self._write_locks.get(f"{app_id}::{user_id}")
 
+    def _user_write_lock_ctx(self, app_id: str, user_id: str):
+        """Per-user write lock, or a no-op context when ``write_serialize_per_user`` is off.
+
+        Disabling the lock lets concurrent add() for the same user overlap (batch ingest with
+        deferred reconcile); the vector store is internally thread-safe so this is safe.
+        """
+        if self.settings.write_serialize_per_user:
+            return self._user_write_lock(app_id, user_id)
+        return contextlib.nullcontext()
+
     async def add(
         self,
         *,
@@ -233,7 +244,7 @@ class MemoryClient:
             resolved_app_id, user_id, self.mode, len(content), len(user_queries),
         )
 
-        async with self._user_write_lock(resolved_app_id, user_id):
+        async with self._user_write_lock_ctx(resolved_app_id, user_id):
             result = await self.writer.write(
                 content=content,
                 app_id=resolved_app_id,

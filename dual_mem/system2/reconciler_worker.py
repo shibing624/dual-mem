@@ -158,7 +158,23 @@ class ReconcilerWorker:
         agent_id: str,
         session_id: str,
     ) -> None:
-        """Apply reconcile ops (ADD/SUPERSEDE/DELETE) to the vector store + history log."""
+        """Apply reconcile ops (ADD/SUPERSEDE/DELETE) to the vector store + history log.
+
+        Embeddings for every ADD/SUPERSEDE op are computed up front in a single
+        ``embed_batch`` round-trip, instead of one serial ``embed_queued`` await per
+        op. Serial ``embed_queued`` in a loop is actively harmful here: the queue only
+        ever holds one item, so each call eats the full batch-window wait plus a
+        batch-of-one RTT — N ops become N serial round-trips. One ``embed_batch`` call
+        collapses that to a single round-trip.
+        """
+        add_ops = [op for op in ops if op.op != "DELETE"]
+        embeddings: list[list[float]] = []
+        if add_ops:
+            embeddings = await self.factory.embed.embed_batch(
+                [op.content or "" for op in add_ops]
+            )
+        emb_iter = iter(embeddings)
+
         for op in ops:
             if op.op == "DELETE":
                 target = self.factory.vector.get(op.memory_id) if op.memory_id else None
@@ -194,7 +210,7 @@ class ReconcilerWorker:
                 supersedes=list(op.supersedes),
                 custom=_reflect_custom(op) or None,
             )
-            new_node.embedding = await self.factory.embed.embed_queued(new_node.content)
+            new_node.embedding = next(emb_iter)
             self.factory.vector.upsert([new_node])
             self.factory.history.append(
                 event="SUPERSEDE" if op.supersedes else "ADD",

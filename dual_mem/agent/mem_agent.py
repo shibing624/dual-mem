@@ -336,7 +336,8 @@ class MemAgent:
             summary_embedding = tail_embeddings[emb_idx]
             emb_idx += 1
 
-        intention_ids = self._write_intentions_with_embeddings(
+        intention_ids = await asyncio.to_thread(
+            self._write_intentions_with_embeddings,
             intention_items,
             embeddings=tail_embeddings[emb_idx:],
             app_id=app_id,
@@ -359,7 +360,7 @@ class MemAgent:
                 memory_at=memory_at,
             )
             summary_node.embedding = summary_embedding
-            self.vector.upsert([summary_node])
+            await asyncio.to_thread(self.vector.upsert, [summary_node])
             self.history.append(
                 event="ADD",
                 node_id=summary_node.node_id,
@@ -612,7 +613,9 @@ class MemAgent:
         embeddings = await self.embed.embed_batch(texts)
         idx = 0
         if prepared_l0 is not None:
-            l0_id = self.basic_profile_tool.commit(prepared_l0, embeddings[idx])
+            l0_id = await asyncio.to_thread(
+                self.basic_profile_tool.commit, prepared_l0, embeddings[idx]
+            )
             l0_ids.append(l0_id)
             self.history.append(
                 event="ADD",
@@ -626,7 +629,7 @@ class MemAgent:
         for node in l2l4_nodes:
             node.embedding = embeddings[idx]
             idx += 1
-            self.vector.upsert([node])
+            await asyncio.to_thread(self.vector.upsert, [node])
             l2l4_ids.append(node.node_id)
             self.history.append(
                 event="ADD",
@@ -661,13 +664,17 @@ class MemAgent:
         stored_ids: list[str] = []
         for op in ops:
             if op.op == "DELETE":
-                old = self.vector.get(op.memory_id) if op.memory_id else None
+                old = (
+                    await asyncio.to_thread(self.vector.get, op.memory_id)
+                    if op.memory_id
+                    else None
+                )
                 if old is None:
                     continue
                 old_meta = old.to_metadata()
                 old.status = MemoryStatus.SHADOW
                 old.is_latest = False
-                self.vector.upsert([old])
+                await asyncio.to_thread(self.vector.upsert, [old])
                 self.history.append(
                     event="DELETE",
                     node_id=old.node_id,
@@ -696,7 +703,7 @@ class MemAgent:
                 custom=_merge_custom(_emotion_custom(emotion), _reflect_custom(op)) or None,
             )
             node.embedding = await self.embed.embed_queued(node.content)
-            self.vector.upsert([node])
+            await asyncio.to_thread(self.vector.upsert, [node])
             stored_ids.append(node.node_id)
             self.history.append(
                 event="SUPERSEDE" if op.supersedes else "ADD",
@@ -707,7 +714,9 @@ class MemAgent:
             )
 
             for old_id in op.supersedes:
-                self.vector.mark_superseded(old_id, superseded_by_id=node.node_id)
+                await asyncio.to_thread(
+                    self.vector.mark_superseded, old_id, superseded_by_id=node.node_id
+                )
 
         return stored_ids
 
