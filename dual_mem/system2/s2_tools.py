@@ -233,7 +233,8 @@ class System2ToolExecutor:
         top_k = int(args.get("top_k") or 5)
         if not query:
             return _err("query is required")
-        embedding = await self.factory.embed.embed(query)
+        # Coalesce concurrent query embeddings into one batched request at the endpoint.
+        embedding = await self.factory.embed.embed_queued(query)
         where = build_filter(
             app_ids=[self.app_id],
             user_id=self.user_id,

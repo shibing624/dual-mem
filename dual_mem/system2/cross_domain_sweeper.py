@@ -6,6 +6,7 @@ behavioral abstraction via LLM -> embed, (2) cosine-collision matrix + Union-Fin
 (3) higher-order LLM induction on each cluster to emit a core L6 schema linked via
 CROSS_ABSTRACTS_TO.
 """
+import asyncio
 import json
 import logging
 import time
@@ -106,7 +107,14 @@ class CrossDomainSweeper:
     # ---- Step 1: per-basic behavioral abstraction --------------------------------------
 
     async def _abstract_basics(self, basics: list[GraphNode]) -> list[tuple[GraphNode, list[float]]]:
-        """For each basic schema, produce a behavioral-abstraction embedding (cached)."""
+        """For each basic schema, produce a behavioral-abstraction embedding (cached).
+
+        Cached nodes short-circuit immediately. Uncached nodes run their LLM abstraction
+        step concurrently (``asyncio.gather``), then every freshly produced abstraction
+        text is embedded in a single ``embed_batch`` round-trip instead of one serial
+        ``embed`` call per node — collapsing N LLM RTTs + N embed RTTs into 1 concurrent
+        LLM wave + 1 batched embed call.
+        """
         llm = self.factory.llm
         embed = self.factory.embed
         graph = self.factory.graph
@@ -114,11 +122,19 @@ class CrossDomainSweeper:
             return []
 
         out: list[tuple[GraphNode, list[float]]] = []
+        pending: list[GraphNode] = []
         for node in basics:
             cached = (node.custom or {}).get("behavior_embedding")
             if isinstance(cached, list) and cached:
                 out.append((node, cached))
-                continue
+            else:
+                pending.append(node)
+
+        if not pending:
+            return out
+
+        async def _abstract_one(node: GraphNode) -> str | None:
+            """Run the behavioral-abstraction LLM for one node; return the text or None."""
             system = (
                 prompts.BEHAVIOR_ABSTRACTION_ZH
                 if is_chinese(node.content)
@@ -127,20 +143,37 @@ class CrossDomainSweeper:
             try:
                 parsed = await llm.chat_json(system=system, user=node.content)
             except json.JSONDecodeError:
-                continue
+                return None
             text = (parsed or {}).get("abstraction_for_embedding") if isinstance(parsed, dict) else None
             if not isinstance(text, str) or not text.strip():
-                continue
-            embedding = await embed.embed(text)
+                return None
+            return text
 
-            # Cache the behavior embedding back onto the graph node so subsequent runs skip
-            # the LLM call. Re-add the node with merged custom payload.
+        # Wave 1: concurrent LLM abstraction for all uncached nodes.
+        texts = await asyncio.gather(*(_abstract_one(node) for node in pending))
+
+        fresh_nodes: list[GraphNode] = []
+        fresh_texts: list[str] = []
+        for node, text in zip(pending, texts):
+            if text is None:
+                continue
+            fresh_nodes.append(node)
+            fresh_texts.append(text)
+
+        if not fresh_texts:
+            return out
+
+        # Wave 2: one batched embedding call for every fresh abstraction text.
+        embeddings = await embed.embed_batch(fresh_texts)
+
+        # Cache each behavior embedding back onto its graph node so subsequent runs skip
+        # the LLM call. Re-add the node with merged custom payload.
+        for node, text, embedding in zip(fresh_nodes, fresh_texts, embeddings):
             new_custom = dict(node.custom or {})
             new_custom["behavior_abstraction"] = text
             new_custom["behavior_embedding"] = embedding
             node.custom = new_custom
             graph.add_node(node)
-
             out.append((node, embedding))
         return out
 

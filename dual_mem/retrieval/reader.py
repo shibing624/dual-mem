@@ -310,7 +310,10 @@ class Reader:
         if created_after is None and u.time_from is not None:
             created_after = u.time_from
 
-        embedding = await self.factory.embed.embed(query)
+        # Route the query embedding through the coalescing queue: concurrent searches
+        # (multiple workers in flight) get batched into one embeddings request instead of
+        # each firing a separate single-text round-trip at the endpoint.
+        embedding = await self.factory.embed.embed_queued(query)
 
         # Multi-path anchors. QU-suggested layers PLUS the always-on profile layers
         # (L0/L4) — profile content must be reachable on every query, intent classification
@@ -481,7 +484,8 @@ class Reader:
         if created_after is None and u.time_from is not None:
             created_after = u.time_from
 
-        embedding = await self.factory.embed.embed(query)
+        # Coalesce concurrent query embeddings into one batched request (see _search_hybrid).
+        embedding = await self.factory.embed.embed_queued(query)
         vector = self.factory.vector
 
         effective_profile_limit = profile_limit if profile_limit > 0 else _PROFILE_FULL
