@@ -86,8 +86,9 @@ def extract_keywords(query: str) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
     for tok in _TOKEN_RE.findall(query):
-        t = tok.lower() if tok.isascii() else tok
-        if tok.isascii():
+        is_ascii = tok.isascii()
+        t = tok.lower() if is_ascii else tok
+        if is_ascii:
             if len(t) < 3 or t in _STOPWORDS_EN:
                 continue
         elif len(t) < 2:
@@ -99,6 +100,23 @@ def extract_keywords(query: str) -> list[str]:
         if len(result) >= KEYWORD_MAX_COUNT:
             break
     return result
+
+
+# History-seeking phrases: questions about how a fact/preference changed over time. These
+# benefit from seeing the full evolution chain (superseded versions), not just the current head.
+_EVOLUTION_TRIGGERS = (
+    "previous", "previously", "used to", "before", "earlier", "originally",
+    "no longer", "changed", "switch", "switched", "former", "past",
+    "之前", "以前", "原来", "原本", "曾经", "改成", "改为", "不再", "过去", "最初", "当初",
+)
+
+
+def wants_evolution_history(query: str) -> bool:
+    """True if the query asks about a past/changed state (show evolution-chain history)."""
+    if not query:
+        return False
+    q = query.lower()
+    return any(trig in q for trig in _EVOLUTION_TRIGGERS)
 
 
 _RECENT_RE = re.compile(r"(?:最近|近|过去)\s*(\d+)\s*天")

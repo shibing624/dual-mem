@@ -6,6 +6,7 @@ loads the freshly written nodes, runs the LLM-driven Reconciler to emit ADD/SUPE
 ops, and applies them. Same-user tasks must be serialized (caller holds a per-user lock) to
 avoid racing on the same evolution chain.
 """
+import asyncio
 import logging
 
 from dual_mem.agent.reconciler import ReconcileOp, Reconciler
@@ -13,6 +14,11 @@ from dual_mem.registry import ComponentFactory
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
 logger = logging.getLogger("dual_mem.system2.reconcile")
+
+
+def _norm_content(text: str | None) -> str:
+    """Normalize content for coverage matching: strip + lowercase + collapse whitespace."""
+    return " ".join((text or "").split()).lower()
 
 
 def _reflect_custom(op: ReconcileOp) -> dict:
@@ -40,24 +46,56 @@ class ReconcilerWorker:
             embed=factory.embed,
             vector=factory.vector,
             enable_search_query=factory.settings.reconcile_search_query,
+            policy=factory.settings.reconcile_policy,
+            weak_candidate_score=factory.settings.reconcile_weak_candidate_score,
         )
 
     async def reconcile_pending(self, *, app_id: str, user_id: str, agent_id: str = "") -> int:
-        """Process all pending reconcile tasks for one (app, user, agent) triple; return count."""
+        """Process all pending reconcile tasks for one (app, user, agent) triple; return count.
+
+        Tasks are drained then processed with bounded concurrency (``reconcile_concurrency``).
+        Each task's bottleneck is one large-prompt LLM call inside ``reconcile()`` (recall +
+        LLM is read-only; apply is a fast vector upsert), so running several concurrently
+        collapses an otherwise serial chain of ~9s LLM round-trips. ``reconcile_concurrency=1``
+        preserves the original strict-serial behaviour.
+        """
         cache = self.factory.cache
-        processed = 0
+        tasks: list[dict] = []
         while True:
             task = cache.dequeue_reconcile_task(
                 app_id=app_id, user_id=user_id, agent_id=agent_id
             )
             if task is None:
                 break
-            try:
-                await self._process_task(task)
-                processed += 1
-            except Exception as exc:
-                logger.exception("[reconcile] task failed: %s", exc)
-        return processed
+            tasks.append(task)
+        if not tasks:
+            return 0
+
+        concurrency = max(1, self.factory.settings.reconcile_concurrency)
+        if concurrency == 1 or len(tasks) == 1:
+            processed = 0
+            for task in tasks:
+                if await self._process_task_safely(task):
+                    processed += 1
+            return processed
+
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _guarded(task: dict) -> bool:
+            async with sem:
+                return await self._process_task_safely(task)
+
+        results = await asyncio.gather(*[_guarded(t) for t in tasks])
+        return sum(1 for ok in results if ok)
+
+    async def _process_task_safely(self, task: dict) -> bool:
+        """Run one reconcile task, swallowing failures so siblings still drain."""
+        try:
+            await self._process_task(task)
+            return True
+        except Exception as exc:
+            logger.exception("[reconcile] task failed: %s", exc)
+            return False
 
     async def _process_task(self, task: dict) -> None:
         """Reconcile the freshly written node ids carried by a single task."""
@@ -120,9 +158,6 @@ class ReconcilerWorker:
         if not ops:
             return
 
-        # Drop the fast-write originals first; reconcile ADDs replace them losslessly.
-        self._drop_fast_write_originals(nodes_to_remove, user_id=user_id)
-
         await self._apply_ops(
             ops,
             app_id=app_id,
@@ -131,11 +166,30 @@ class ReconcilerWorker:
             session_id="",
         )
 
-    def _drop_fast_write_originals(self, node_ids: list[str], *, user_id: str) -> None:
-        """Soft-remove the fast-write originals once reconcile has produced replacement ops."""
+        # Shadow ONLY the fast-write originals whose content a reconcile ADD re-emitted
+        # (i.e. were actually re-written). Originals not covered by any ADD stay ACTIVE —
+        # never blanket-shadow on "ops exist", or a merge/skip that returns fewer ADDs than
+        # originals silently loses facts (the LME "数娃漏 1" failure mode).
+        added_contents = {
+            _norm_content(op.content)
+            for op in ops
+            if op.op != "DELETE" and op.content
+        }
+        self._shadow_covered_originals(
+            nodes_to_remove, added_contents, user_id=user_id
+        )
+
+    def _shadow_covered_originals(
+        self, node_ids: list[str], added_contents: set[str], *, user_id: str
+    ) -> None:
+        """Soft-remove only fast-write originals whose content was re-emitted by a reconcile ADD."""
+        if not added_contents:
+            return
         for nid in node_ids:
             node = self.factory.vector.get(nid)
             if node is None:
+                continue
+            if _norm_content(node.content) not in added_contents:
                 continue
             old_meta = node.to_metadata()
             node.status = MemoryStatus.SHADOW

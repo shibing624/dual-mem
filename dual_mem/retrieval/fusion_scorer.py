@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: V2 fusion scorer for the read path. Combines per-anchor semantic similarity
+@description: Fusion scorer for the hybrid read path. Combines per-anchor semantic similarity
 with a multiplicative weight stack (time decay, access frequency, emotional arousal,
 schema/long-tail boosts) and an additive RRF term that rewards documents surfaced by
 multiple retrieval paths. Replaces the older intent-weighted RRF rerank.
@@ -54,7 +54,7 @@ class ScoredNode:
 
 
 class FusionScorer:
-    """Score and rank anchor candidates with the V2 W(d) formula + RRF."""
+    """Score and rank anchor candidates with the W(d) recency formula + RRF."""
 
     def __init__(
         self,
@@ -71,8 +71,13 @@ class FusionScorer:
         anchors: list[AnchorNode],
         activated_schema_ids: set[str] | None = None,
         now_ts: int | None = None,
+        max_results: int | None = None,
     ) -> list[ScoredNode]:
-        """Score the deduped anchor list (multi-path), return ranked ScoredNodes."""
+        """Score the deduped anchor list (multi-path), return ranked ScoredNodes.
+
+        ``max_results`` overrides ``config.max_results`` for this call (the reader
+        passes headroom derived from the request ``limit`` so a large top_k is filled).
+        """
         if not anchors:
             return []
         activated = activated_schema_ids or set()
@@ -120,7 +125,8 @@ class FusionScorer:
             len(anchors), len(node_map),
             ranked[0].final_score if ranked else 0.0,
         )
-        return ranked[: self.config.max_results]
+        cap = max_results if max_results and max_results > 0 else self.config.max_results
+        return ranked[:cap]
 
     # ---- Per-dimension scorers ---------------------------------------------------------
 

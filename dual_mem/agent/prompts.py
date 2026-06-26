@@ -550,6 +550,32 @@ RECONCILE_ZH = """你是一个记忆管理系统。你的任务是将一批新�
 
 现在输出 JSON。"""
 
+# conservative 策略附加硬规则：禁止跨节点合并，可数事件独立保留 —— 拼接到 RECONCILE_ZH 之后。
+RECONCILE_POLICY_CONSERVATIVE_ZH = """
+
+## 保守策略（强制覆盖以上目标 2）
+
+本次运行为**高召回保守模式**，必须遵守：
+- **禁止合并**：不要把多条记忆合并成一条，不要用 DELETE 去吸收/合并兼容的记忆。
+- **可数事件独立**：不同实体、不同日期、不同对象的事件（如不同人生娃、不同次购买、不同次到访），
+  即使主题相同，也必须各自独立保留为 `update_type="SUPPLEMENT"`、`supersedes: []` 的 ADD，绝不合并计数。
+- **仅状态变化才 supersede**：只有同一维度的状态发生真实变化（OVERRIDE / NEGATE）时才用 `supersedes`。
+- **DELETE 仅限精确重复**：只有内容几乎完全重复时才 DELETE，禁止用 DELETE 做语义归并。
+- 拿不准时一律 `SUPPLEMENT` 独立保留，宁可冗余也不要丢证据。"""
+
+RECONCILE_POLICY_CONSERVATIVE_EN = """
+
+## Conservative policy (OVERRIDES Objective 2 above)
+
+This run is in HIGH-RECALL conservative mode. You MUST:
+- **No merging**: never fuse multiple memories into one; never use DELETE to absorb/merge compatible memories.
+- **Keep countable events separate**: distinct entities / dates / objects (different people's births, different
+  purchases, different visits) MUST each stay as an independent ADD with `update_type="SUPPLEMENT"` and
+  `supersedes: []`, even on the same topic — never merge them into a single count.
+- **Supersede only on state change**: use `supersedes` ONLY for a real same-dimension state change (OVERRIDE / NEGATE).
+- **DELETE only for exact duplicates**: DELETE is allowed only for near-identical content, never for semantic merging.
+- When unsure, default to an independent `SUPPLEMENT` — prefer redundancy over losing evidence."""
+
 RECONCILE_EN = """You are a memory management system. Integrate a batch of new memories into the existing memory base while keeping it clean, retrievable, and losslessly informative.
 
 Current time: {current_time}

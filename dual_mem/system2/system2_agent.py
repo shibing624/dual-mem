@@ -160,7 +160,20 @@ class System2Agent:
         executor = System2ToolExecutor(
             factory=self.factory, app_id=app_id, user_id=user_id, agent_id=agent_id
         )
-        await self._run_react_loop(system=system, user=user, executor=executor)
+        cluster_cap = self.factory.settings.system2_single_shot_max_clusters
+        fact_cap = self.factory.settings.system2_single_shot_max_facts
+        total_facts = sum(len(c["facts"]) for c in materials["clusters"])
+        if (
+            cluster_cap > 0
+            and len(materials["clusters"]) <= cluster_cap
+            and total_facts <= fact_cap
+        ):
+            # Small/single-cluster workload: a serial ReAct tool loop is overkill. Emit all
+            # schema/intention ops in ONE chat_json call (~10 serial LLM calls -> 1). Large
+            # blobs fall through to ReAct so a single JSON does not truncate on a small model.
+            await self._run_single_shot(system=system, user=user, executor=executor)
+        else:
+            await self._run_react_loop(system=system, user=user, executor=executor)
         self._mark_clustered_processed(materials["clusters"])
         logger.info(
             "s2_react done user=%s schemas=%d intentions=%d evidence=%d edges=%d",
@@ -171,6 +184,38 @@ class System2Agent:
             executor.stats["edges_added"],
         )
         return dict(executor.stats)
+
+    async def _run_single_shot(
+        self, *, system: str, user: str, executor: System2ToolExecutor
+    ) -> None:
+        """One chat_json call → parse {"ops": [...]} → dispatch each op via the executor.
+
+        The SYSTEM2_OPS prompt already specifies the ops-JSON output shape, and each op's
+        ``op`` field maps 1:1 to a write-tool name, so we reuse the same executor dispatch
+        path as the ReAct loop — just without the multi-turn tool-calling round-trips.
+        """
+        llm = self.factory.llm
+        assert llm is not None, "System2Agent requires factory.llm"
+        request_id = f"s2::{executor.app_id}::{executor.user_id}"
+        try:
+            data = await llm.chat_json(system=system, user=user)
+        except json.JSONDecodeError as exc:
+            logger.warning("[s2-single] llm JSON parse failed: %s", exc)
+            self._log_trajectory(request_id, executor, 1, error=str(exc))
+            return
+
+        ops = data.get("ops") if isinstance(data, dict) else None
+        if not isinstance(ops, list):
+            ops = []
+        for op in ops:
+            if not isinstance(op, dict):
+                continue
+            name = str(op.get("op") or "").strip()
+            if not name:
+                continue
+            arguments = {k: v for k, v in op.items() if k != "op"}
+            await executor.execute(name=name, arguments=arguments)
+        self._log_trajectory(request_id, executor, 1)
 
     async def _run_react_loop(
         self, *, system: str, user: str, executor: System2ToolExecutor

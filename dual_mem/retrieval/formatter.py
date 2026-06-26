@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from dual_mem.retrieval.intent import wants_evolution_history
+
 _GROUP_TITLES = [
     ("profile", "【画像 Profile】"),
     ("proactive", "【主动 Proactive】"),
@@ -84,6 +86,13 @@ def format_memories(
     if date_preamble and has_dates:
         return _DATE_PREAMBLE + text
     return text
+
+
+def include_evolution_for_query(query: str | None) -> bool:
+    """SDK default for QA prompts: expose evolution-chain history only when the query asks
+    about a past/changed state (knowledge-update / temporal). Fact-lookup queries get the
+    current head only (zero-LLM heuristic — no extra cost)."""
+    return wants_evolution_history(query or "")
 
 
 def _hit_text(hit: dict) -> str:

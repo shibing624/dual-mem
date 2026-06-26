@@ -1,4 +1,4 @@
-"""R7: ReadResult 暴露 — debug=True 走 search_with_trace 返回完整 trace。"""
+"""R7: ReadResult 暴露 — debug=True 走 reader.search(collect_trace=True) 返回完整 trace。"""
 from dual_mem.client import MemoryClient
 from dual_mem.config import Settings
 from dual_mem.types import Layer, MemoryNode, MemoryStatus

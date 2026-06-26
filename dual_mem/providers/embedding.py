@@ -190,11 +190,12 @@ class EmbedService:
         n_chunked = sum(1 for chunks in chunk_groups if len(chunks) > 1)
         if n_chunked:
             logger.info(
-                "embed_batch chunked %d/%d inputs (max_tokens=%d, ~%d chars/chunk)",
+                "embed_batch: %d of %d inputs too long, split into chunks then "
+                "mean-pooled (limit ~%d chars ≈ %d tokens per chunk)",
                 n_chunked,
                 len(texts),
-                self.input_max_tokens,
                 max_chars,
+                self.input_max_tokens,
             )
 
         flat_chunks: list[str] = []

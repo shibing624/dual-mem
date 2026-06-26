@@ -41,6 +41,9 @@ class System2Writer:
         self._user_locks = LockRegistry()
         self._scheduled_task: asyncio.Task | None = None
         self._scheduled_started: bool = False
+        # Per-digest timing breakdown (reconcile vs S2 agent vs sweeper). Reset at the
+        # start of each _digest_pending drain; surfaced via MemoryClient.digest().
+        self.last_digest_stats: dict[str, float] = {}
 
     async def write(
         self,
@@ -103,6 +106,14 @@ class System2Writer:
         """Drain every pending S2 task across all users; return tasks processed."""
         cache = self.factory.cache
         self.processed_pairs = set()
+        self.last_digest_stats = {
+            "reconcile_sec": 0.0,
+            "s2_agent_sec": 0.0,
+            "sweeper_sec": 0.0,
+            "reconcile_tasks": 0.0,
+            "s2_agent_runs": 0.0,
+            "reconsolidation_tasks": 0.0,
+        }
         processed = 0
         while True:
             task = cache.dequeue_s2_task()
@@ -110,6 +121,7 @@ class System2Writer:
                 break
             if task.get("task_type", "cognition") == "reconsolidation":
                 await self._run_reconsolidation_safely(task)
+                self.last_digest_stats["reconsolidation_tasks"] += 1
             else:
                 await self._digest_user_safely(
                     app_id=task["app_id"],
@@ -148,14 +160,33 @@ class System2Writer:
     async def _digest_user(self, *, app_id: str, user_id: str, agent_id: str) -> None:
         """Run reconcile + S2 agent + (optional) cross-domain sweeper for one user."""
         worker = ReconcilerWorker(factory=self.factory)
-        await worker.reconcile_pending(app_id=app_id, user_id=user_id, agent_id=agent_id)
+        t0 = time.perf_counter()
+        n_reconcile = await worker.reconcile_pending(
+            app_id=app_id, user_id=user_id, agent_id=agent_id
+        )
+        t_reconcile = time.perf_counter() - t0
 
         agent = System2Agent(factory=self.factory)
+        t1 = time.perf_counter()
         await agent.run(app_id=app_id, user_id=user_id, agent_id=agent_id)
+        t_agent = time.perf_counter() - t1
 
+        t_sweep = 0.0
         if self.factory.settings.cross_domain_enable:
             sweeper = CrossDomainSweeper(factory=self.factory)
+            t2 = time.perf_counter()
             await sweeper.run(app_id=app_id, user_id=user_id, agent_id=agent_id)
+            t_sweep = time.perf_counter() - t2
+
+        self.last_digest_stats["reconcile_sec"] += t_reconcile
+        self.last_digest_stats["s2_agent_sec"] += t_agent
+        self.last_digest_stats["sweeper_sec"] += t_sweep
+        self.last_digest_stats["reconcile_tasks"] += n_reconcile
+        self.last_digest_stats["s2_agent_runs"] += 1
+        logger.info(
+            "[s2] digest user=%s reconcile=%.1fs(tasks=%d) s2_agent=%.1fs sweeper=%.1fs",
+            user_id, t_reconcile, n_reconcile, t_agent, t_sweep,
+        )
 
     async def _run_reconsolidation_safely(self, task: dict) -> None:
         """Wrap the per-task reconsolidation handler with logging + exception swallowing."""

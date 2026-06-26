@@ -12,6 +12,7 @@ from dual_mem.retrieval.intent import (
     classify_intent,
     extract_keywords,
     parse_time_range,
+    wants_evolution_history,
 )
 from dual_mem.types import Layer
 
@@ -35,6 +36,8 @@ class QueryUnderstanding:
     has_temporal: bool = False
     time_from: int | None = None
     target_layers: list[Layer] = field(default_factory=list)
+    # True when the query asks about a past/changed state → show evolution-chain history.
+    wants_evolution: bool = False
 
 
 def understand(query: str, *, now: datetime | None = None) -> QueryUnderstanding:
@@ -51,4 +54,5 @@ def understand(query: str, *, now: datetime | None = None) -> QueryUnderstanding
         has_temporal=time_from is not None,
         time_from=time_from,
         target_layers=target_layers,
+        wants_evolution=wants_evolution_history(raw),
     )

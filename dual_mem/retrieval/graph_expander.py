@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: V2 graph expansion: from a list of anchors, surface their 1-hop neighbours.
+@description: Graph expansion for the hybrid read path: from a list of anchors, surface their 1-hop neighbours.
 For schema anchors we follow DERIVED_FROM to their evidence facts. For fact / identity
 anchors we add timeline neighbours (same session_id ± nearby gmt_created) and same-session
 summaries. Returns the merged neighbour list with attenuated scores so the fusion stage can

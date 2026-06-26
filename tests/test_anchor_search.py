@@ -133,6 +133,43 @@ async def test_anchor_search_no_graph_skips_schema_path(tmp_storage, fake_embed)
     assert result.triggered_intentions == []
 
 
+async def test_recall_limit_widens_semantic_pool(tmp_storage, fake_embed):
+    """recall_limit 抬高每路候选上限：默认封顶 15，传 recall_limit=50 应召回更多。"""
+    factory = ComponentFactory(
+        settings=Settings(mode="system1", storage_dir=tmp_storage),
+        embed=fake_embed,
+        llm=None,
+    )
+    # 30 条事实，FakeEmbed 全正向量 → 任意两条 cosine > semantic_threshold(0.3)
+    _seed_facts(
+        factory,
+        fake_embed,
+        [(f"用户事实编号 {i}", Layer.L2_FACT.value, 1000 + i) for i in range(30)],
+    )
+    understanding = understand("用户事实")
+    embedding = fake_embed.embed_sync("用户事实")
+    engine = AnchorSearchEngine(factory=factory)
+
+    default_res = await engine.search(
+        query="用户事实",
+        query_embedding=embedding,
+        understanding=understanding,
+        app_ids=["app"],
+        user_id="u",
+    )
+    wide_res = await engine.search(
+        query="用户事实",
+        query_embedding=embedding,
+        understanding=understanding,
+        app_ids=["app"],
+        user_id="u",
+        recall_limit=50,
+    )
+    assert default_res.path_counts[PATH_SEMANTIC] == 15  # 默认上限
+    assert wide_res.path_counts[PATH_SEMANTIC] > 15  # 被 recall_limit 放大
+    assert wide_res.path_counts[PATH_SEMANTIC] <= 30  # 不超过可用总量
+
+
 async def test_anchor_search_keyword_match_via_entity_path(tmp_storage, fake_embed):
     """entity 路径基于 query keywords 命中 content 子串。"""
     factory = ComponentFactory(

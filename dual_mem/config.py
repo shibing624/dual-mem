@@ -152,13 +152,38 @@ class Settings(BaseSettings):
 
     # Reconciler 额外的 LLM 召回查询改写：默认关闭（语义召回本身够用，省一次 LLM/写入）。
     reconcile_search_query: bool = False
+    # Reconcile 策略：
+    #   balanced     — 现状：允许跨节点合并（Goal2 merge + DELETE），记忆库更紧凑。
+    #   conservative — 高召回：禁止跨节点合并 DELETE，可数事件强制 SUPPLEMENT 独立保留；
+    #                  仅 OVERRIDE/NEGATE（同维度状态变化）才允许 supersedes。穷举/计数类
+    #                  场景（benchmark、客服日志）用它避免把不同事件误并成一条而丢证据。
+    reconcile_policy: Literal["balanced", "conservative"] = "balanced"
+    # reconcile 召回的最强候选低于该相似度时，跳过 LLM，直接把新记忆当 SUPPLEMENT 落库。
+    # 大量写入其实没有真正的冲突候选（全新事实），这条快路径省掉相应的 reconcile LLM 调用，
+    # 零合并风险。设 0 关闭（总是走 LLM）。
+    reconcile_weak_candidate_score: float = 0.5
+    # ReconcilerWorker 排空 reconcile 队列时的并发度。每个 reconcile task 的瓶颈是一次大
+    # prompt 的 LLM 调用（recall+LLM 只读，apply 写入很快），串行排队时 digest 会被拉长。
+    # >1 时多个 task 的 recall+LLM 并发跑（向量库内部线程安全）。代价：同一 evolution chain
+    # 上的跨 task supersede 依赖可能漏判（最终一致，可接受）。1 = 严格串行（旧行为）。
+    reconcile_concurrency: int = 1
     # Run reconciler synchronously inside the write path (strong consistency for evolution
     # chains; also raises latency to ~2 LLM calls per add). Default off: async reconcile
     # via ReconcilerWorker (per_write task drains chains within seconds).
     reconcile_sync: bool = False
     # System2 ReAct loop iteration cap (the agent stops earlier when the LLM emits no more
-    # tool_calls). The legacy single-shot ops JSON path has been removed.
-    system2_max_iters: int = 10
+    # tool_calls). Only the residual ReAct path uses this — single-shot handles the small/
+    # single-cluster majority. Each turn is a serial LLM round-trip; the model batches many
+    # tool_calls per turn, so observed heavy digests (~10-12 schemas) finish within ~5 turns.
+    # 6 trims worst-case latency vs the old 10 while leaving headroom for the heavy tail.
+    system2_max_iters: int = 6
+    # Single-shot System2: skip the ReAct tool loop and emit schemas/intentions in ONE
+    # chat_json call when BOTH hold: clusters <= max_clusters AND the total fact workload <=
+    # max_facts. The fact cap matters because clustering can collapse a whole user into one
+    # huge "cluster" (100s of facts); cramming that into a single JSON would truncate on a
+    # small model, so large blobs still use the iterative ReAct loop. 0 clusters disables it.
+    system2_single_shot_max_clusters: int = 1
+    system2_single_shot_max_facts: int = 80
 
     # Attentional gate: skip extraction for low-value content (pleasantries, no novelty).
     gate_enabled: bool = True
@@ -218,9 +243,14 @@ class Settings(BaseSettings):
     # Drop reconcile/s2 queue rows after digest drains them (keeps cache.db small).
     purge_done_queues: bool = True
 
-    # V2 read pipeline: hybrid (default) = QueryUnderstanding -> AnchorSearch (5 paths) ->
+    # Read pipeline: hybrid (default) = QueryUnderstanding -> AnchorSearch (5 paths) ->
     # GraphExpander -> FusionScorer; legacy = original three-route + bm25 RRF rerank baseline.
     reader_mode: Literal["hybrid", "legacy"] = "hybrid"
+    # 降噪开关（默认关）：开启后，FACTUAL/NAVIGATIONAL 查询不返回 System2 派生层 L6 schema /
+    # L7 intention，把 top-k 名额全留给原始事实。这是为"原始事实召回/计数"类基准（如 LME）准备的
+    # opt-in；对"偏好演化/泛化"类场景（如 PersonaMem）和通用 SDK 用户，schema/intention 正是价值
+    # 所在，故默认 False 保留它们。零额外 LLM（启发式 intent）。
+    reader_suppress_derived_on_factual: bool = False
 
     # Read-side reconsolidation hook (access bump + co-recall edges + optional S2 enqueue).
     reconsolidation_enabled: bool = True

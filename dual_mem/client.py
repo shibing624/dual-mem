@@ -287,12 +287,34 @@ class MemoryClient:
     ) -> SearchResult:
         """Semantic search; returns profile / proactive / normal groups.
 
-        ``app_ids`` defaults to ``[settings.default_app_id]`` when omitted.
-        ``user_id`` scope the query (must match values used in ``add``).
-        Read path uses embedding + hybrid retrieval — no LLM. Safe to call every user turn
-        in an agent loop before generation.
+        读路径只用 embedding + 混合检索，无 LLM，可在 agent 每轮生成前安全调用。
+        Read path uses embedding + hybrid retrieval — no LLM; safe to call every user turn.
 
-        ``debug=True`` fills ``SearchResult.read_result`` with per-stage trace metadata.
+        Args:
+            query: 查询文本 / the query string to recall against.
+            app_ids: 应用隔离域，省略时用 ``[settings.default_app_id]`` /
+                app isolation scope; defaults to ``[settings.default_app_id]``.
+            user_id: 用户隔离域，必须与 ``add`` 时一致 / user scope, must match ``add``.
+            agent_ids: 智能体隔离域（多 agent 共享同一 user 时用）/
+                agent scope (when several agents share one user).
+            session_ids: 限定在某些会话内检索 / restrict recall to specific sessions.
+            limit: normal 路（L2/L5/L3/L1 事实类）返回上限 /
+                cap on the normal route (episodic facts L2/L5/L3/L1).
+            min_score: normal 路最低融合分，低于此分丢弃 / min fused score for the normal route.
+            profile_limit: profile 路（L0/L4/L6 画像类）上限，``-1`` = 不限 /
+                cap on the profile route (identity/schema), ``-1`` = unlimited.
+            profile_min_score: profile 路最低分 / min score for the profile route.
+            intention_limit: proactive 路（L7 意图）返回条数，``0`` = 关闭。意图是“用户接下来
+                想做什么”的主动提醒，仅在需要主动推荐时才开；事实问答场景保持 0，以免意图噪声
+                挤占事实召回。 / proactive route (L7 intentions) size, ``0`` = OFF. Intentions
+                are forward-looking "what the user plans to do" nudges — only enable for
+                proactive recommendation; keep 0 for factual QA so intention noise does not
+                crowd out facts.
+            created_after: 只返回该 Unix 秒之后创建的记忆（时间窗过滤）/
+                only memories created after this Unix-second cutoff.
+            request_id: 日志/链路追踪 id，省略自动生成 / trace id for logs; auto-generated.
+            debug: ``True`` 时填充 ``SearchResult.read_result`` 的逐阶段 trace /
+                fill ``SearchResult.read_result`` with per-stage trace metadata.
         """
         request_id = request_id or str(uuid.uuid4())
         start = time.perf_counter()
@@ -301,37 +323,21 @@ class MemoryClient:
             "search app=%s user=%s query=%r limit=%d debug=%s",
             (resolved_app_ids[0] if resolved_app_ids else ""), user_id, query, limit, debug,
         )
-        if debug:
-            memories, trace = await self.reader.search_with_trace(
-                query=query,
-                app_ids=resolved_app_ids,
-                user_id=user_id,
-                agent_ids=agent_ids,
-                session_ids=session_ids,
-                limit=limit,
-                min_score=min_score,
-                profile_limit=profile_limit,
-                profile_min_score=profile_min_score,
-                intention_limit=intention_limit,
-                created_after=created_after,
-                request_id=request_id,
-            )
-        else:
-            memories = await self.reader.search(
-                query=query,
-                app_ids=resolved_app_ids,
-                user_id=user_id,
-                agent_ids=agent_ids,
-                session_ids=session_ids,
-                limit=limit,
-                min_score=min_score,
-                profile_limit=profile_limit,
-                profile_min_score=profile_min_score,
-                intention_limit=intention_limit,
-                created_after=created_after,
-                request_id=request_id,
-            )
-            trace = None
+        memories, trace = await self.reader.search(
+            query=query,
+            app_ids=resolved_app_ids,
+            user_id=user_id,
+            agent_ids=agent_ids,
+            session_ids=session_ids,
+            limit=limit,
+            min_score=min_score,
+            profile_limit=profile_limit,
+            profile_min_score=profile_min_score,
+            intention_limit=intention_limit,
+            created_after=created_after,
+            request_id=request_id,
+            collect_trace=debug,
+        )
 
         # In per_write mode, drain reconsolidation tasks the read hook just enqueued so
         # users do not have to wait for the next write to see the reactivation effects.
@@ -481,6 +487,7 @@ class MemoryClient:
         if not isinstance(self.writer, System2Writer):
             return DigestResult(success=True, processed=0)
         processed = await self.writer._digest_pending()
+        timing = dict(self.writer.last_digest_stats)
         cores = 0
         if self.settings.cross_domain_enable:
             sweeper = CrossDomainSweeper(factory=self.factory)
@@ -490,7 +497,9 @@ class MemoryClient:
                     cores += int(result["cores"])
         if self.settings.purge_done_queues:
             self.factory.cache.purge_done_queues()
-        return DigestResult(success=True, processed=processed, cores_created=cores)
+        return DigestResult(
+            success=True, processed=processed, cores_created=cores, timing=timing
+        )
 
     async def aclose(self) -> None:
         """Release dual-mode background resources. Idempotent.

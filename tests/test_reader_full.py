@@ -37,7 +37,7 @@ async def test_three_key_structure_and_profile_full(factory):
     f2 = _seed(factory, "用户住在北京", Layer.L2_FACT)
 
     reader = Reader(factory=factory)
-    res = await reader.search(query="用户喜欢喝咖啡", app_ids=["app"], user_id="u", limit=5)
+    res, _ = await reader.search(query="用户喜欢喝咖啡", app_ids=["app"], user_id="u", limit=5)
 
     assert {"profile", "proactive", "normal"} == {"profile", "proactive", "normal"}
     assert res.proactive == []
@@ -53,7 +53,7 @@ async def test_normal_respects_limit(factory):
         _seed(factory, f"事实条目 {i}", Layer.L2_FACT)
 
     reader = Reader(factory=factory)
-    res = await reader.search(
+    res, _ = await reader.search(
         query="事实条目 0", app_ids=["app"], user_id="u", limit=2, min_score=0.0
     )
     assert len(res.normal) == 2
@@ -85,7 +85,7 @@ async def test_evolution_chain_returned(factory):
     factory.vector.upsert([a, b, c])
 
     reader = Reader(factory=factory)
-    res = await reader.search(
+    res, _ = await reader.search(
         query="中间版偏好：喜欢茶和咖啡",
         app_ids=["app"],
         user_id="u",
@@ -104,7 +104,7 @@ async def test_created_after_filter(factory):
     new = _seed(factory, "今天的新事实", Layer.L2_FACT, gmt_created=9_000_000_000)
 
     reader = Reader(factory=factory)
-    res = await reader.search(
+    res, _ = await reader.search(
         query="今天的新事实",
         app_ids=["app"],
         user_id="u",

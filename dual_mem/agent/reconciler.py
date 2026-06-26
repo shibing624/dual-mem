@@ -1,9 +1,35 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: Async reconciler that recalls related existing memories, merges supersedes
-chains and asks the LLM to emit ADD/DELETE ops integrating new memories losslessly. Used
-both inside the synchronous write path (reconcile_sync=True) and from the System2 worker.
+
+记忆调和器（Reconciler）—— System1 写入链路的「进化链」决策模块。
+
+## 在整体流水线中的位置
+
+Extractor 快写 L2/L4 之后，新记忆可能与库里已有条目重复、冲突或构成时序更新。
+Reconciler 负责**召回相关旧记忆 → 让 LLM 判断关系 → 输出 ADD/DELETE 操作列表**，
+由下游（MemAgent 同步路径 或 ReconcilerWorker 异步路径）落盘并维护
+``supersedes`` / ``superseded_by`` 进化链指针。
+
+两条调用路径：
+  - ``reconcile_sync=True``：``MemAgent`` 在写入路径内同步调用（强一致，多 ~1 次 LLM）
+  - 默认异步：``ReconcilerWorker`` 从 reconcile 队列取任务，后台调和（最终一致）
+
+## 核心流程（``Reconciler.reconcile``）
+
+1. **向量召回**：对新记忆（+ 可选 LLM 改写查询）做 embed，在 L2/L4 ACTIVE 层检索候选
+2. **进化链合并**：``_merge_chains`` 把候选按链头分组，附带 ``history_versions``
+3. **LLM 决策**：中英 prompt（``RECONCILE_ZH/EN``）输入新旧记忆，输出 JSON ops
+4. **解析校验**：``_parse_ops`` 归一化 LLM 输出，去重冲突的 supersedes/DELETE
+
+## 输出语义（``ReconcileOp``）
+
+- ``ADD``：写入整合后的内容；``supersedes`` 指向被取代的旧节点 ID
+- ``DELETE``：软删（下游标 SHADOW / is_latest=False）
+- ``update_type``：OVERRIDE / SUPPLEMENT / TEMPORAL / NEGATE / CONFLICT，
+  供下游写入 ``node.custom``（如 TEMPORAL 的 ``temporal_scope``、NEGATE 的 ``negation``）
+
+本模块只做**决策**，不直接写库；向量检索阈值见 ``SEARCH_THRESHOLD`` / ``FINAL_TOPK``。
 """
 import json
 import logging
@@ -56,11 +82,15 @@ class Reconciler:
         embed: EmbedService,
         vector: VectorStore,
         enable_search_query: bool = False,
+        policy: str = "balanced",
+        weak_candidate_score: float = 0.5,
     ):
         self.llm = llm
         self.embed = embed
         self.vector = vector
         self.enable_search_query = enable_search_query
+        self.policy = policy
+        self.weak_candidate_score = weak_candidate_score
 
     async def reconcile(
         self,
@@ -126,7 +156,12 @@ class Reconciler:
                     else:
                         candidate_scores[nid] = max(candidate_scores[nid], node.score)
 
-        if not candidate_map:
+        # Fast path: no candidate, or the strongest candidate is too weak to be a real
+        # conflict. Skip the LLM entirely and keep every new memory as an independent
+        # SUPPLEMENT (zero merge risk, saves one reconcile LLM call on the common no-conflict
+        # case where the batch is genuinely new facts).
+        best_score = max(candidate_scores.values(), default=0.0)
+        if not candidate_map or best_score < self.weak_candidate_score:
             return [
                 ReconcileOp(
                     op="ADD",
@@ -134,6 +169,7 @@ class Reconciler:
                     layer=meta.get("layer"),
                     supersedes=[],
                     tags=list(meta.get("tags") or []),
+                    update_type="SUPPLEMENT",
                 )
                 for meta in new_memories_meta
             ]
@@ -192,6 +228,12 @@ class Reconciler:
             new_memories=new_mem_lines,
             existing_tags=existing_tags_line,
         )
+        if self.policy == "conservative":
+            system += prompts.pick(
+                prompts.RECONCILE_POLICY_CONSERVATIVE_ZH,
+                prompts.RECONCILE_POLICY_CONSERVATIVE_EN,
+                joined,
+            )
 
         for _ in range(3):
             try:

@@ -25,7 +25,10 @@ def _vec(comps: dict[int, float], dim: int = 16) -> list[float]:
 
 @pytest.fixture
 def ultra_factory(tmp_storage, fake_embed):
-    settings = Settings(mode="dual", storage_dir=tmp_storage)
+    # Disable single-shot so these tests exercise the multi-turn ReAct tool loop.
+    settings = Settings(
+        mode="dual", storage_dir=tmp_storage, system2_single_shot_max_clusters=0
+    )
     return ComponentFactory(settings=settings, embed=fake_embed, llm=FakeLLMClient())
 
 

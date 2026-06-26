@@ -25,7 +25,7 @@ async def test_normal_hit_profile_proactive_empty(factory):
     _seed(factory, "用户住在北京")
 
     reader = Reader(factory=factory)
-    result = await reader.search(
+    result, _ = await reader.search(
         query="用户喜欢喝咖啡", app_ids=["app"], user_id="u", limit=5
     )
 

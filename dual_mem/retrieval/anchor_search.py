@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: Multi-path anchor search for the V2 read flow. Runs the configured retrieval
+@description: Multi-path anchor search for the hybrid read flow. Runs the configured retrieval
 paths (semantic / entity / temporal / schema / intention) in parallel and merges results
 into a deduped anchor list with per-path counts. Each path is independent and tolerates
 storage failures so the rest of the request still produces an answer.
@@ -68,6 +68,7 @@ class AnchorSearchEngine:
         factory: ComponentFactory,
         semantic_limit: int = 15,
         temporal_limit: int = 20,
+        entity_limit: int = 20,
         schema_limit: int = 8,
         schema_threshold: float = 0.3,
         intention_threshold: float = 0.4,
@@ -77,6 +78,7 @@ class AnchorSearchEngine:
         self.factory = factory
         self.semantic_limit = semantic_limit
         self.temporal_limit = temporal_limit
+        self.entity_limit = entity_limit
         self.schema_limit = schema_limit
         self.schema_threshold = schema_threshold
         self.intention_threshold = intention_threshold
@@ -96,9 +98,22 @@ class AnchorSearchEngine:
         layers: list[Layer] | None = None,
         created_after: int | None = None,
         intention_enabled: bool = False,
+        recall_limit: int | None = None,
     ) -> AnchorSearchResult:
-        """Run all enabled paths concurrently; return merged anchors + per-path counts."""
+        """Run all enabled paths concurrently; return merged anchors + per-path counts.
+
+        ``recall_limit`` lets the caller (the reader's ``limit``) widen the per-path
+        candidate pools so a large ``top_k`` is actually filled. The fixed defaults
+        (semantic_limit/temporal_limit) are treated as a floor.
+        """
         target_layers = layers or understanding.target_layers or _DEFAULT_LAYERS
+        sem_limit = self.semantic_limit
+        temp_limit = self.temporal_limit
+        ent_limit = self.entity_limit
+        if recall_limit and recall_limit > 0:
+            sem_limit = max(sem_limit, recall_limit)
+            temp_limit = max(temp_limit, recall_limit)
+            ent_limit = max(ent_limit, recall_limit)
 
         tasks: dict = {
             PATH_SEMANTIC: self._semantic(
@@ -109,6 +124,7 @@ class AnchorSearchEngine:
                 session_ids=session_ids,
                 layers=target_layers,
                 created_after=created_after,
+                limit=sem_limit,
             ),
             PATH_SCHEMA: self._schema(
                 query_embedding=query_embedding,
@@ -124,6 +140,7 @@ class AnchorSearchEngine:
                 session_ids=session_ids,
                 layers=target_layers,
                 created_after=created_after if created_after is not None else understanding.time_from,
+                limit=temp_limit,
             )
         if understanding.keywords:
             tasks[PATH_ENTITY] = self._entity(
@@ -133,6 +150,7 @@ class AnchorSearchEngine:
                 agent_ids=agent_ids,
                 session_ids=session_ids,
                 layers=target_layers,
+                limit=ent_limit,
             )
         if intention_enabled:
             tasks[PATH_INTENTION] = self._intention(
@@ -174,6 +192,7 @@ class AnchorSearchEngine:
         session_ids: list[str] | None,
         layers: list[Layer],
         created_after: int | None,
+        limit: int,
     ) -> list[AnchorNode]:
         """Path 1: vector semantic neighbors over the target layers."""
         where = build_filter(
@@ -189,13 +208,13 @@ class AnchorSearchEngine:
             self.factory.vector.query,
             embedding=query_embedding,
             where=where,
-            top_k=math.ceil(self.semantic_limit * 1.5),
+            top_k=math.ceil(limit * 1.5),
         )
         return [
             AnchorNode(node=n, score=n.score, source_path=PATH_SEMANTIC)
             for n in nodes
             if n.score >= self.semantic_threshold
-        ][: self.semantic_limit]
+        ][:limit]
 
     async def _entity(
         self,
@@ -206,6 +225,7 @@ class AnchorSearchEngine:
         agent_ids: list[str] | None,
         session_ids: list[str] | None,
         layers: list[Layer],
+        limit: int,
     ) -> list[AnchorNode]:
         """Path 2: BM25 keyword scoring over a bounded candidate pool (replaces substring scan)."""
         where = build_filter(
@@ -240,7 +260,7 @@ class AnchorSearchEngine:
             # without clamping every hit to ~0.9 (which would dominate fusion max()).
             score = 0.25 + 0.45 * bm25_norm
             out.append(AnchorNode(node=node, score=score, source_path=PATH_ENTITY))
-        return out[:20]
+        return out[:limit]
 
     async def _temporal(
         self,
@@ -251,6 +271,7 @@ class AnchorSearchEngine:
         session_ids: list[str] | None,
         layers: list[Layer],
         created_after: int | None,
+        limit: int,
     ) -> list[AnchorNode]:
         """Path 3: time-window lookup; surfaces nodes created after the parsed cutoff."""
         if created_after is None:
@@ -267,12 +288,12 @@ class AnchorSearchEngine:
         nodes = await asyncio.to_thread(
             self.factory.vector.get_many,
             where,
-            self.temporal_limit,
+            limit,
         )
         nodes.sort(key=lambda n: n.gmt_created or 0, reverse=True)
         return [
             AnchorNode(node=n, score=0.5, source_path=PATH_TEMPORAL)
-            for n in nodes[: self.temporal_limit]
+            for n in nodes[:limit]
         ]
 
     async def _schema(

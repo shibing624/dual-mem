@@ -54,6 +54,8 @@ class MemAgent:
             embed=self.embed,
             vector=self.vector,
             enable_search_query=self.settings.reconcile_search_query,
+            policy=self.settings.reconcile_policy,
+            weak_candidate_score=self.settings.reconcile_weak_candidate_score,
         )
         self.gate = AttentionalGate(
             threshold=self.settings.gate_threshold,

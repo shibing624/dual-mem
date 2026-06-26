@@ -3,6 +3,7 @@ import json
 from conftest import FakeLLMClient
 
 from dual_mem import MemoryClient
+from dual_mem.config import Settings
 from dual_mem.types import Layer, MemoryNode
 
 _SCHEMA = "当处理任务时，用户追求确定性与掌控——反映低不确定性容忍。"
@@ -49,9 +50,16 @@ def _seed_fresh_facts(client):
 
 
 async def test_dual_digest_then_recall_schema_and_intention(tmp_storage, fake_embed):
-    client = MemoryClient(
-        storage_dir=tmp_storage,
+    # Isolate the L6/L7 plumbing: force the ReAct loop (scripted tool turns) and keep
+    # derived-layer recall on regardless of the (FACTUAL) query intent.
+    settings = Settings(
         mode="dual",
+        storage_dir=tmp_storage,
+        system2_single_shot_max_clusters=0,
+        reader_suppress_derived_on_factual=False,
+    )
+    client = MemoryClient(
+        settings=settings,
         embed=fake_embed,
         llm=FakeLLMClient(responses={"tools": _TOOL_TURNS}),
     )
@@ -77,3 +85,27 @@ async def test_dual_digest_then_recall_schema_and_intention(tmp_storage, fake_em
     # 默认 intention_limit=0 → proactive 恒空
     res3 = await client.search(query=_INTENTION, app_ids=["app"], user_id="u")
     assert res3.memories.proactive == []
+
+
+async def test_factual_query_suppresses_derived_schema(tmp_storage, fake_embed):
+    """With reader_suppress_derived_on_factual opted in, a FACTUAL query drops L6 schema
+    from the profile route even though the schema exists and would otherwise be recalled."""
+    # Force the scripted ReAct loop so the schema gets created; opt into suppression.
+    settings = Settings(
+        mode="dual",
+        storage_dir=tmp_storage,
+        system2_single_shot_max_clusters=0,
+        reader_suppress_derived_on_factual=True,
+    )
+    client = MemoryClient(
+        settings=settings,
+        embed=fake_embed,
+        llm=FakeLLMClient(responses={"tools": _TOOL_TURNS}),
+    )
+    _seed_fresh_facts(client)
+    client.factory.cache.enqueue_s2_task("u", "app")
+    await client.digest()
+
+    # _SCHEMA text classifies as FACTUAL (no how/why trigger) → schema suppressed.
+    res = await client.search(query=_SCHEMA, app_ids=["app"], user_id="u")
+    assert all(m.category != "schema" for m in res.memories.profile)

@@ -302,6 +302,8 @@ class DigestResult:
     processed: int = 0
     # CrossDomainSweeper 新升维的 core schema 数
     cores_created: int = 0
+    # 本次 digest 各阶段耗时与计数（性能分析用；非 dual 或无任务时为空）
+    timing: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """Flatten the digest result for the CLI/REST."""

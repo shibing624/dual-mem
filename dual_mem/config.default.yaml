@@ -97,11 +97,28 @@ system2_schedule_interval_sec: 300
 # true：写入路径同步跑 Reconcile（强一致，延迟约 +1 次 LLM）
 reconcile_sync: false
 
-# System2 ReAct 最大轮数（无 tool_calls 时提前结束）
-system2_max_iters: 10
+# System2 ReAct 最大轮数：只有残余 ReAct 路径用到（小/单簇 digest 走 single-shot）。模型每轮
+# 批量发多个 tool_call，重 digest（~10-12 schema）约 5 轮内完成；6 在裁掉尾部前留足余量
+system2_max_iters: 6
+
+# 单簇 single-shot：同时满足"簇数 ≤ max_clusters"且"总事实数 ≤ max_facts"时，跳过 ReAct，
+# 用 1 次 chat_json 输出 schemas/intentions（~10 次串行调用压成 1 次）。
+system2_single_shot_max_clusters: 1
+# single-shot 新增事实数闸门 80：只有"簇数≤1 且总事实≤80"才走 single-shot。
+system2_single_shot_max_facts: 80
 
 # Reconciler 是否额外生成搜索 query（默认关，省一次 LLM）
 reconcile_search_query: false
+
+# Reconcile 策略：balanced（允许跨节点合并 DELETE，更紧凑）/ conservative（禁合并，
+# 可数事件独立 SUPPLEMENT 保留，仅 OVERRIDE/NEGATE 才 supersede，高召回场景用）
+reconcile_policy: balanced
+
+# reconcile 最强候选相似度低于此值时跳过 LLM，直接 SUPPLEMENT 落库（省调用、零合并风险）；0 关闭
+reconcile_weak_candidate_score: 0.5
+
+# ReconcilerWorker 排空 reconcile 队列的并发度（1=串行旧行为；>1 时多 task 的 recall+LLM 并发）
+reconcile_concurrency: 1
 
 # System2 聚类 cosine 阈值（两阶段 DBSCAN）
 cluster_stage1_sim: 0.42
@@ -149,6 +166,11 @@ embed_merge_l1_gate: true
 # hybrid：QueryUnderstanding → 五路 AnchorSearch → 融合（默认）
 # legacy：三路由 + BM25/RRF 基线
 reader_mode: hybrid
+
+# 降噪 opt-in（默认关）：开启后 FACTUAL/NAVIGATIONAL 查询不返回 L6 schema / L7 intention，
+# top-k 全给原始事实。仅为"原始召回/计数"类基准（LME）准备；PersonaMem/通用用户需要派生层价值，
+# 故默认 false 保留。零额外 LLM
+reader_suppress_derived_on_factual: false
 
 # 读侧 reconsolidation：0 = 每次 search 都跑；>0 = 同 user 最小间隔（秒）
 reconsolidation_enabled: true

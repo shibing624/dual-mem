@@ -101,7 +101,7 @@ def _profile_quota_select(
 
 
 class Reader:
-    """Read path: V2 hybrid (default) or legacy three-route, both returning grouped MemoryItems."""
+    """Read path: hybrid (default) or legacy three-route, both returning grouped MemoryItems."""
 
     def __init__(self, *, factory: ComponentFactory):
         self.factory = factory
@@ -129,67 +129,14 @@ class Reader:
         intention_limit: int = 0,
         created_after: int | None = None,
         request_id: str | None = None,
-    ) -> SearchMemories:
-        """Recall, expand and rerank memories, returning profile/proactive/normal groups."""
-        memories, _ = await self._search(
-            query=query, app_ids=app_ids, user_id=user_id,
-            agent_ids=agent_ids, session_ids=session_ids,
-            limit=limit, min_score=min_score,
-            profile_limit=profile_limit, profile_min_score=profile_min_score,
-            intention_limit=intention_limit, created_after=created_after,
-            request_id=request_id, collect_trace=False,
-        )
-        return memories
+        collect_trace: bool = False,
+    ) -> tuple[SearchMemories, ReadResult | None]:
+        """Recall, expand and rerank memories → (profile/proactive/normal groups, trace).
 
-    async def search_with_trace(
-        self,
-        *,
-        query: str,
-        app_ids: list[str],
-        user_id: str,
-        agent_ids: list[str] | None = None,
-        session_ids: list[str] | None = None,
-        limit: int = 10,
-        min_score: float = 0.4,
-        profile_limit: int = -1,
-        profile_min_score: float = 0.3,
-        intention_limit: int = 0,
-        created_after: int | None = None,
-        request_id: str | None = None,
-    ) -> tuple[SearchMemories, ReadResult]:
-        """Same as ``search`` but also returns a populated ``ReadResult`` for debugging.
-
-        ReadResult exposes the per-stage counters (anchor path counts, expansion edges,
-        fusion final count, evolution chain count, elapsed_ms) so callers can render or log
-        the read pipeline without re-querying the store. Used by ``MemoryClient.search(debug=True)``.
+        当 ``collect_trace=True`` 时第二个返回值是填充好的 ``ReadResult``（含 anchor 各路计数、
+        扩展边、fusion 最终条数、演化链数、elapsed_ms），供 ``MemoryClient.search(debug=True)``
+        渲染/记录读路径；``collect_trace=False`` 时第二个返回值为 ``None``（零额外开销）。
         """
-        return await self._search(
-            query=query, app_ids=app_ids, user_id=user_id,
-            agent_ids=agent_ids, session_ids=session_ids,
-            limit=limit, min_score=min_score,
-            profile_limit=profile_limit, profile_min_score=profile_min_score,
-            intention_limit=intention_limit, created_after=created_after,
-            request_id=request_id, collect_trace=True,
-        )
-
-    async def _search(
-        self,
-        *,
-        query: str,
-        app_ids: list[str],
-        user_id: str,
-        agent_ids: list[str] | None,
-        session_ids: list[str] | None,
-        limit: int,
-        min_score: float,
-        profile_limit: int,
-        profile_min_score: float,
-        intention_limit: int,
-        created_after: int | None,
-        request_id: str | None,
-        collect_trace: bool,
-    ) -> tuple[SearchMemories, ReadResult]:
-        """Internal: shared body of ``search`` / ``search_with_trace``."""
         mode = self.factory.settings.reader_mode
         start = time.perf_counter()
         rid = request_id or "search"
@@ -283,9 +230,9 @@ class Reader:
             trace.final_count = (
                 len(memories.profile) + len(memories.proactive) + len(memories.normal)
             )
-        return memories, trace if trace is not None else ReadResult(memories=memories, elapsed_ms=elapsed_ms)
+        return memories, trace
 
-    # ---- Hybrid (V2) ---------------------------------------------------------------
+    # ---- Hybrid method -------------------------------------------------------------
 
     async def _search_hybrid(
         self,
@@ -305,7 +252,7 @@ class Reader:
         trace: ReadResult | None = None,
         understanding: QueryUnderstanding | None = None,
     ) -> SearchMemories:
-        """V2 read flow: QU → Anchor 5 paths → GraphExpander → Fusion → split into routes."""
+        """Hybrid read flow: QU → Anchor 5 paths → GraphExpander → Fusion → split into routes."""
         u = understanding or understand(query)
         if created_after is None and u.time_from is not None:
             created_after = u.time_from
@@ -336,6 +283,7 @@ class Reader:
             layers=target_layers,
             created_after=created_after,
             intention_enabled=intention_limit > 0,
+            recall_limit=limit,
         )
         if trace is not None:
             trace.anchor_path_counts = dict(anchor_result.path_counts)
@@ -373,8 +321,14 @@ class Reader:
 
         all_anchors: list[AnchorNode] = list(anchor_result.anchors) + list(expansion.expanded)
         activated_schema_ids = {s.node_id for s in anchor_result.activated_schemas}
+        # Headroom above `limit`: the scored pool feeds both the normal route ([:limit])
+        # and the profile route, and loses some to grouping/evolution dedup. Keep the
+        # 30 floor for small limits; widen for large recall requests (e.g. benchmarks).
+        fusion_cap = max(self.fusion.config.max_results, limit * 2)
         scored = self.fusion.score_and_rank(
-            anchors=all_anchors, activated_schema_ids=activated_schema_ids
+            anchors=all_anchors,
+            activated_schema_ids=activated_schema_ids,
+            max_results=fusion_cap,
         )
         try:
             self.factory.cache.log_pipeline(
@@ -418,12 +372,22 @@ class Reader:
             entry["score"] = max(entry.get("score", 0.0), it["score"])
             ordered.append(entry)
 
+        # FACTUAL/NAVIGATIONAL queries (counting, fact-lookup, exact-match) should not be
+        # diluted by System2-derived L6 schema / L7 intention nodes — drop them so the
+        # top-k budget goes entirely to raw facts. Only CONCEPTUAL (how/why/style) keeps them.
+        suppress_derived = (
+            self.factory.settings.reader_suppress_derived_on_factual
+            and u.intent in ("FACTUAL", "NAVIGATIONAL")
+        )
+
         # Split into routes by layer.
         profile_items: list[dict] = []
         proactive_items: list[dict] = []
         normal_items: list[dict] = []
         for it in ordered:
             lv = it["node"].layer.value
+            if suppress_derived and lv in (_SCHEMA_VALS | _PROACTIVE_VALS):
+                continue
             if lv in _PROFILE_VALS:
                 profile_items.append(it)
             elif lv in _PROACTIVE_VALS:
