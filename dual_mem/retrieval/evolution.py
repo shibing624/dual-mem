@@ -26,7 +26,7 @@ def _node_to_chain_item(node: MemoryNode) -> dict:
 
 def _fetch_nodes(vector, node_ids: list[str], visited: dict[str, MemoryNode]) -> None:
     """Batch-load ids missing from ``visited`` into the map."""
-    missing = [nid for nid in node_ids if nid not in visited]
+    missing = list(dict.fromkeys(nid for nid in node_ids if nid not in visited))
     if not missing:
         return
     if hasattr(vector, "get_by_ids"):
@@ -45,7 +45,7 @@ def _trace_full_chain(vector, start_node: MemoryNode) -> list[MemoryNode]:
     to_fetch: list[str] = list(start_node.supersedes) + list(start_node.superseded_by)
 
     while to_fetch:
-        ids_batch = [i for i in to_fetch if i not in visited]
+        ids_batch = list(dict.fromkeys(i for i in to_fetch if i not in visited))
         if not ids_batch:
             break
         _fetch_nodes(vector, ids_batch, visited)

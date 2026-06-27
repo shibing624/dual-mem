@@ -24,6 +24,7 @@ def test_defaults():
     assert s.auth_disabled is True
     assert s.default_app_id == "default"
     assert s.system2_trigger_mode == "per_write"
+    assert s.gate_enabled is True
     assert s.persist_history is False
     assert s.purge_done_queues is True
 

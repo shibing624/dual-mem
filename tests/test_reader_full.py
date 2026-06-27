@@ -42,8 +42,9 @@ async def test_three_key_structure_and_profile_full(factory):
     assert {"profile", "proactive", "normal"} == {"profile", "proactive", "normal"}
     assert res.proactive == []
     profile_ids = {m.memory_id for m in res.profile}
-    assert profile_ids == {p0.node_id, p4.node_id}
+    assert profile_ids == {p0.node_id}
     normal_ids = {m.memory_id for m in res.normal}
+    assert p4.node_id in normal_ids
     assert f1.node_id in normal_ids
     assert f2.node_id in normal_ids
 

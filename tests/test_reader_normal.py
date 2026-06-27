@@ -33,4 +33,4 @@ async def test_normal_hit_profile_proactive_empty(factory):
     assert result.proactive == []
     assert result.normal[0].memory_id == n1.node_id
     assert result.normal[0].category == "fact"
-    assert result.normal[0].score >= 0.99
+    assert result.normal[0].score >= 0.4

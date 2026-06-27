@@ -200,6 +200,15 @@ class CacheStore:
             )
             self.conn.commit()
 
+    def list_pending_reconcile_scopes(self) -> list[dict]:
+        """Distinct (app_id, user_id, agent_id) with pending reconcile tasks."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT DISTINCT app_id, user_id, agent_id "
+                "FROM reconcile_queue WHERE status = 'pending'"
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def dequeue_reconcile_task(
         self, *, app_id: str | None = None, user_id: str | None = None, agent_id: str | None = None
     ) -> dict | None:

@@ -37,7 +37,7 @@ async def test_write_logs_gate_and_extract(tmp_storage, fake_embed):
 
 
 async def test_search_logs_qu_anchor_expand_fusion(tmp_storage, fake_embed):
-    """search() with explicit request_id → READ_QU/READ_ANCHOR/READ_EXPAND/READ_FUSION stages logged."""
+    """search() with explicit request_id → READ_QU + READ_HYBRID stages logged."""
     settings = Settings(mode="system1", storage_dir=tmp_storage)
     client = MemoryClient(
         settings=settings, embed=fake_embed,
@@ -58,8 +58,6 @@ async def test_search_logs_qu_anchor_expand_fusion(tmp_storage, fake_embed):
     logs = client.factory.cache.list_pipeline_logs("rid-test-1")
     stages = {entry["stage"] for entry in logs}
     assert "READ_QU" in stages
-    assert "READ_ANCHOR" in stages
-    assert "READ_EXPAND" in stages
-    assert "READ_FUSION" in stages
+    assert "READ_HYBRID" in stages
 
     await client.aclose()

@@ -151,10 +151,10 @@ summarizer_min_content_tokens: 600
 # 最终内容，是兜底的尺寸上限（如 user 话本身极长时），与下方按角色的历史整形分层叠加、不冲突。benchmark 建议 4000
 extract_max_content_tokens: 0
 extract_retry_on_failure: true
-# 多轮 messages 输入整形：不丢任何轮；仅当整段对话占用超过 context window 的该比例（token 粒度）时
-# 才把 assistant/system（AI 的话）截断到 token 上限，user（记忆主信号）始终全保留；短对话原样透传
+# 多轮 messages 输入整形：不丢 user/assistant 轮；整段对话超过 context 比例时仅截断 assistant 轮，
+# user 轮始终全保留（记忆主信号）。对话 role=system 轮不参与记忆（add 时丢弃）。
 extract_history_context_ratio: 0.7
-extract_assistant_max_tokens: 200
+extract_assistant_max_tokens: 512
 
 # Merge L1 + Gate user-turn embeds into one API call (benchmark / low-concurrency latency)
 embed_merge_l1_gate: true
@@ -163,9 +163,14 @@ embed_merge_l1_gate: true
 # 读路径
 # ---------------------------------------------------------------------------
 
-# hybrid：QueryUnderstanding → 五路 AnchorSearch → 融合（默认）
+# hybrid：语义召回 + 池内 BM25 重排 + 图证据融合（默认）
 # legacy：三路由 + BM25/RRF 基线
 reader_mode: hybrid
+# hybrid 融合权重（语义 vs 池内 BM25 重排）与图 L6 证据加成上限/饱和计数
+hybrid_w_sem: 0.6
+hybrid_w_bm25: 0.4
+hybrid_evidence_boost_max: 0.3
+hybrid_evidence_saturate: 5
 
 # 降噪 opt-in（默认关）：开启后 FACTUAL/NAVIGATIONAL 查询不返回 L6 schema / L7 intention，
 # top-k 全给原始事实。仅为"原始召回/计数"类基准（LME）准备；PersonaMem/通用用户需要派生层价值，

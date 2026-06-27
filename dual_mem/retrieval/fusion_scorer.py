@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
+
+DEPRECATED (暂不删除)：本模块已被 ``retrieval/hybrid_engine.py`` 的池内 BM25 重排 + 图证据
+融合取代，当前 hybrid / legacy 读路径都不再引用它，仅保留独立单测。后续清理再删。
+
 @description: Fusion scorer for the hybrid read path. Combines per-anchor semantic similarity
 with a multiplicative weight stack (time decay, access frequency, emotional arousal,
 schema/long-tail boosts) and an additive RRF term that rewards documents surfaced by

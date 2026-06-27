@@ -81,6 +81,16 @@ class GraphStore(ABC):
     @abstractmethod
     def evidence_of(self, schema_id: str) -> list[str]: ...
 
+    def evidence_counts(self, schema_ids: list[str]) -> dict[str, int]:
+        """Batch variant of ``evidence_of``: schema_id -> DERIVED_FROM count (one round-trip)."""
+        raise NotImplementedError
+
+    def find_referencing_memories(
+        self, vdb_node_ids: list[str], *, limit: int = 50
+    ) -> list[dict]:
+        """Reverse lookup: L6 schemas whose DERIVED_FROM cites any of the VDB ids."""
+        raise NotImplementedError
+
     @abstractmethod
     def add_edge(self, *, from_id: str, to_id: str, rel: str) -> None: ...
 
@@ -233,6 +243,55 @@ class KuzuGraphStore(GraphStore):
             while result.has_next():
                 ids.append(result.get_next()[0])
             return ids
+
+    def evidence_counts(self, schema_ids: list[str]) -> dict[str, int]:
+        """Count DERIVED_FROM edges per schema in a single grouped query (batched boost)."""
+        if not schema_ids:
+            return {}
+        with self._lock:
+            result = self.conn.execute(
+                "MATCH (m:Memory)-[:DERIVED_FROM]->(v:VdbRef) "
+                "WHERE m.node_id IN $ids "
+                "RETURN m.node_id, count(v)",
+                {"ids": schema_ids},
+            )
+            counts: dict[str, int] = {}
+            while result.has_next():
+                row = result.get_next()
+                counts[row[0]] = int(row[1])
+            return counts
+
+    def find_referencing_memories(
+        self, vdb_node_ids: list[str], *, limit: int = 50
+    ) -> list[dict]:
+        """Return L6 Memory rows referencing any of the given VDB fact ids."""
+        if not vdb_node_ids:
+            return []
+        with self._lock:
+            result = self.conn.execute(
+                "MATCH (m:Memory)-[:DERIVED_FROM]->(v:VdbRef) "
+                "WHERE v.node_id IN $ids AND m.layer = $layer "
+                "RETURN m.node_id, m.content, m.layer, v.node_id "
+                "LIMIT $limit",
+                {
+                    "ids": vdb_node_ids,
+                    "layer": "L6_SCHEMA",
+                    "limit": limit,
+                },
+            )
+            rows: list[dict] = []
+            while result.has_next():
+                row = result.get_next()
+                rows.append(
+                    {
+                        "node_id": row[0],
+                        "content": row[1],
+                        "layer": row[2],
+                        "evidence_vdb_id": row[3],
+                        "confidence": None,
+                    }
+                )
+            return rows
 
     def add_edge(self, *, from_id: str, to_id: str, rel: str) -> None:
         """Create a relation edge of an allowed type between two memory nodes."""

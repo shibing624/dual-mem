@@ -224,6 +224,10 @@ class MemoryClient:
         agent_context: str | None = None
         if messages:
             normalized = _normalize_messages(messages)
+            # Host-injected role=system turns (e.g. "You are a helpful assistant") are not
+            # user memory — drop before L1/extract. Extract LLM's own EXTRACT_* template is
+            # separate instruction, not part of this dialogue.
+            normalized = [m for m in normalized if m.role != "system"]
             cpt = self.settings.chars_per_token
             threshold_chars = int(
                 self.settings.llm_context_window
@@ -549,8 +553,9 @@ def _shape_history(
     Truncation only kicks in when the whole dialogue is large: if the total content length is
     within ``threshold_chars`` (derived from the model context window), the dialogue passes
     through untouched — short batches keep their assistant turns in full. Above the threshold,
-    non-user turns (assistant/system — the model's own words) are truncated to
-    ``assistant_max_chars``; user turns (the real memory signal) are always preserved in full.
+    assistant turns are truncated to ``assistant_max_chars``; user turns (the primary memory
+    signal) are always preserved in full. Callers should omit ``role=system`` dialogue turns
+    (filtered earlier in ``MemoryClient.add``); they are not memory content.
 
     ``threshold_chars<=0`` or ``assistant_max_chars<=0`` disables shaping entirely.
     """

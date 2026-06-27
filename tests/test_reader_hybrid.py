@@ -1,9 +1,9 @@
 """P1-1 子PR4 + P1-3: 默认 hybrid reader 路径回归。
 
 These tests pin the contract that hybrid mode (default) and legacy mode both produce a
-SearchMemories with profile/proactive/normal routes, and that hybrid runs the V2 anchor +
-fusion + expander pipeline. They do NOT validate every dimension of fusion (those have
-their own unit tests) — just the integration smoke.
+SearchMemories with profile/proactive/normal routes, and that hybrid runs the semantic +
+BM25-rerank + evidence-fusion pipeline. They do NOT validate every dimension of fusion
+(those have their own unit tests) — just the integration smoke.
 """
 from dual_mem.client import MemoryClient
 from dual_mem.config import Settings
@@ -28,9 +28,10 @@ def _seed(client, content: str, layer: Layer, *, user_id: str = "u",
 
 
 async def test_hybrid_reader_default_returns_routes(tmp_storage, fake_embed):
-    """默认 hybrid 模式：profile 路由召回 L4 identity，normal 路由召回 L2 fact。"""
-    settings = Settings(mode="system1", storage_dir=tmp_storage, gate_enabled=False)
-    assert settings.reader_mode == "hybrid"  # default
+    """默认 hybrid：L4 identity 走 normal 路由。"""
+    settings = Settings(mode="system1", storage_dir=tmp_storage)
+    assert settings.reader_mode == "hybrid"
+    assert settings.gate_enabled is True
     client = MemoryClient(settings=settings, embed=fake_embed,
                           llm=FakeLLMClient(responses={"extract": {
                               "is_ephemeral": False,
@@ -42,8 +43,7 @@ async def test_hybrid_reader_default_returns_routes(tmp_storage, fake_embed):
 
     result = await client.search(query="咖啡", app_ids=["app"], user_id="u")
     assert result.success
-    # profile 路由命中 identity
-    assert any("咖啡" in m.content for m in result.memories.profile)
+    assert any("咖啡" in m.content for m in result.memories.normal)
 
     await client.aclose()
 

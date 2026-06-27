@@ -7,7 +7,7 @@ from conftest import FakeLLMClient
 
 
 async def test_search_debug_returns_read_result(tmp_storage, fake_embed):
-    """client.search(debug=True) → SearchResult.read_result 非空，含 anchor/expand 计数。"""
+    """client.search(debug=True) → SearchResult.read_result 非空，含 final_count。"""
     settings = Settings(mode="system1", storage_dir=tmp_storage, gate_enabled=False)
     client = MemoryClient(settings=settings, embed=fake_embed,
                           llm=FakeLLMClient(responses={}))
@@ -23,14 +23,12 @@ async def test_search_debug_returns_read_result(tmp_storage, fake_embed):
     assert result.read_result is not None
     rr = result.read_result
     assert rr.intent in ("FACTUAL", "CONCEPTUAL", "NAVIGATIONAL")
-    assert rr.anchor_path_counts  # 至少有 semantic 路径
-    assert rr.anchor_count >= 1
     assert rr.final_count >= 1
     assert rr.elapsed_ms >= 0.0
     # to_dict 应该包含 read_result
     d = result.to_dict()
     assert "read_result" in d
-    assert d["read_result"]["anchor_count"] >= 1
+    assert d["read_result"]["final_count"] >= 1
 
     await client.aclose()
 

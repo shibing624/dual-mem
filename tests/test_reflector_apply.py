@@ -68,6 +68,40 @@ async def test_apply_override_writes_update_type(worker_factory):
     assert old.status is MemoryStatus.SUPERSEDED
 
 
+async def test_reconcile_apply_preserves_memory_at_from_superseded(worker_factory):
+    """Reconcile ADD keeps session memory_at (LME QA uses conversation dates)."""
+    ts = 1_700_000_000
+    _seed_existing(worker_factory, "fw1", "用户有1300个Instagram粉丝", Layer.L2_FACT)
+    old = worker_factory.vector.get("fw1")
+    old.memory_at = ts
+    worker_factory.vector.upsert([old])
+
+    op = ReconcileOp(
+        op="ADD",
+        content="用户有1300个Instagram粉丝",
+        layer="L2_FACT",
+        supersedes=["fw1"],
+        tags=["social"],
+        update_type="OVERRIDE",
+    )
+    worker = ReconcilerWorker(factory=worker_factory)
+    await worker._apply_ops(
+        [op],
+        app_id="app",
+        user_id="u",
+        agent_id="",
+        session_id="s1",
+        memory_at_by_content={"用户有1300个instagram粉丝": ts},
+        fallback_memory_at=ts,
+    )
+    nodes = worker_factory.vector.get_many({"$and": [
+        {"app_id": "app"}, {"user_id": "u"}, {"status": "ACTIVE"}
+    ]}, limit=10)
+    merged = [n for n in nodes if "1300" in n.content]
+    assert merged
+    assert merged[0].memory_at == ts
+
+
 async def test_apply_negate_marks_negation_in_custom(worker_factory):
     """NEGATE op → new node.custom.negation=True + update_type='NEGATE'。"""
     _seed_existing(worker_factory, "apple_id", "用户喜欢苹果")

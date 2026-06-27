@@ -64,7 +64,7 @@ Agent / Cursor  ──MCP──▶  MCP Server（受 Skill 指导）  ──▶ 
 
 - **System1（写侧）**：Attentional Gate（`agent/gate.py`，LLM 主路径 + 启发式降级）→ Extractor（1 次 LLM，出 identity/facts/intentions/emotion/basic_info）→ fast-write 直接落 L2/L4 → 入队 reconcile 任务 → Summarizer（仅长文本出 L3）。默认 **fast-write + 异步 reconcile**（`reconcile_sync=false`，最终一致）；置 `reconcile_sync=true` 可在写侧同步跑 Reconciler（强一致）。
 - **System2（异步，仅 dual）**：`ReconcilerWorker` 排空 reconcile 队列（ADD/SUPERSEDE/DELETE，构建演化链、软删 fast-write 原件）→ `System2Agent` 两阶段 DBSCAN 聚类后跑**真 ReAct 循环**（`chat_with_tools` + `s2_tools` 八工具，`tool_choice="auto"`，至多 `system2_max_iters=10` 轮）写 L6 Schema / L7 Intention / 图边 → `CrossDomainSweeper`（受 `cross_domain_enable` 控制，默认关）将 ≥5 条基础 Schema 升维为核心 Schema。触发由 `system2_trigger_mode` ∈ `{per_write, manual, scheduled}` 决定，同 user 用 `asyncio.Lock` 串行；`manual` 需 `client.digest()`。
-- **三路召回（读侧，`reader_mode=hybrid` 默认）**：**不调用 LLM**（意图分类、时间词解析均为 regex/关键词启发式），但会 **调用 Embedding API** 做 query 向量化，并在 Chroma/Kuzu 上做向量检索。管线：`query_understanding` → 五路并行 `anchor_search`（语义 + 关键词 + 图）→ `graph_expander` 1-hop（dual 有图时）→ `fusion_scorer`（W(d) 时效 + access_count + 多路 RRF）→ 按 profile / proactive / normal 分组 → 演化链展开。读后 fire-and-forget `ReconsolidationHook` 累加访问计数并建弱关联边。
+- **混合召回（读侧，`reader_mode=hybrid` 默认）**：**不调用 LLM**（意图分类、时间词解析均为 regex/关键词启发式），但会 **调用 Embedding API** 做 query 向量化，并在 Chroma/Kuzu 上做向量检索。管线（`retrieval/hybrid_engine.py`）：`query_understanding` → 并行召回（语义 VDB、L0 profile VDB、L6 graph schema）→ 在**已召回的语义池内**做 BM25 重排（稀有词/数字精确命中加权，无全库扫描），按 `hybrid_w_sem`/`hybrid_w_bm25` 融合，**先融合后门控**（`min_score` 作用于融合分，关键词强命中不会被语义门挤掉）→ L6 正/反向查找（`graph.evidence_counts` 批量证据加成 + RRF 融合）→ 演化链展开 → 按 profile / proactive / normal 分组。读后 fire-and-forget `ReconsolidationHook` 累加访问计数并建弱关联边。
 - **legacy 读路径（`reader_mode=legacy`）**：旧版三路向量召回 + normal 路 BM25+RRF 重排；同样无 LLM，有 embedding。
 
 ## 两档模式
@@ -76,6 +76,6 @@ Agent / Cursor  ──MCP──▶  MCP Server（受 Skill 指导）  ──▶ 
 | System2 / 图库 | ✗ | ✓ |
 | proactive 召回 | 空 | 有 L7 意图 |
 
-> 读路径说明：hybrid 读路径已按 `query_understanding.target_layers`（QU 建议层 ∪ 常驻 profile 层 `_DEFAULT_VDB_LAYERS`）路由并下传至 `anchor_search`；读侧 `ReconsolidationHook` 入队的 `reconsolidation` 任务由 `system2_writer._run_reconsolidation` 以**零 LLM**方式蒸馏（用 gate 启发式给召回 query 打分，与各召回节点存储的情绪比较，唤醒度差异显著则置 `custom.reactivation=True` 并刷新 `last_reactivated_at`；按设计不跑专用 ReAct）；`sdk_models.ReadResult`（trace 字段）经 `Reader.search_with_trace`（`client.search(debug=True)`）返回，`Reader.search` 仅返回 `SearchMemories`。
+> 读路径说明：hybrid 读路径的关键词通道是在语义召回池上做 BM25 重排（不再单独全库扫描），融合权重/证据加成由 `hybrid_w_sem`、`hybrid_w_bm25`、`hybrid_evidence_boost_max`、`hybrid_evidence_saturate` 控制；读侧 `ReconsolidationHook` 入队的 `reconsolidation` 任务由 `system2_writer._run_reconsolidation` 以**零 LLM**方式蒸馏（用 gate 启发式给召回 query 打分，与各召回节点存储的情绪比较，唤醒度差异显著则置 `custom.reactivation=True` 并刷新 `last_reactivated_at`；按设计不跑专用 ReAct）；`sdk_models.ReadResult`（trace 字段）经 `Reader.search_with_trace`（`client.search(debug=True)`）返回，`Reader.search` 仅返回 `SearchMemories`。
 
 更多接入与部署细节见 [`mcp_integration.md`](./mcp_integration.md)。

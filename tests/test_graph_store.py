@@ -42,6 +42,20 @@ def test_add_evidence_and_evidence_of(gstore, fake_embed):
     assert set(gstore.evidence_of("s1")) == {"f1", "f2"}
 
 
+def test_evidence_counts_batched(gstore, fake_embed):
+    """evidence_counts returns per-schema DERIVED_FROM counts in one query."""
+    gstore.add_node(_gnode(fake_embed, "s1", "schema one"))
+    gstore.add_node(_gnode(fake_embed, "s2", "schema two"))
+    gstore.add_node(_gnode(fake_embed, "s3", "schema three (no evidence)"))
+    gstore.add_evidence(schema_id="s1", fact_id="f1")
+    gstore.add_evidence(schema_id="s1", fact_id="f2")
+    gstore.add_evidence(schema_id="s2", fact_id="f3")
+
+    counts = gstore.evidence_counts(["s1", "s2", "s3"])
+    assert counts == {"s1": 2, "s2": 1}
+    assert gstore.evidence_counts([]) == {}
+
+
 def test_tag_bridge(gstore, fake_embed):
     gstore.add_node(_gnode(fake_embed, "s1", "node a", tags=["coffee"]))
     gstore.add_node(_gnode(fake_embed, "s2", "node b", tags=["coffee"]))

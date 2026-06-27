@@ -214,14 +214,13 @@ class Settings(BaseSettings):
     extract_max_content_tokens: int = 0
     # Retry once on empty/unparseable JSON (temperature=0 + JSON-only reinforcement prompt).
     extract_retry_on_failure: bool = True
-    # Multi-turn extract input shaping (messages=...): no turn is ever dropped (a caller that
-    # batches 40 turns must get all 40). Assistant/system turns (the model's own words) are
-    # truncated to ``extract_assistant_max_tokens`` ONLY when the whole dialogue occupies more
-    # than ``extract_history_context_ratio`` of ``llm_context_window`` (token-granular budget);
-    # user turns — the real memory signal — always stay full. Short dialogues pass through
-    # untouched. ratio<=0 or tokens<=0 disables shaping.
+    # Multi-turn extract input shaping (messages=...): no user/assistant turn is ever dropped.
+    # When the dialogue exceeds ``extract_history_context_ratio`` of ``llm_context_window``,
+    # only assistant turns are truncated to ``extract_assistant_max_tokens``; user turns stay
+    # full (primary memory signal). role=system dialogue turns are ignored (not memory).
+    # The extract LLM's EXTRACT_* template system prompt is instruction-only, not chat history.
     extract_history_context_ratio: float = 0.7
-    extract_assistant_max_tokens: int = 200
+    extract_assistant_max_tokens: int = 512
 
     # Embedding write-side batching window for embed_queued (does not affect search-side embed).
     embed_queue_batch_size: int = 32
@@ -243,9 +242,16 @@ class Settings(BaseSettings):
     # Drop reconcile/s2 queue rows after digest drains them (keeps cache.db small).
     purge_done_queues: bool = True
 
-    # Read pipeline: hybrid (default) = QueryUnderstanding -> AnchorSearch (5 paths) ->
-    # GraphExpander -> FusionScorer; legacy = original three-route + bm25 RRF rerank baseline.
+    # Read pipeline: hybrid (default) = semantic recall + in-pool BM25 rerank + graph
+    # evidence fusion (L0/L6 profile, L4 in normal); legacy = original three-route + bm25
+    # RRF rerank baseline.
     reader_mode: Literal["hybrid", "legacy"] = "hybrid"
+    # Hybrid read fusion tunables (semantic vs in-pool BM25 rerank weight; graph L6 evidence
+    # boost). Sum of the two weights need not be 1; evidence boost saturates at the given count.
+    hybrid_w_sem: float = 0.6
+    hybrid_w_bm25: float = 0.4
+    hybrid_evidence_boost_max: float = 0.3
+    hybrid_evidence_saturate: int = 5
     # 降噪开关（默认关）：开启后，FACTUAL/NAVIGATIONAL 查询不返回 System2 派生层 L6 schema /
     # L7 intention，把 top-k 名额全留给原始事实。这是为"原始事实召回/计数"类基准（如 LME）准备的
     # opt-in；对"偏好演化/泛化"类场景（如 PersonaMem）和通用 SDK 用户，schema/intention 正是价值

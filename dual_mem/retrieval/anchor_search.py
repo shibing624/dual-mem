@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
+
+DEPRECATED (暂不删除)：本模块已被 ``retrieval/hybrid_engine.py`` 的并行召回（语义 / L0 profile /
+L6 graph schema）取代，当前 hybrid / legacy 读路径都不再引用它，仅保留独立单测。后续清理再删。
+
 @description: Multi-path anchor search for the hybrid read flow. Runs the configured retrieval
 paths (semantic / entity / temporal / schema / intention) in parallel and merges results
 into a deduped anchor list with per-path counts. Each path is independent and tolerates

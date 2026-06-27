@@ -121,9 +121,10 @@ class ChromaVectorStore(VectorStore):
         """Batch-fetch nodes by id (with embeddings when stored)."""
         if not node_ids:
             return {}
+        unique_ids = list(dict.fromkeys(node_ids))
         with self._lock:
             result = self.collection.get(
-                ids=list(node_ids),
+                ids=unique_ids,
                 include=["metadatas", "documents", "embeddings"],
             )
         out: dict[str, MemoryNode] = {}

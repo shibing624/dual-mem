@@ -121,6 +121,19 @@ def wants_evolution_history(query: str) -> bool:
 
 _RECENT_RE = re.compile(r"(?:最近|近|过去)\s*(\d+)\s*天")
 _AGO_RE = re.compile(r"(\d+)\s*天前")
+_LAST_MONTH_EN = re.compile(
+    r"\b(?:in\s+the\s+)?(?:last|past|previous)\s+month\b",
+    re.IGNORECASE,
+)
+_LAST_N_DAYS_EN = re.compile(
+    r"\b(?:in\s+the\s+)?(?:last|past)\s+(\d+)\s+days?\b",
+    re.IGNORECASE,
+)
+_YESTERDAY_EN = re.compile(r"\byesterday\b", re.IGNORECASE)
+_LAST_WEEK_EN = re.compile(
+    r"\b(?:last|previous)\s+week\b",
+    re.IGNORECASE,
+)
 
 
 def _day_start(dt: datetime) -> datetime:
@@ -137,12 +150,21 @@ def parse_time_range(query: str, now: datetime | None = None) -> int | None:
 
     if "前天" in query:
         return int((today - timedelta(days=2)).timestamp())
-    if "昨天" in query:
+    if "昨天" in query or _YESTERDAY_EN.search(query):
         return int((today - timedelta(days=1)).timestamp())
     if "今天" in query:
         return int(today.timestamp())
 
+    m = _LAST_N_DAYS_EN.search(query)
+    if m:
+        return int((today - timedelta(days=int(m.group(1)))).timestamp())
+    if _LAST_MONTH_EN.search(query):
+        # Rolling ~30-day window (LME "last month" = prior calendar month + current month so far).
+        return int((today - timedelta(days=30)).timestamp())
+
     monday = today - timedelta(days=today.weekday())
+    if _LAST_WEEK_EN.search(query):
+        return int((monday - timedelta(days=7)).timestamp())
     if "上周" in query or "上星期" in query or "上个星期" in query:
         return int((monday - timedelta(days=7)).timestamp())
     if "这周" in query or "本周" in query or "这个星期" in query:

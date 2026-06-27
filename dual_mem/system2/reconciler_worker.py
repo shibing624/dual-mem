@@ -109,6 +109,8 @@ class ReconcilerWorker:
         new_memories: list[str] = []
         new_meta: list[dict] = []
         nodes_to_remove: list[str] = []
+        memory_at_by_content: dict[str, int] = {}
+        memory_at_candidates: list[int] = []
         for nid in node_ids:
             node = self.factory.vector.get(nid)
             if node is None:
@@ -123,6 +125,12 @@ class ReconcilerWorker:
                 }
             )
             nodes_to_remove.append(nid)
+            if node.memory_at is not None:
+                memory_at_candidates.append(node.memory_at)
+                memory_at_by_content[_norm_content(node.content)] = node.memory_at
+        fallback_memory_at = (
+            min(memory_at_candidates) if memory_at_candidates else None
+        )
 
         if not new_memories:
             return
@@ -164,6 +172,8 @@ class ReconcilerWorker:
             user_id=user_id,
             agent_id=agent_id,
             session_id="",
+            memory_at_by_content=memory_at_by_content,
+            fallback_memory_at=fallback_memory_at,
         )
 
         # Shadow ONLY the fast-write originals whose content a reconcile ADD re-emitted
@@ -203,6 +213,23 @@ class ReconcilerWorker:
                 new=node.to_metadata(),
             )
 
+    def _resolve_memory_at(
+        self,
+        op: ReconcileOp,
+        *,
+        memory_at_by_content: dict[str, int],
+        fallback_memory_at: int | None,
+    ) -> int | None:
+        """Keep session ``memory_at`` on reconcile ADDs (Hy parity for LME QA dates)."""
+        for old_id in op.supersedes:
+            old = self.factory.vector.get(old_id)
+            if old is not None and old.memory_at is not None:
+                return old.memory_at
+        matched = memory_at_by_content.get(_norm_content(op.content))
+        if matched is not None:
+            return matched
+        return fallback_memory_at
+
     async def _apply_ops(
         self,
         ops,
@@ -211,6 +238,8 @@ class ReconcilerWorker:
         user_id: str,
         agent_id: str,
         session_id: str,
+        memory_at_by_content: dict[str, int] | None = None,
+        fallback_memory_at: int | None = None,
     ) -> None:
         """Apply reconcile ops (ADD/SUPERSEDE/DELETE) to the vector store + history log.
 
@@ -251,6 +280,11 @@ class ReconcilerWorker:
                 layer = Layer(op.layer.upper()) if op.layer else Layer.L2_FACT
             except ValueError:
                 layer = Layer.L2_FACT
+            memory_at = self._resolve_memory_at(
+                op,
+                memory_at_by_content=memory_at_by_content or {},
+                fallback_memory_at=fallback_memory_at,
+            )
             new_node = MemoryNode(
                 content=op.content or "",
                 layer=layer,
@@ -262,6 +296,7 @@ class ReconcilerWorker:
                 status=MemoryStatus.ACTIVE,
                 is_latest=True,
                 supersedes=list(op.supersedes),
+                memory_at=memory_at,
                 custom=_reflect_custom(op) or None,
             )
             new_node.embedding = next(emb_iter)

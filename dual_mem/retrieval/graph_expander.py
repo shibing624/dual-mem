@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
+
+DEPRECATED (暂不删除)：本模块已被 ``retrieval/hybrid_engine.py`` 的 L6 正/反向查找 + 演化链展开
+取代，当前 hybrid / legacy 读路径都不再引用它，仅保留独立单测。后续清理再删。
+
 @description: Graph expansion for the hybrid read path: from a list of anchors, surface their 1-hop neighbours.
 For schema anchors we follow DERIVED_FROM to their evidence facts. For fact / identity
 anchors we add timeline neighbours (same session_id ± nearby gmt_created) and same-session

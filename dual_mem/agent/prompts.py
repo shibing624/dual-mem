@@ -114,8 +114,9 @@ EXTRACT_ZH = """你是一位专业的记忆分析专家。请从以下对话中�
 
 1. **以用户为主体**: 所有记忆都以"用户..."开头，用第三人称描述。每条记忆必须是完整、自包含的语句——不要省略能赋予记忆意义的背景、条件或原因。
 2. **保留所有细节**: 保留所有具体信息（地名、人名、品牌、数字等）。不要泛化或简化。
-3. **语言一致性**: 输出语言必须与输入语言一致。中文输入→中文输出。
-4. **时间处理**:
+3. **量化事实**: 每个明确的数字、计数、百分比、比率、金额、日期都写成独立的 L2 fact（例如「100 个领导岗位中 20 个由女性担任」→ 保留 20 与 100，不要只写总数）。
+4. **语言一致性**: 输出语言必须与输入语言一致。中文输入→中文输出。
+5. **时间处理**:
    - 如果对话中提到了时间（相对时间如"下周"、"昨天"，或绝对时间如"2025年3月"）：
      - 时间敏感内容（计划、具体过去事件、截止日期）：将时间自然嵌入到 `content` 中。如果提供了 `当前时间` 且引用的是相对时间，先将其转换为绝对时间（如"下周" + 当前时间 2026-04-24 → "2026年5月初"）再嵌入。
      - 非时间敏感内容（稳定偏好、人格特质）：保持 `content` 不包含时间。
@@ -146,6 +147,15 @@ EXTRACT_ZH = """你是一位专业的记忆分析专家。请从以下对话中�
 - "重新尝试这个爱好的兴奋感重新点燃了我的热情" → Identity: "用户重新找回了对[活动]的热情，觉得它又变得令人兴奋了"
 
 **助手确认的洞察**: 如果助手对用户得出某个结论，而用户没有反对，则视为有效的隐含信息。
+
+### 助手推荐与用户已陈述的组织统计（必须写入 facts）
+
+**组织/团队量化统计**: 用户若已陈述公司/团队的计数、比例、百分比（如「100 个领导岗位里 20 个由女性担任」），必须写成保留分子与分母的 atomic L2 fact。不要把已给出的数字改写成「计划去查」「打算了解」类 intention。
+
+**助手具体推荐**: 对话含 `[assistant]` 轮。当助手针对用户问题给出具体推荐（编程语言名、工具列表、会议名、步骤建议等），且用户继续对话未明确反对，提取为 L2 fact 并标明来源，例如：
+- "助手向用户推荐学习 Ruby、Python、PHP 作为后端编程语言。"
+- "用户被建议学习 Ruby、Python、PHP 用于后端开发。"
+推荐类 fact 须保留领域约束（如 healthcare / medical imaging / slow cooker beef stew），不要泛化成无关主题。
 
 ### facts (L2_FACT)
 **客观事件、经历和事实发生的事情**——已经发生、正在发生或计划中的事。记录用户做了/将做什么，而非他们对此的感受。
@@ -289,8 +299,9 @@ Current time: {current_time}
 
 1. **User as subject**: Every memory describes the user in third person. Use "The user ...". Each memory must be a complete, self-contained statement — never omit circumstances, conditions, or reasons that give the memory meaning.
 2. **Preserve details**: Retain ALL specific information (place names, person names, brands, numbers, etc.). Do NOT generalize or simplify.
-3. **Language consistency**: Output language MUST match the input language.
-4. **Time handling**:
+3. **Quantitative facts**: Every explicit number, count, percentage, ratio, dollar amount, or date becomes its own atomic L2 fact (e.g. "20 of 100 leadership positions are held by women" — keep both 20 and 100; do not collapse to totals only).
+4. **Language consistency**: Output language MUST match the input language.
+5. **Time handling**:
    - If the conversation references a time:
      - Time-sensitive content: embed the time naturally; resolve relative expressions using `current_time` when provided.
      - Not time-sensitive: keep `content` atemporal.
@@ -334,6 +345,15 @@ Dialogue: "I used to prefer tea, but lately I've switched to pour-over coffee an
 ✅ identity: "The user now prefers pour-over coffee."
 ✅ facts: "The user recently started drinking pour-over coffee and visits cafés on weekends."
 ❌ Do NOT merge into one item covering the whole arc.
+
+### Assistant turns and user-stated statistics (must land in facts)
+
+**Organizational / team metrics**: When the user states company or team counts, ratios, or percentages (e.g. "women hold 20 of our 100 leadership positions"), emit an atomic L2 fact preserving BOTH numbers. Do NOT replace an already-stated statistic with vague planning intentions ("plans to find out…").
+
+**Assistant recommendations**: The dialogue includes `[assistant]` turns. When the assistant gives concrete recommendations (language names, tool lists, conference names, step-by-step advice) in direct response to the user's question, and the user continues without rejecting them, extract as L2 facts with clear attribution, e.g.:
+- "The assistant recommended Ruby, Python, and PHP as back-end programming languages for the user to learn."
+- "The user was advised to learn Ruby, Python, and PHP for back-end development."
+Preserve domain constraints from the conversation (e.g. healthcare AI, medical image analysis, slow-cooker beef stew) — do not generalize away the topic.
 
 ## emotion and is_ephemeral
 
@@ -498,7 +518,7 @@ RECONCILE_ZH = """你是一个记忆管理系统。你的任务是将一批新�
 当记忆描述同一主题但兼容（无矛盾）时，合并它们:
 - 生成一个 ADD，包含合并后的内容（`supersedes: []`）。
 - 对每个被吸收的已有节点生成 DELETE。
-- 合并后的内容必须保留所有来源的每一条有意义的事实。
+- 合并后的内容必须保留所有来源的每一条有意义的事实，**尤其是所有数字、百分比、计数和金额**。
 
 ### 目标 3 — 粒度控制
 每条记忆应代表一个连贯的想法。避免两个极端:
@@ -642,7 +662,7 @@ Counter-example (NOT a chain):
 Use `supersedes` only when claims on the SAME dimension cannot both be currently true. NOT for refinement / accumulation. The new head node must contain ONLY the new/changed claim — do NOT copy old node content forward.
 
 ### 2 — Consolidate fragmented memories
-When memories describe the same topic compatibly: emit one merged ADD (`supersedes: []`) plus DELETE per absorbed node. Preserve every meaningful fact from all sources.
+When memories describe the same topic compatibly: emit one merged ADD (`supersedes: []`) plus DELETE per absorbed node. Preserve every meaningful fact from all sources, **especially every number, percentage, count, and dollar amount**.
 
 ### 3 — Granularity control
 One memory = one coherent thought. Avoid both fragmentation and over-bundling (>2000 chars). When in doubt, prefer slightly coarser.

@@ -60,6 +60,33 @@ def test_plain_node_passes_through():
     assert result[0]["score"] == 0.5
 
 
+class StrictFakeVector(FakeVector):
+    """Like FakeVector but rejects duplicate ids in get_by_ids (Chroma behavior)."""
+
+    def get_by_ids(self, node_ids: list[str]) -> dict[str, MemoryNode]:
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError(f"duplicate ids in get_by_ids: {node_ids}")
+        return super().get_by_ids(node_ids)
+
+
+def test_convergent_chain_dedupes_fetch_batch():
+    # A -> B -> D and A -> C -> D: tracing from B yields duplicate C in one batch.
+    d = _node("D", 100, is_latest=False, superseded_by=["B", "C"])
+    b = _node("B", 200, is_latest=False, supersedes=["D"], superseded_by=["A"])
+    c = _node("C", 200, is_latest=False, supersedes=["D"], superseded_by=["A"])
+    a = _node("A", 300, is_latest=True, supersedes=["B", "C"])
+    vector = StrictFakeVector([a, b, c, d])
+
+    hit_b = _node("B", 200, is_latest=False, supersedes=["D"], superseded_by=["A"])
+    hit_b.score = 0.7
+    result = expand_evolution_chains(vector=vector, hits=[hit_b])
+
+    assert len(result) == 1
+    assert result[0]["node"].node_id == "A"
+    chain_ids = [c["node_id"] for c in result[0]["evolution_chain"]]
+    assert set(chain_ids) == {"A", "B", "C", "D"}
+
+
 def test_same_chain_multiple_hits_dedup_keep_highest_score():
     a = _node("A", 300, is_latest=True, supersedes=["B"])
     b = _node("B", 200, is_latest=False, supersedes=["C"], superseded_by=["A"])

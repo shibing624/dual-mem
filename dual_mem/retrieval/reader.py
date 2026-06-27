@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: Async Reader. Default ``reader_mode=hybrid`` runs anchor + fusion pipeline
-(QueryUnderstanding → AnchorSearch 5 paths → GraphExpander 1-hop → FusionScorer),
-then splits into profile/proactive/normal routes and walks the evolution chain.
-No LLM on read; query embedding + heuristic QU only. ``legacy`` keeps three-route
-vector recall + BM25/RRF rerank on the normal route.
+@description: Async Reader. Default ``reader_mode=hybrid`` runs the hybrid pipeline
+(semantic recall + in-pool BM25 rerank + graph evidence fusion, L0/L6 profile, L4 in
+normal). ``legacy`` keeps three-route vector recall + BM25/RRF rerank baseline.
 """
 import asyncio
 import logging
@@ -15,10 +13,8 @@ import time
 from dual_mem.isolation import build_filter
 from dual_mem.registry import ComponentFactory
 from dual_mem.retrieval import bm25, rrf
-from dual_mem.retrieval.anchor_search import AnchorNode, AnchorSearchEngine
 from dual_mem.retrieval.evolution import expand_evolution_chains
-from dual_mem.retrieval.fusion_scorer import FusionScorer
-from dual_mem.retrieval.graph_expander import GraphExpander
+from dual_mem.retrieval.hybrid_engine import search_hybrid
 from dual_mem.retrieval.intent import (
     INTENT_WEIGHTS_2CHANNEL,
     classify_intent,
@@ -42,19 +38,6 @@ _IDENTITY_VALS = {Layer.L0_BASIC_INFO.value, Layer.L4_IDENTITY.value}
 _SCHEMA_VALS = {Layer.L6_SCHEMA.value}
 _PROFILE_VALS = _IDENTITY_VALS | _SCHEMA_VALS
 _PROACTIVE_VALS = {Layer.L7_INTENTION.value}
-
-# Default vector-store layer set when QueryUnderstanding has no opinion. L6 is excluded
-# here because schemas are queried via the graph path; L7 is excluded because the proactive
-# route is opt-in via intention_limit>0 (and also goes through graph).
-_DEFAULT_VDB_LAYERS = [
-    Layer.L0_BASIC_INFO,
-    Layer.L1_RAW,
-    Layer.L2_FACT,
-    Layer.L3_SUMMARY,
-    Layer.L4_IDENTITY,
-    Layer.L5_KNOWLEDGE,
-]
-
 
 def _profile_quota_select(
     items: list[dict],
@@ -106,12 +89,6 @@ class Reader:
     def __init__(self, *, factory: ComponentFactory):
         self.factory = factory
         self.reconsolidation = ReconsolidationHook(factory=factory)
-        self.anchor_engine = AnchorSearchEngine(factory=factory)
-        self.expander = GraphExpander(factory=factory)
-        self.fusion = FusionScorer(cache=factory.cache)
-        # Handle to the most recent fire-and-forget reconsolidation task. Callers (e.g.
-        # MemoryClient.search in per_write mode) can await this BEFORE draining the
-        # reconsolidation queue, so the drain never races ahead of its own enqueue.
         self.last_reconsolidation_task: asyncio.Task | None = None
 
     async def search(
@@ -252,178 +229,46 @@ class Reader:
         trace: ReadResult | None = None,
         understanding: QueryUnderstanding | None = None,
     ) -> SearchMemories:
-        """Hybrid read flow: QU → Anchor 5 paths → GraphExpander → Fusion → split into routes."""
+        """Hybrid read flow: semantic recall + in-pool BM25 rerank + graph evidence fusion."""
         u = understanding or understand(query)
         if created_after is None and u.time_from is not None:
             created_after = u.time_from
 
-        # Route the query embedding through the coalescing queue: concurrent searches
-        # (multiple workers in flight) get batched into one embeddings request instead of
-        # each firing a separate single-text round-trip at the endpoint.
         embedding = await self.factory.embed.embed_queued(query)
-
-        # Multi-path anchors. QU-suggested layers PLUS the always-on profile layers
-        # (L0/L4) — profile content must be reachable on every query, intent classification
-        # is just a hint. The schema path queries the graph store separately.
-        suggested = list(u.target_layers) if u.target_layers else []
-        target_layers: list[Layer] = []
-        seen_layers: set[Layer] = set()
-        for layer in [*suggested, *_DEFAULT_VDB_LAYERS]:
-            if layer not in seen_layers:
-                seen_layers.add(layer)
-                target_layers.append(layer)
-        anchor_result = await self.anchor_engine.search(
-            query=query,
-            query_embedding=embedding,
-            understanding=u,
-            app_ids=app_ids,
-            user_id=user_id,
-            agent_ids=agent_ids,
-            session_ids=session_ids,
-            layers=target_layers,
-            created_after=created_after,
-            intention_enabled=intention_limit > 0,
-            recall_limit=limit,
-        )
-        if trace is not None:
-            trace.anchor_path_counts = dict(anchor_result.path_counts)
-            trace.anchor_count = len(anchor_result.anchors)
-        try:
-            self.factory.cache.log_pipeline(
-                request_id=request_id,
-                stage="READ_ANCHOR",
-                payload={
-                    "path_counts": dict(anchor_result.path_counts),
-                    "anchor_count": len(anchor_result.anchors),
-                },
-            )
-        except Exception:
-            pass
-
-        # 1-hop graph expansion from the merged anchor list.
-        expansion = self.expander.expand(
-            anchors=anchor_result.anchors, app_ids=app_ids, user_id=user_id
-        )
-        if trace is not None:
-            trace.expanded_count = len(expansion.expanded)
-            trace.edge_counts = dict(expansion.edge_counts)
-        try:
-            self.factory.cache.log_pipeline(
-                request_id=request_id,
-                stage="READ_EXPAND",
-                payload={
-                    "expanded_count": len(expansion.expanded),
-                    "edge_counts": dict(expansion.edge_counts),
-                },
-            )
-        except Exception:
-            pass
-
-        all_anchors: list[AnchorNode] = list(anchor_result.anchors) + list(expansion.expanded)
-        activated_schema_ids = {s.node_id for s in anchor_result.activated_schemas}
-        # Headroom above `limit`: the scored pool feeds both the normal route ([:limit])
-        # and the profile route, and loses some to grouping/evolution dedup. Keep the
-        # 30 floor for small limits; widen for large recall requests (e.g. benchmarks).
-        fusion_cap = max(self.fusion.config.max_results, limit * 2)
-        scored = self.fusion.score_and_rank(
-            anchors=all_anchors,
-            activated_schema_ids=activated_schema_ids,
-            max_results=fusion_cap,
-        )
-        try:
-            self.factory.cache.log_pipeline(
-                request_id=request_id,
-                stage="READ_FUSION",
-                payload={
-                    "scored_count": len(scored),
-                    "top_score": round(scored[0].final_score, 4) if scored else 0.0,
-                },
-            )
-        except Exception:
-            pass
-
-        # Map ScoredNode → internal item dict so evolution_chain expansion stays uniform.
-        items: list[dict] = [
-            {"node": s.node, "score": s.final_score} for s in scored
-        ]
-        deduped = expand_evolution_chains(vector=self.factory.vector, hits=[it["node"] for it in items])
-        try:
-            chain_count = sum(1 for it in deduped if it.get("evolution_chain"))
-            self.factory.cache.log_pipeline(
-                request_id=request_id,
-                stage="READ_EVOLUTION",
-                payload={
-                    "deduped_count": len(deduped),
-                    "with_chain_count": chain_count,
-                },
-            )
-        except Exception:
-            pass
-        # expand_evolution_chains returns full item dicts; align ordering with the original `items`.
-        deduped_by_id = {it["node"].node_id: it for it in deduped}
-        ordered: list[dict] = []
-        seen: set[str] = set()
-        for it in items:
-            nid = it["node"].node_id
-            if nid in seen:
-                continue
-            seen.add(nid)
-            entry = deduped_by_id.get(nid, it)
-            entry["score"] = max(entry.get("score", 0.0), it["score"])
-            ordered.append(entry)
-
-        # FACTUAL/NAVIGATIONAL queries (counting, fact-lookup, exact-match) should not be
-        # diluted by System2-derived L6 schema / L7 intention nodes — drop them so the
-        # top-k budget goes entirely to raw facts. Only CONCEPTUAL (how/why/style) keeps them.
         suppress_derived = (
             self.factory.settings.reader_suppress_derived_on_factual
             and u.intent in ("FACTUAL", "NAVIGATIONAL")
         )
-
-        # Split into routes by layer.
-        profile_items: list[dict] = []
-        proactive_items: list[dict] = []
-        normal_items: list[dict] = []
-        for it in ordered:
-            lv = it["node"].layer.value
-            if suppress_derived and lv in (_SCHEMA_VALS | _PROACTIVE_VALS):
-                continue
-            if lv in _PROFILE_VALS:
-                profile_items.append(it)
-            elif lv in _PROACTIVE_VALS:
-                proactive_items.append(it)
-            else:
-                normal_items.append(it)
-
-        # Per-route trimming (mirror legacy thresholds for contract compatibility).
-        effective_profile_limit = profile_limit if profile_limit > 0 else _PROFILE_FULL
-        profile_items = [it for it in profile_items if it["score"] >= profile_min_score]
-        profile_items = _profile_quota_select(
-            profile_items, effective_profile_limit, _IDENTITY_VALS, _SCHEMA_VALS
+        memories = await search_hybrid(
+            factory=self.factory,
+            query=query,
+            query_embedding=embedding,
+            app_ids=app_ids,
+            user_id=user_id,
+            agent_ids=agent_ids,
+            session_ids=session_ids,
+            limit=limit,
+            min_score=min_score,
+            profile_limit=profile_limit,
+            profile_min_score=profile_min_score,
+            intention_limit=intention_limit,
+            created_after=created_after,
+            suppress_derived=suppress_derived,
         )
-        normal_items = [it for it in normal_items if it["score"] >= min_score][:limit]
-        proactive_items = (
-            [it for it in proactive_items if it["score"] >= min_score][:intention_limit]
-            if intention_limit > 0
-            else []
+        if trace is not None:
+            trace.final_count = (
+                len(memories.profile) + len(memories.proactive) + len(memories.normal)
+            )
+        self.factory.cache.log_pipeline(
+            request_id=request_id,
+            stage="READ_HYBRID",
+            payload={
+                "profile": len(memories.profile),
+                "normal": len(memories.normal),
+                "proactive": len(memories.proactive),
+            },
         )
-
-        logger.info(
-            "read_hybrid user=%s anchors=%d expanded=%d scored=%d profile=%d normal=%d proactive=%d",
-            user_id,
-            len(anchor_result.anchors),
-            len(expansion.expanded),
-            len(scored),
-            len(profile_items),
-            len(normal_items),
-            len(proactive_items),
-        )
-
-        return SearchMemories(
-            profile=[self._item_to_memory(it) for it in profile_items],
-            proactive=[self._item_to_memory(it) for it in proactive_items],
-            normal=[self._item_to_memory(it) for it in normal_items],
-        )
+        return memories
 
     # ---- Legacy (BM25+RRF baseline) -------------------------------------------
 

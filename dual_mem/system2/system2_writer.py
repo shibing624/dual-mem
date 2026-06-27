@@ -71,11 +71,14 @@ class System2Writer:
             agent_context=agent_context,
         )
 
-        # Always enqueue an S2 cognition task; reconcile_queue was already populated
-        # inside MemAgent.run when fast-write happened.
-        self.factory.cache.enqueue_s2_task(user_id=user_id, app_id=app_id, agent_id=agent_id)
-
+        # Hy parity: manual mode does not enqueue S2 on write (explicit digest() only).
+        # per_write / scheduled keep the sqlite queue for background/scheduled drains.
         mode = self.factory.settings.system2_trigger_mode
+        if mode in (_PER_WRITE, _SCHEDULED):
+            self.factory.cache.enqueue_s2_task(
+                user_id=user_id, app_id=app_id, agent_id=agent_id
+            )
+
         if mode == _PER_WRITE:
             task = asyncio.create_task(
                 self._digest_user_safely(app_id=app_id, user_id=user_id, agent_id=agent_id)
@@ -115,6 +118,24 @@ class System2Writer:
             "reconsolidation_tasks": 0.0,
         }
         processed = 0
+        drained_pairs: set[tuple[str, str, str]] = set()
+
+        # Manual Hy parity: reconcile pending scopes even without s2 queue entries.
+        for scope in cache.list_pending_reconcile_scopes():
+            key = (
+                scope["app_id"],
+                scope["user_id"],
+                scope.get("agent_id") or "",
+            )
+            if key in drained_pairs:
+                continue
+            drained_pairs.add(key)
+            await self._digest_user_safely(
+                app_id=key[0], user_id=key[1], agent_id=key[2]
+            )
+            self.processed_pairs.add((key[0], key[1]))
+            processed += 1
+
         while True:
             task = cache.dequeue_s2_task()
             if task is None:
@@ -122,14 +143,20 @@ class System2Writer:
             if task.get("task_type", "cognition") == "reconsolidation":
                 await self._run_reconsolidation_safely(task)
                 self.last_digest_stats["reconsolidation_tasks"] += 1
-            else:
+                processed += 1
+                continue
+            key = (
+                task["app_id"],
+                task["user_id"],
+                task.get("agent_id") or "",
+            )
+            if key not in drained_pairs:
+                drained_pairs.add(key)
                 await self._digest_user_safely(
-                    app_id=task["app_id"],
-                    user_id=task["user_id"],
-                    agent_id=task.get("agent_id") or "",
+                    app_id=key[0], user_id=key[1], agent_id=key[2]
                 )
-                self.processed_pairs.add((task["app_id"], task["user_id"]))
-            processed += 1
+                processed += 1
+            self.processed_pairs.add((task["app_id"], task["user_id"]))
         return processed
 
     async def aclose(self) -> None:

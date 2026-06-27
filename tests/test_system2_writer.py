@@ -14,7 +14,11 @@ def _pending_count(factory) -> int:
 
 def _dual_factory(tmp_storage, fake_embed):
     return ComponentFactory(
-        settings=Settings(mode="dual", storage_dir=tmp_storage),
+        settings=Settings(
+            mode="dual",
+            storage_dir=tmp_storage,
+            system2_trigger_mode="per_write",
+        ),
         embed=fake_embed,
         llm=FakeLLMClient(responses={"json": []}),
     )

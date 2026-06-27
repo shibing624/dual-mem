@@ -81,6 +81,15 @@ class FakeLLMClient:
                 user=user,
             )
         if "记忆分析专家" in system or "memory analyst" in system:
+            if "extract" not in self.responses:
+                return {
+                    "facts": [{"content": user, "tags": []}] if user.strip() else [],
+                    "identity": [],
+                    "intentions": [],
+                    "is_ephemeral": False,
+                    "emotion": {"valence": 0.0, "arousal": 0.0, "dominant_emotion": None},
+                    "basic_info": {},
+                }
             default_extract = {
                 "facts": [],
                 "identity": [],

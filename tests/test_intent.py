@@ -55,3 +55,24 @@ def test_parse_time_range_recent_n_days():
 
 def test_parse_time_range_none_when_no_time_word():
     assert parse_time_range("讲讲机器学习") is None
+
+
+def test_parse_time_range_last_month_en_rolling_30d():
+    now = datetime(2023, 5, 30, 12, 0, 0)
+    ts = parse_time_range("How many plants did I acquire in the last month?", now=now)
+    expected = datetime(2023, 4, 30, 0, 0, 0)
+    assert ts == int(expected.timestamp())
+
+
+def test_parse_time_range_last_n_days_en():
+    now = datetime(2023, 5, 30, 12, 0, 0)
+    ts = parse_time_range("events in the last 7 days", now=now)
+    expected = datetime(2023, 5, 23, 0, 0, 0)
+    assert ts == int(expected.timestamp())
+
+
+def test_parse_time_range_yesterday_en():
+    now = datetime(2023, 5, 30, 12, 0, 0)
+    ts = parse_time_range("what happened yesterday", now=now)
+    expected = datetime(2023, 5, 29, 0, 0, 0)
+    assert ts == int(expected.timestamp())
