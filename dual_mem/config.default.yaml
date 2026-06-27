@@ -51,7 +51,7 @@ llm_completion_reserve: 4096
 chars_per_token: 2.5
 
 # ---------------------------------------------------------------------------
-# Embedding（向量检索锚点；超长文本分块 embed 后 mean-pool）
+# Embedding（向量检索锚点；超长文本 head 截断到预算长度后 embed）
 # ---------------------------------------------------------------------------
 
 embed_base_url: https://api.openai.com/v1

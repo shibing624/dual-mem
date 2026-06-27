@@ -84,7 +84,7 @@ LLM_CHARS_PER_TOKEN = CHARS_PER_TOKEN
 LLM_CONTEXT_WINDOW = 32768
 LLM_COMPLETION_RESERVE = 4096
 
-# Embed input chunk budget (tokens per API call before split + mean-pool).
+# Embed input budget (tokens per API call; longer inputs are head-truncated).
 EMBED_MAX_TOKENS = 8000
 EMBED_RETRY_ATTEMPTS = 3
 EMBED_RETRY_BASE_DELAY = 0.5
@@ -124,7 +124,7 @@ class Settings(BaseSettings):
     # Vector dimension — set to your embedding model's native output size (e.g. 1536, 1024).
     embed_dim: int = 1536
     embed_timeout: int = 30
-    # Max input tokens per embed API call; longer texts are split + mean-pooled.
+    # Max input tokens per embed API call; longer texts are head-truncated (L1 anchors only).
     embed_max_tokens: int = EMBED_MAX_TOKENS
     embed_retry_attempts: int = EMBED_RETRY_ATTEMPTS
     embed_retry_base_delay: float = EMBED_RETRY_BASE_DELAY

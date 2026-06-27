@@ -1,12 +1,10 @@
 import json
-import math
 
 import httpx
-import pytest
 import respx
 
 from dual_mem.config import CHARS_PER_TOKEN, EMBED_MAX_TOKENS
-from dual_mem.providers.embedding import EmbedService, _chunk_text, _mean_pool_vectors
+from dual_mem.providers.embedding import EmbedService
 from dual_mem.providers.usage import UsageEvent
 
 
@@ -104,7 +102,7 @@ async def test_embed_batch_usage_callback():
 
 
 @respx.mock
-async def test_embed_batch_long_text_chunks_and_pools():
+async def test_embed_batch_long_text_head_truncated():
     max_chars = int(EMBED_MAX_TOKENS * CHARS_PER_TOKEN)
     long_text = "x" * (max_chars + 2000)
     captured: dict = {}
@@ -127,7 +125,11 @@ async def test_embed_batch_long_text_chunks_and_pools():
         chars_per_token=CHARS_PER_TOKEN,
     )
     vecs = await svc.embed_batch([long_text, "hi"])
-    assert len(captured["json"]["input"]) >= 3
+    # Head-truncated, NOT chunked: exactly one input per text, no extra chunk rows.
+    sent = captured["json"]["input"]
+    assert len(sent) == 2
+    assert len(sent[0]) == max_chars
+    assert sent[1] == "hi"
     assert len(vecs) == 2
     assert len(vecs[0]) == 4
 
@@ -142,9 +144,3 @@ def test_embed_max_tokens_derived_char_budget():
     )
     assert svc.input_max_chars == 20480
     assert svc.input_max_tokens == 8192
-
-
-def test_mean_pool_helpers():
-    pooled = _mean_pool_vectors([[1.0, 0.0], [0.0, 1.0]])
-    assert pooled == pytest.approx([math.sqrt(0.5), math.sqrt(0.5)])
-    assert _chunk_text("abc", 10) == ["abc"]
