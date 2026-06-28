@@ -104,6 +104,9 @@ class MemoryClient:
         self._build_writer()
         self.reader = Reader(factory=self.factory)
         self._write_locks = LockRegistry()
+        self._coding_writer = None
+        if self.settings.coding_enabled and self.factory.llm is not None:
+            self._init_coding_writer()
 
     @classmethod
     def from_config(
@@ -192,6 +195,33 @@ class MemoryClient:
             return self._user_write_lock(app_id, user_id)
         return contextlib.nullcontext()
 
+    def _init_coding_writer(self) -> None:
+        """Create the coding memory subsystem (separate store + extractor + writer)."""
+        import os
+        from dual_mem.coding.store import CodingMemoryStore
+        from dual_mem.coding.extractor import CodingMemoryExtractor
+        from dual_mem.coding.reconciler import CodingMemoryReconciler
+        from dual_mem.coding.writer import CodingWriter
+
+        db_path = self.settings.coding_db_path or os.path.join(
+            self.settings.storage_dir, "coding_memory.db"
+        )
+        store = CodingMemoryStore(
+            db_path=db_path,
+            vector=self.factory.vector,
+            embed=self.factory.embed,
+        )
+        extractor = CodingMemoryExtractor(
+            llm=self.factory.llm,
+            tool_result_max_bytes=self.settings.coding_tool_result_max_bytes,
+        )
+        self._coding_writer = CodingWriter(
+            store=store,
+            extractor=extractor,
+            reconciler=CodingMemoryReconciler(),
+            llm=self.factory.llm,
+        )
+
     async def add(
         self,
         *,
@@ -223,6 +253,27 @@ class MemoryClient:
         user_queries: list[str] = []
         agent_context: str | None = None
         if messages:
+            # Coding path: check for tool messages before chat normalization
+            if self._coding_writer:
+                raw_dicts = [
+                    m if isinstance(m, dict) else {"role": m.role, "content": m.content}
+                    for m in messages
+                ]
+                from dual_mem.coding.preproc import has_any_tool_message, strip_tool_messages
+                if has_any_tool_message(raw_dicts):
+                    coding_result = await self._coding_writer.write(
+                        raw_dicts, user_id=user_id, agent_id=agent_id, session_id=session_id,
+                    )
+                    if coding_result is not None:
+                        mids = coding_result.get("memory_ids") or []
+                        return WriteResult(
+                            success=True,
+                            memory_id=mids[0] if mids else "",
+                            request_id=request_id,
+                            processing_time_ms=round((time.perf_counter() - start) * 1000, 2),
+                        )
+                    # Not coding → strip tool messages so chat path sees clean dialogue
+                    messages = strip_tool_messages(raw_dicts)
             normalized = _normalize_messages(messages)
             # Host-injected role=system turns (e.g. "You are a helpful assistant") are not
             # user memory — drop before L1/extract. Extract LLM's own EXTRACT_* template is
@@ -505,6 +556,16 @@ class MemoryClient:
             success=True, processed=processed, cores_created=cores, timing=timing
         )
 
+    async def search_coding(
+        self, *, query: str, user_id: str, agent_id: str = "default_agent", top_k: int = 10
+    ) -> list[dict]:
+        """Search coding memories (tool-use / engineering memories)."""
+        if not self._coding_writer:
+            return []
+        return await self._coding_writer.search(
+            query=query, user_id=user_id, agent_id=agent_id, top_k=top_k,
+        )
+
     async def aclose(self) -> None:
         """Release dual-mode background resources. Idempotent.
 
@@ -514,6 +575,8 @@ class MemoryClient:
         """
         if isinstance(self.writer, System2Writer):
             await self.writer.aclose()
+        if self._coding_writer is not None:
+            self._coding_writer.store.close()
         self.factory.close()
 
 

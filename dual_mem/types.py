@@ -84,6 +84,7 @@ class MemoryNode:
     superseded_by: list[str] = field(default_factory=list)
     is_latest: bool = True
     speculate: str | None = None
+    owner: str = ""  # "user" | "agent" — who said it; empty = unknown
     memory_at: int | None = None
     gmt_created: int = field(default_factory=_now)
     gmt_modified: int | None = None
@@ -112,6 +113,7 @@ class MemoryNode:
             "superseded_by": _LIST_SEP.join(self.superseded_by),
             "is_latest": self.is_latest,
             "speculate": self.speculate if self.speculate is not None else "",
+            "owner": self.owner,
             "memory_at": self.memory_at if self.memory_at is not None else -1,
             "gmt_created": self.gmt_created,
             "gmt_modified": self.gmt_modified if self.gmt_modified is not None else -1,
@@ -144,6 +146,7 @@ class MemoryNode:
             superseded_by=_split(meta["superseded_by"]),
             is_latest=meta["is_latest"],
             speculate=speculate if speculate != "" else None,
+            owner=meta.get("owner", ""),
             memory_at=memory_at if memory_at != -1 else None,
             gmt_created=meta["gmt_created"],
             gmt_modified=gmt_modified if gmt_modified != -1 else None,

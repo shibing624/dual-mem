@@ -114,7 +114,8 @@ class ComponentFactory:
                 model=self.settings.llm_model,
                 timeout=self.settings.llm_timeout,
                 json_mode=self.settings.llm_json_mode,
-                extra_body=self.settings.llm_extra_body or None,
+                extra_body=self.settings.extra_body or None,
+                extra_headers=self.settings.extra_headers or None,
                 input_max_chars=self.settings.llm_input_max_chars,
             )
         return self._llm

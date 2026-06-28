@@ -263,6 +263,7 @@ class LLMClient:
         timeout: int = 60,
         json_mode: bool = True,
         extra_body: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
         usage_callback: UsageCallback | None = None,
         input_max_chars: int = 0,
     ):
@@ -271,7 +272,10 @@ class LLMClient:
         self.extra_body = extra_body or {}
         self.usage_callback = usage_callback
         self.input_max_chars = input_max_chars
-        self.client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        self.client = AsyncOpenAI(
+            base_url=base_url, api_key=api_key, timeout=timeout,
+            default_headers=extra_headers or None,
+        )
 
     def _content_char_budget(self, build_system: Callable[[str], str]) -> int:
         """Per-chunk char budget when system+user both embed the same content."""

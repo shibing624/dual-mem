@@ -44,6 +44,7 @@ class MemAgent:
             llm=llm,
             max_content_chars=int(self.settings.extract_max_content_tokens * cpt),
             retry_on_failure=self.settings.extract_retry_on_failure,
+            few_shot_enabled=self.settings.extract_few_shot_enabled,
         )
         self.summarizer = Summarizer(
             llm=llm,
@@ -56,6 +57,7 @@ class MemAgent:
             enable_search_query=self.settings.reconcile_search_query,
             policy=self.settings.reconcile_policy,
             weak_candidate_score=self.settings.reconcile_weak_candidate_score,
+            non_destructive=self.settings.reconcile_non_destructive,
         )
         self.gate = AttentionalGate(
             threshold=self.settings.gate_threshold,
@@ -68,6 +70,33 @@ class MemAgent:
                 shortcircuit_reject_novelty=self.settings.gate_shortcircuit_reject_novelty,
             ),
         )
+        # Per-user history ring buffer for extract coreference.
+        self._history: dict[str, list[str]] = {}
+
+    def _history_key(self, app_id: str, user_id: str) -> str:
+        return f"{app_id}::{user_id}"
+
+    def _get_history_context(self, app_id: str, user_id: str) -> str:
+        """Format recent L1_RAW content as coreference context for the extractor."""
+        n = self.settings.extract_history_turns
+        if n <= 0:
+            return ""
+        buf = self._history.get(self._history_key(app_id, user_id)) or []
+        if not buf:
+            return ""
+        recent = buf[-n:]
+        return "\n## 最近对话历史（用于共指消解，不是当前要提取的内容）\n" + "\n---\n".join(recent) + "\n"
+
+    def _append_history(self, app_id: str, user_id: str, content: str) -> None:
+        """Record this write's content for future coreference (ring buffer, capped)."""
+        n = self.settings.extract_history_turns
+        if n <= 0:
+            return
+        key = self._history_key(app_id, user_id)
+        buf = self._history.setdefault(key, [])
+        buf.append(content[:2000])  # cap each entry to avoid unbounded growth
+        if len(buf) > n * 2:
+            self._history[key] = buf[-n:]
 
     async def run(
         self,
@@ -130,6 +159,7 @@ class MemAgent:
                 content=content,
                 current_time=current_time,
             )
+            _hist = self._get_history_context(app_id, user_id)
             extracted = await self.extractor.extract(
                 content=content,
                 current_time=current_time,
@@ -138,7 +168,9 @@ class MemAgent:
                 agent_id=agent_id,
                 session_id=session_id,
                 include_gate=include_gate,
+                history_context=_hist,
             )
+            self._append_history(app_id, user_id, content)
             if shortcircuited is not None:
                 gate_result = shortcircuited
                 if not (
@@ -175,6 +207,7 @@ class MemAgent:
                 content=content,
                 current_time=current_time,
             )
+            _hist = self._get_history_context(app_id, user_id)
             extracted = await self.extractor.extract(
                 content=content,
                 current_time=current_time,
@@ -182,7 +215,9 @@ class MemAgent:
                 user_id=user_id,
                 agent_id=agent_id,
                 session_id=session_id,
+                history_context=_hist,
             )
+            self._append_history(app_id, user_id, content)
 
         try:
             self.cache.log_pipeline(
@@ -532,6 +567,7 @@ class MemAgent:
                     "layer": "L4_IDENTITY",
                     "tags": item.get("tags") or [],
                     "speculate": item.get("speculate"),
+                    "owner": item.get("owner", ""),
                 }
             )
         for fact in extracted.get("facts") or []:
@@ -545,6 +581,7 @@ class MemAgent:
                     "layer": "L2_FACT",
                     "tags": fact.get("tags") or [],
                     "speculate": fact.get("speculate"),
+                    "owner": fact.get("owner", ""),
                 }
             )
         return texts, metas
@@ -599,6 +636,7 @@ class MemAgent:
                     status=MemoryStatus.ACTIVE,
                     is_latest=True,
                     speculate=meta.get("speculate"),
+                    owner=meta.get("owner", ""),
                     memory_at=memory_at,
                     custom=_emotion_custom(emotion) or None,
                 )

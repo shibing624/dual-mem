@@ -84,6 +84,7 @@ class Reconciler:
         enable_search_query: bool = False,
         policy: str = "balanced",
         weak_candidate_score: float = 0.5,
+        non_destructive: bool = False,
     ):
         self.llm = llm
         self.embed = embed
@@ -91,6 +92,10 @@ class Reconciler:
         self.enable_search_query = enable_search_query
         self.policy = policy
         self.weak_candidate_score = weak_candidate_score
+        # non_destructive: reconcile 只做增量 ADD，永不 supersede/DELETE
+        # 原始 fact。开启后 _apply_non_destructive 在 _parse_ops 输出上硬剥离 supersedes
+        # 和 DELETE，保证记忆库只增不减，计数/聚合类问题零丢事实风险。
+        self.non_destructive = non_destructive
 
     async def reconcile(
         self,
@@ -242,6 +247,8 @@ class Reconciler:
                 logger.warning("reconcile JSON parse failed, retrying: %s", exc)
                 continue
             ops = self._parse_ops(data)
+            if self.non_destructive:
+                ops = self._apply_non_destructive(ops)
             if ops or data in ([], {}):
                 logger.debug(
                     "reconcile candidates=%d ops=%d supersedes=%d",
@@ -251,6 +258,35 @@ class Reconciler:
                 return ops
         logger.warning("reconcile produced no parseable ops after 3 retries")
         return []
+
+    def _apply_non_destructive(self, ops: list[ReconcileOp]) -> list[ReconcileOp]:
+        """Strip all supersedes/DELETE — make reconcile purely additive.
+
+        Original facts stay ACTIVE forever; the reconciler may still ADD enriched/summary
+        memories alongside originals, but never modifies or removes existing ones. This
+        guarantees zero fact-loss on counting/aggregation questions where balanced mode
+        would merge distinct events into one summary and drop amounts.
+        """
+        result: list[ReconcileOp] = []
+        stripped = 0
+        dropped = 0
+        for op in ops:
+            if op.op == "DELETE":
+                dropped += 1
+                continue
+            if op.supersedes:
+                stripped += 1
+                op.supersedes = []
+                op.supersede_reason = ""
+                op.update_type = "SUPPLEMENT"
+            result.append(op)
+        if stripped or dropped:
+            logger.info(
+                "non_destructive reconcile: stripped %d supersedes, dropped %d DELETEs",
+                stripped,
+                dropped,
+            )
+        return result
 
     async def _gen_search_queries(self, new_memories: list[str]) -> list[str]:
         """Ask the LLM for extra recall queries derived from the new memories."""

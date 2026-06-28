@@ -102,7 +102,7 @@ Output strict JSON only, nothing else:
 # =====================================================================
 
 EXTRACT_ZH = """你是一位专业的记忆分析专家。请从以下对话中提取关于用户的结构化信息。
-
+{history_context}
 对话内容:
 ---
 {content}
@@ -226,6 +226,10 @@ EXTRACT_ZH = """你是一位专业的记忆分析专家。请从以下对话中�
 
 每条 identity 和 fact 记忆必须包含 `tags` 字段——1 到 3 个小写主题关键词（如 "音乐"、"旅行"、"工作"、"美食"、"健康"、"社交"、"技术"）。
 
+## owner 字段（identity 和 facts 每条必填）
+
+`owner` 标记该信息的来源：`"user"`（用户自己说的）或 `"agent"`（助手说的/推荐的）。如果信息是用户转述他人说的，也算 `"user"`。
+
 ## 输出格式
 
 只输出 JSON 对象，不要其它文字：
@@ -235,10 +239,10 @@ EXTRACT_ZH = """你是一位专业的记忆分析专家。请从以下对话中�
   "is_ephemeral": false,
   "emotion": {{"valence": 0.0, "arousal": 0.0, "dominant_emotion": null}},
   "identity": [
-    {{"content": "用户...", "speculate": null, "tags": ["..."]}}
+    {{"content": "用户...", "owner": "user", "speculate": null, "tags": ["..."]}}
   ],
   "facts": [
-    {{"content": "用户...", "speculate": null, "tags": ["..."]}}
+    {{"content": "用户...", "owner": "user", "speculate": null, "tags": ["..."]}}
   ],
   "intentions": [
     {{"content": "用户...", "trigger_time_description": null, "tags": ["..."]}}
@@ -286,8 +290,106 @@ EXTRACT_RETRY_APPEND_EN = """
 
 The previous output could not be parsed as JSON. This time output **exactly one JSON object** with no prose before/after, no Markdown code fences. The first character must be `{{` and the last `}}`."""
 
-EXTRACT_EN = """You are an expert memory analyst. Extract structured user information from the conversation below.
+# ---- Few-shot examples (controlled by extract_few_shot_enabled) ----
 
+EXTRACT_FEW_SHOT_ZH = """
+
+## 示例
+
+### 示例 1（偏好 + 事件，注意 owner 和拆分）
+对话：
+[user] 我上周参加了 Bike-a-Thon 慈善骑行，我们队筹了 5000 美元给癌症研究。之前还组织过一次瑜伽慈善活动，筹了 600 美元给动物收容所。对了，我最近开始喜欢手冲咖啡了，以前只喝茶。
+[assistant] 那很棒！手冲咖啡确实很有仪式感。
+
+输出：
+```json
+{{
+  "is_ephemeral": false,
+  "emotion": {{"valence": 0.6, "arousal": 0.4, "dominant_emotion": "开心"}},
+  "identity": [
+    {{"content": "用户最近开始喜欢手冲咖啡。", "owner": "user", "speculate": null, "tags": ["咖啡", "偏好"]}},
+    {{"content": "用户以前只喝茶。", "owner": "user", "speculate": null, "tags": ["茶", "偏好"]}}
+  ],
+  "facts": [
+    {{"content": "用户参加了 Bike-a-Thon 慈善骑行，队伍筹了 5000 美元给癌症研究。", "owner": "user", "speculate": null, "tags": ["慈善", "运动"]}},
+    {{"content": "用户组织过瑜伽慈善活动，筹了 600 美元给动物收容所。", "owner": "user", "speculate": null, "tags": ["慈善", "瑜伽"]}}
+  ],
+  "intentions": [],
+  "basic_info": {{}}
+}}
+```
+
+### 示例 2（助手推荐，注意 owner=agent）
+对话：
+[user] 我想学后端开发，有什么推荐吗？
+[assistant] 建议从 Python 或 Ruby 开始，它们对新手友好。
+
+输出：
+```json
+{{
+  "is_ephemeral": false,
+  "emotion": {{"valence": 0.3, "arousal": 0.2, "dominant_emotion": null}},
+  "identity": [],
+  "facts": [
+    {{"content": "助手向用户推荐学习 Python 和 Ruby 作为后端开发语言。", "owner": "agent", "speculate": null, "tags": ["编程", "学习"]}}
+  ],
+  "intentions": [
+    {{"content": "用户想学后端开发。", "trigger_time_description": null, "tags": ["编程", "学习"]}}
+  ],
+  "basic_info": {{}}
+}}
+```"""
+
+EXTRACT_FEW_SHOT_EN = """
+
+## Examples
+
+### Example 1 (preferences + events, note owner and splitting)
+Conversation:
+[user] I did a Bike-a-Thon last week, my team raised $5000 for cancer research. I also organized a charity yoga event before that, raised $600 for an animal shelter. Oh, I've gotten into pour-over coffee lately, used to only drink tea.
+[assistant] That's awesome! Pour-over is great.
+
+Output:
+```json
+{{
+  "is_ephemeral": false,
+  "emotion": {{"valence": 0.6, "arousal": 0.4, "dominant_emotion": "happy"}},
+  "identity": [
+    {{"content": "The user has recently gotten into pour-over coffee.", "owner": "user", "speculate": null, "tags": ["coffee", "preference"]}},
+    {{"content": "The user used to only drink tea.", "owner": "user", "speculate": null, "tags": ["tea", "preference"]}}
+  ],
+  "facts": [
+    {{"content": "The user participated in a Bike-a-Thon, team raised $5000 for cancer research.", "owner": "user", "speculate": null, "tags": ["charity", "sports"]}},
+    {{"content": "The user organized a charity yoga event, raised $600 for an animal shelter.", "owner": "user", "speculate": null, "tags": ["charity", "yoga"]}}
+  ],
+  "intentions": [],
+  "basic_info": {{}}
+}}
+```
+
+### Example 2 (assistant recommendation, note owner=agent)
+Conversation:
+[user] I want to learn backend development, any suggestions?
+[assistant] I'd suggest starting with Python or Ruby, they're beginner-friendly.
+
+Output:
+```json
+{{
+  "is_ephemeral": false,
+  "emotion": {{"valence": 0.3, "arousal": 0.2, "dominant_emotion": null}},
+  "identity": [],
+  "facts": [
+    {{"content": "The assistant recommended Python and Ruby for backend development to the user.", "owner": "agent", "speculate": null, "tags": ["programming", "learning"]}}
+  ],
+  "intentions": [
+    {{"content": "The user wants to learn backend development.", "trigger_time_description": null, "tags": ["programming", "learning"]}}
+  ],
+  "basic_info": {{}}
+}}
+```"""
+
+EXTRACT_EN = """You are an expert memory analyst. Extract structured user information from the conversation below.
+{history_context}
 Conversation content:
 ---
 {content}
@@ -372,6 +474,10 @@ Optional analytical note for ambiguous signals; null when the statement is expli
 
 Each identity / fact memory has 1-3 lowercase topic keywords.
 
+## owner field (required on every identity/fact item)
+
+`owner` marks who said it: `"user"` (the user stated it) or `"agent"` (the assistant said/recommended it). If the user is relaying what someone else said, still use `"user"`.
+
 ## Output format
 
 Output ONLY the JSON object, no extra text:
@@ -381,10 +487,10 @@ Output ONLY the JSON object, no extra text:
   "is_ephemeral": false,
   "emotion": {{"valence": 0.0, "arousal": 0.0, "dominant_emotion": null}},
   "identity": [
-    {{"content": "The user ...", "speculate": null, "tags": ["..."]}}
+    {{"content": "The user ...", "owner": "user", "speculate": null, "tags": ["..."]}}
   ],
   "facts": [
-    {{"content": "The user ...", "speculate": null, "tags": ["..."]}}
+    {{"content": "The user ...", "owner": "user", "speculate": null, "tags": ["..."]}}
   ],
   "intentions": [
     {{"content": "The user ...", "trigger_time_description": null, "tags": ["..."]}}

@@ -143,6 +143,57 @@ def test_settings_from_dict_mem0_style():
     assert s.embed_dim == 768
 
 
+def test_preset_default_equals_code_defaults():
+    s = Settings()
+    assert s.preset == "default"
+    # default preset is empty → these stay at their conservative code defaults
+    assert s.reconcile_non_destructive is False
+    assert s.reconcile_skip_llm is False
+    assert s.reconcile_policy == "balanced"
+    assert s.reader_suppress_derived_on_factual is False
+
+
+def test_preset_high_recall_fills_knobs():
+    s = Settings(preset="high_recall")
+    assert s.reconcile_non_destructive is True
+    assert s.reconcile_skip_llm is True
+    assert s.reconcile_policy == "conservative"
+    assert s.reader_suppress_derived_on_factual is True
+    # latency knobs are orthogonal — NOT touched by any preset
+    assert s.combined_gate_extract is False
+    assert s.embed_merge_l1_gate is False
+
+
+def test_explicit_field_overrides_preset():
+    # init arg beats preset
+    s = Settings(preset="high_recall", reconcile_policy="balanced")
+    assert s.reconcile_policy == "balanced"
+
+
+def test_env_field_overrides_preset(monkeypatch):
+    monkeypatch.setenv("DUAL_MEM_PRESET", "high_recall")
+    monkeypatch.setenv("DUAL_MEM_RECONCILE_POLICY", "balanced")
+    s = Settings()
+    assert s.preset == "high_recall"
+    assert s.reconcile_non_destructive is True  # from preset
+    assert s.reconcile_policy == "balanced"  # env wins over preset
+
+
+def test_preset_selected_from_yaml(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("preset: high_recall\n", encoding="utf-8")
+    monkeypatch.setenv("DUAL_MEM_CONFIG_FILE", str(cfg))
+    s = Settings()
+    assert s.preset == "high_recall"
+    assert s.reconcile_non_destructive is True
+
+
+@pytest.mark.parametrize("bad_preset", ["fast", "prod", "hi-recall"])
+def test_invalid_preset_raises(bad_preset):
+    with pytest.raises(ValueError):
+        Settings(preset=bad_preset)
+
+
 def test_settings_from_dict_mem0_config_blocks():
     s = Settings.from_dict({
         "embedder": {

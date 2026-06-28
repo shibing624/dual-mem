@@ -48,6 +48,7 @@ class ReconcilerWorker:
             enable_search_query=factory.settings.reconcile_search_query,
             policy=factory.settings.reconcile_policy,
             weak_candidate_score=factory.settings.reconcile_weak_candidate_score,
+            non_destructive=factory.settings.reconcile_non_destructive,
         )
 
     async def reconcile_pending(self, *, app_id: str, user_id: str, agent_id: str = "") -> int:
@@ -180,6 +181,17 @@ class ReconcilerWorker:
         # (i.e. were actually re-written). Originals not covered by any ADD stay ACTIVE —
         # never blanket-shadow on "ops exist", or a merge/skip that returns fewer ADDs than
         # originals silently loses facts (the LME "数娃漏 1" failure mode).
+        #
+        # non_destructive guard: when non_destructive=True the contract is "原始 fact 只增
+        # 不减"。即使 LLM 把原文 re-emit 成 SUPPLEMENT（content 匹配），也不应 shadow 原始
+        # 节点——否则"immutable"保证被打破。skip_llm 路径已完全不跑 _process_task，这里
+        # 补 non_destructive+skip_llm=False 的残留路径。
+        if self.reconciler.non_destructive:
+            logger.debug(
+                "non_destructive: skip _shadow_covered_originals (originals stay ACTIVE)"
+            )
+            return
+
         added_contents = {
             _norm_content(op.content)
             for op in ops

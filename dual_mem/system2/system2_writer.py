@@ -186,12 +186,29 @@ class System2Writer:
 
     async def _digest_user(self, *, app_id: str, user_id: str, agent_id: str) -> None:
         """Run reconcile + S2 agent + (optional) cross-domain sweeper for one user."""
-        worker = ReconcilerWorker(factory=self.factory)
-        t0 = time.perf_counter()
-        n_reconcile = await worker.reconcile_pending(
-            app_id=app_id, user_id=user_id, agent_id=agent_id
-        )
-        t_reconcile = time.perf_counter() - t0
+        settings = self.factory.settings
+        t_reconcile = 0.0
+        n_reconcile = 0
+
+        if settings.reconcile_skip_llm:
+            # non_destructive fast-path: L2 facts already ACTIVE from Extractor. Reconcile
+            # LLM output would be stripped anyway (no supersede/DELETE), so skip it entirely
+            # and just drain the queue. Saves ~47 LLM calls (~127s) per question.
+            cache = self.factory.cache
+            drained = 0
+            while cache.dequeue_reconcile_task(
+                app_id=app_id, user_id=user_id, agent_id=agent_id
+            ) is not None:
+                drained += 1
+            n_reconcile = drained
+            logger.info("[s2] reconcile LLM skipped (skip_llm): drained %d tasks", drained)
+        else:
+            worker = ReconcilerWorker(factory=self.factory)
+            t0 = time.perf_counter()
+            n_reconcile = await worker.reconcile_pending(
+                app_id=app_id, user_id=user_id, agent_id=agent_id
+            )
+            t_reconcile = time.perf_counter() - t0
 
         agent = System2Agent(factory=self.factory)
         t1 = time.perf_counter()

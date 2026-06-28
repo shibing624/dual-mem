@@ -90,6 +90,32 @@ EMBED_RETRY_ATTEMPTS = 3
 EMBED_RETRY_BASE_DELAY = 0.5
 
 
+# Tuning presets ("旋钮档位"): bundle the dozens of advanced tuning fields into a few
+# named scenarios so users pick ONE name instead of hand-tuning several knobs. A preset only
+# supplies values for fields the user did NOT set explicitly (init args / env / YAML always
+# win). Presets NEVER touch credentials, model, dim, mode or storage_dir — those stay the
+# user's responsibility.
+#
+# The single axis a preset chooses is recall vs. compactness:
+#   default     — balanced: merge/evolve facts → compact store + evolution chains.
+#   high_recall — never merge/drop facts → every fact kept (counting / audit / eval).
+# Write-path latency is an ORTHOGONAL concern, NOT a preset: open the individual knobs
+# (combined_gate_extract / embed_merge_l1_gate) in the YAML advanced section if you want it.
+PRESETS: dict[str, dict[str, Any]] = {
+    # General-purpose SDK usage. Balanced, conservative defaults == code defaults.
+    "default": {},
+    # High-recall: never merge/drop facts — counting/aggregation/audit workloads keep every
+    # fact. Trades store compactness for recall; also skips reconcile LLM calls.
+    "high_recall": {
+        "reconcile_non_destructive": True,
+        "reconcile_skip_llm": True,
+        "reconcile_policy": "conservative",
+        "reader_suppress_derived_on_factual": True,
+    },
+}
+PRESET_NAMES = tuple(PRESETS.keys())
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="DUAL_MEM_",
@@ -103,6 +129,13 @@ class Settings(BaseSettings):
     mode: Literal["system1", "dual"] = "system1"
     storage_dir: str = "./.dual_mem_data"
 
+    # Tuning preset: pick ONE named scenario instead of hand-tuning the advanced knobs
+    # below. The preset only fills in fields you did NOT set explicitly (init/env/YAML
+    # override it). See ``PRESETS`` for what each one changes.
+    #   default     — balanced general SDK usage (== code defaults).
+    #   high_recall — never merge/drop facts (counting / audit / eval workloads).
+    preset: Literal["default", "high_recall"] = "default"
+
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
@@ -110,7 +143,9 @@ class Settings(BaseSettings):
     # Turn off only if the endpoint does not support response_format.
     llm_json_mode: bool = True
     # Provider-specific body (Volces thinking depth, vendor extensions, etc.).
-    llm_extra_body: dict[str, Any] = {}
+    extra_body: dict[str, Any] = {}
+    # Provider-specific headers (internal platform auth, tracing, etc.).
+    extra_headers: dict[str, str] = {}
     llm_timeout: int = 60
     # Model context window (total tokens). Used with completion_reserve to derive
     # per-call char budget; long prompts are split into chunks + merged (not truncated).
@@ -158,6 +193,15 @@ class Settings(BaseSettings):
     #                  仅 OVERRIDE/NEGATE（同维度状态变化）才允许 supersedes。穷举/计数类
     #                  场景（benchmark、客服日志）用它避免把不同事件误并成一条而丢证据。
     reconcile_policy: Literal["balanced", "conservative"] = "balanced"
+    # 非破坏性 reconcile（S2 只增量、永不修改/删除原始 fact）。
+    # 开启后，reconcile 的 ADD 操作一律不带 supersedes（原始记忆保持 ACTIVE），
+    # DELETE 操作一律丢弃。记忆库只增不减 → 计数/聚合类问题不再因合并丢事实。
+    # 适合 benchmark 高召回场景。env DUAL_MEM_RECONCILE_NON_DESTRUCTIVE=1 可强制开启。
+    reconcile_non_destructive: bool = False
+    # 跳过 reconcile LLM（配合 non_destructive 使用）。L2 fact 在 Extractor 写入时已 ACTIVE，
+    # non_destructive 下 reconcile 的 ADD SUPPLEMENT 只是写冗余副本、supersedes/DELETE 被剥离。
+    # 开启后直接排空 reconcile 队列不调 LLM → 省 ~47 次 LLM 调用/题（~127s），存储也更干净。
+    reconcile_skip_llm: bool = False
     # reconcile 召回的最强候选低于该相似度时，跳过 LLM，直接把新记忆当 SUPPLEMENT 落库。
     # 大量写入其实没有真正的冲突候选（全新事实），这条快路径省掉相应的 reconcile LLM 调用，
     # 零合并风险。设 0 关闭（总是走 LLM）。
@@ -214,6 +258,10 @@ class Settings(BaseSettings):
     extract_max_content_tokens: int = 0
     # Retry once on empty/unparseable JSON (temperature=0 + JSON-only reinforcement prompt).
     extract_retry_on_failure: bool = True
+    # Few-shot 示例：extract prompt 末尾追加示例，引导 4B 模型稳定格式。
+    extract_few_shot_enabled: bool = True
+    # 历史上下文轮数：extract 时传最近 N 轮 L1_RAW 做共指消解。0=关闭。
+    extract_history_turns: int = 20
     # Multi-turn extract input shaping (messages=...): no user/assistant turn is ever dropped.
     # When the dialogue exceeds ``extract_history_context_ratio`` of ``llm_context_window``,
     # only assistant turns are truncated to ``extract_assistant_max_tokens``; user turns stay
@@ -261,6 +309,14 @@ class Settings(BaseSettings):
     # Read-side reconsolidation hook (access bump + co-recall edges + optional S2 enqueue).
     reconsolidation_enabled: bool = True
     reconsolidation_min_interval_sec: float = 0.0
+
+    # Coding/tool-use memory subsystem — separate write/store path for engineering
+    # conversations containing tool calls. When enabled, add() first checks for tool
+    # messages; if found, an LLM judge decides coding vs chat, and coding memories
+    # go to a separate SQLite+VDB store with task/search_keys/solution schema.
+    coding_enabled: bool = True
+    coding_db_path: str = ""  # empty = auto: {storage_dir}/coding_memory.db
+    coding_tool_result_max_bytes: int = 2048
 
     @field_validator("app_whitelist", mode="before")
     @classmethod
@@ -320,10 +376,19 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        """Order config sources as init args > env vars > YAML file."""
+        """Order config sources as init args > env vars > YAML file > preset > code defaults.
+
+        The preset source sits at the LOWEST precedence (just above hard-coded field
+        defaults): it only fills fields the user left unset via init/env/YAML. The preset
+        NAME itself is resolved from those same three sources (in that order) so users can
+        select a preset from anywhere.
+        """
         ensure_config_file()
         yaml_source = YamlConfigSettingsSource(settings_cls, yaml_file=config_path())
-        return (init_settings, env_settings, yaml_source)
+        preset_source = _PresetSettingsSource(
+            settings_cls, init_settings, env_settings, yaml_source
+        )
+        return (init_settings, env_settings, yaml_source, preset_source)
 
     @property
     def enable_graph(self) -> bool:
@@ -344,6 +409,48 @@ class Settings(BaseSettings):
         """
         flat = _flatten_config_dict(config_dict)
         return cls(**flat)
+
+
+class _PresetSettingsSource(PydanticBaseSettingsSource):
+    """Lowest-precedence source that injects a tuning preset's field values.
+
+    The preset NAME is resolved from the higher-precedence sources (init > env > YAML);
+    the resolved preset's dict is then returned so pydantic-settings treats those values
+    as defaults — any field the user set explicitly elsewhere still wins.
+    """
+
+    def __init__(
+        self,
+        settings_cls: type[BaseSettings],
+        init_source: PydanticBaseSettingsSource,
+        env_source: PydanticBaseSettingsSource,
+        yaml_source: PydanticBaseSettingsSource,
+    ) -> None:
+        super().__init__(settings_cls)
+        self._sources = (init_source, env_source, yaml_source)
+
+    def _resolve_preset_name(self) -> str:
+        """Read ``preset`` from init/env/YAML in precedence order; fall back to default."""
+        for source in self._sources:
+            try:
+                values = source()
+            except Exception:
+                continue
+            name = values.get("preset")
+            if name:
+                return str(name)
+        return "default"
+
+    def get_field_value(self, field, field_name):  # pragma: no cover - interface stub
+        return None, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        name = self._resolve_preset_name()
+        preset = PRESETS.get(name)
+        if preset is None:
+            valid = ", ".join(PRESET_NAMES)
+            raise ValueError(f"Unknown preset {name!r}. Valid presets: {valid}.")
+        return dict(preset)
 
 
 def _flatten_config_dict(config_dict: dict[str, Any]) -> dict[str, Any]:
@@ -397,7 +504,7 @@ def _map_provider_section(section: dict[str, Any], flat: dict[str, Any], *, pref
         "base_url": f"{prefix}_base_url",
         "model": f"{prefix}_model",
         "json_mode": f"{prefix}_json_mode",
-        "extra_body": f"{prefix}_extra_body",
+        "extra_body": "extra_body",
         "timeout": f"{prefix}_timeout",
         "retry_attempts": f"{prefix}_retry_attempts",
         "retry_base_delay": f"{prefix}_retry_base_delay",
@@ -407,6 +514,7 @@ def _map_provider_section(section: dict[str, Any], flat: dict[str, Any], *, pref
         mapping["context_window"] = "llm_context_window"
         mapping["max_model_len"] = "llm_context_window"
         mapping["completion_reserve"] = "llm_completion_reserve"
+        mapping["extra_headers"] = "extra_headers"
     if prefix == "embed":
         mapping["max_tokens"] = "embed_max_tokens"
         mapping["embedding_dims"] = "embed_dim"

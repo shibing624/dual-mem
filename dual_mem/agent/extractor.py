@@ -24,10 +24,12 @@ class Extractor:
         llm: LLMClient,
         max_content_chars: int = 0,
         retry_on_failure: bool = True,
+        few_shot_enabled: bool = False,
     ):
         self.llm = llm
         self.max_content_chars = max_content_chars
         self.retry_on_failure = retry_on_failure
+        self.few_shot_enabled = few_shot_enabled
 
     async def extract(
         self,
@@ -39,9 +41,16 @@ class Extractor:
         agent_id: str,
         session_id: str,
         include_gate: bool = False,
+        history_context: str = "",
     ) -> dict:
         """Return extracted fields; ``basic_info`` is persisted later by MemAgent."""
         tmpl = prompts.pick(prompts.EXTRACT_ZH, prompts.EXTRACT_EN, content)
+        if self.few_shot_enabled:
+            tmpl += prompts.pick(
+                prompts.EXTRACT_FEW_SHOT_ZH,
+                prompts.EXTRACT_FEW_SHOT_EN,
+                content,
+            )
         if include_gate:
             tmpl += prompts.pick(
                 prompts.EXTRACT_GATE_APPEND_ZH,
@@ -50,7 +59,11 @@ class Extractor:
             )
 
         def _build_system(chunk: str) -> str:
-            return tmpl.format(content=chunk, current_time=current_time)
+            return tmpl.format(
+                content=chunk,
+                current_time=current_time,
+                history_context=history_context,
+            )
 
         llm_content = self._prepare_content(content)
         parsed = await self.llm.chat_json_for_content(
@@ -70,7 +83,11 @@ class Extractor:
             )
 
             def _build_system_retry(chunk: str) -> str:
-                return retry_tmpl.format(content=chunk, current_time=current_time)
+                return retry_tmpl.format(
+                    content=chunk,
+                    current_time=current_time,
+                    history_context=history_context,
+                )
 
             parsed = await self.llm.chat_json_for_content(
                 content=llm_content,
