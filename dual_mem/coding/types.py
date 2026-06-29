@@ -21,6 +21,7 @@ class CodingMemoryDraft:
     confidence: float = 0.7
     user_id: str = ""
     agent_id: str = "default_agent"
+    app_id: str = "default"
     workspace_id: Optional[str] = None
     branch: Optional[str] = None
     session_id: Optional[str] = None
@@ -37,6 +38,7 @@ class CodingMemoryDraft:
             "confidence": self.confidence,
             "user_id": self.user_id,
             "agent_id": self.agent_id,
+            "app_id": self.app_id,
             "workspace_id": self.workspace_id,
             "branch": self.branch,
             "session_id": self.session_id,
@@ -51,6 +53,7 @@ class CodingMemory:
     memory_id: str
     user_id: str
     agent_id: str = "default_agent"
+    app_id: str = "default"
     task: str = ""
     search_keys: List[str] = field(default_factory=list)
     solution: str = ""
@@ -70,6 +73,7 @@ class CodingMemory:
             "memory_id": self.memory_id,
             "user_id": self.user_id,
             "agent_id": self.agent_id,
+            "app_id": self.app_id,
             "task": self.task,
             "search_keys": list(self.search_keys),
             "solution": self.solution,

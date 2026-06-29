@@ -38,10 +38,13 @@ async def prepare_materials(
     )
     all_facts = factory.vector.get_many(where)
 
+    fresh_ids = [fact.node_id for fact in all_facts if fact.s2_evidence_count == 0]
     fresh = []
-    for fact in all_facts:
-        if fact.s2_evidence_count == 0:
-            full = factory.vector.get(fact.node_id)
+    if fresh_ids:
+        # Single batched fetch (with embeddings) instead of one get() per fact.
+        full_by_id = factory.vector.get_by_ids(fresh_ids)
+        for nid in fresh_ids:
+            full = full_by_id.get(nid)
             if full is not None and full.embedding:
                 fresh.append(full)
 
@@ -88,13 +91,32 @@ async def prepare_materials(
     }
 
 
-def _build_user_message(materials: dict) -> str:
-    """Render prepared materials (clusters, existing schemas, tags) into the user prompt."""
+def _build_user_message(materials: dict, *, max_facts: int = 0) -> str:
+    """Render prepared materials (clusters, existing schemas, tags) into the user prompt.
+
+    ``max_facts`` caps the total number of cluster facts written into the prompt across all
+    clusters (0 = unlimited). Clustering can collapse hundreds of facts into a single cluster;
+    rendering them all overflows the model context window and the whole digest fails. The
+    budget is split evenly across clusters; omitted counts are reported so the model knows
+    the sample is partial.
+    """
+    clusters = materials["clusters"]
+    if max_facts and clusters:
+        per_cluster = max(1, max_facts // len(clusters))
+    else:
+        per_cluster = 0
     parts = ["## 聚类结果 / Cluster results"]
-    for i, cluster in enumerate(materials["clusters"]):
+    for i, cluster in enumerate(clusters):
         parts.append(f"### Cluster {i}（主题: {cluster['centroid_text']}）")
-        for fact in cluster["facts"]:
+        facts = cluster["facts"]
+        shown = facts[:per_cluster] if per_cluster else facts
+        for fact in shown:
             parts.append(f"  - [{fact['layer']}] {fact['content']}  (id={fact['node_id']})")
+        omitted = len(facts) - len(shown)
+        if omitted > 0:
+            parts.append(
+                f"  - …（另有 {omitted} 条同主题事实已省略 / {omitted} more similar facts omitted）"
+            )
 
     forward = materials["graph_forward"]
     if forward:
@@ -155,7 +177,9 @@ class System2Agent:
             for f in cluster["facts"]
         )
         system = prompts.SYSTEM2_OPS_ZH if is_chinese(cluster_text) else prompts.SYSTEM2_OPS_EN
-        user = _build_user_message(materials)
+        user = _build_user_message(
+            materials, max_facts=self.factory.settings.system2_max_prompt_facts
+        )
 
         executor = System2ToolExecutor(
             factory=self.factory, app_id=app_id, user_id=user_id, agent_id=agent_id
@@ -174,7 +198,13 @@ class System2Agent:
             await self._run_single_shot(system=system, user=user, executor=executor)
         else:
             await self._run_react_loop(system=system, user=user, executor=executor)
-        self._mark_clustered_processed(materials["clusters"])
+        if executor.stats["created_schemas"] > 0 or executor.stats["evidence_added"] > 0:
+            self._mark_clustered_processed(materials["clusters"])
+        else:
+            logger.info(
+                "s2_react user=%s produced 0 schemas/evidence — skip marking %d facts as processed",
+                user_id, sum(len(c["facts"]) for c in materials["clusters"]),
+            )
         logger.info(
             "s2_react done user=%s schemas=%d intentions=%d evidence=%d edges=%d",
             user_id,
@@ -307,10 +337,16 @@ class System2Agent:
             pass
 
     def _mark_clustered_processed(self, clusters: list[dict]) -> None:
-        """Mark clustered facts as processed so unused ones are not re-consumed next digest."""
+        """Mark clustered facts as processed so unused ones are not re-consumed next digest.
+
+        Clustered facts all originate from ``prepare_materials`` where only nodes with
+        ``s2_evidence_count == 0`` are selected, so we can patch them directly. This uses
+        a single batched metadata update instead of a get+upsert per fact (the latter
+        rewrote the embedding and triggered an HNSW/SQLite write for every node).
+        """
+        patches: dict[str, dict] = {}
         for cluster in clusters:
             for fact in cluster["facts"]:
-                node = self.factory.vector.get(fact["node_id"])
-                if node is not None and node.s2_evidence_count == 0:
-                    node.s2_evidence_count = 1
-                    self.factory.vector.upsert([node])
+                patches[fact["node_id"]] = {"s2_evidence_count": 1}
+        if patches:
+            self.factory.vector.update_payload_many(patches)

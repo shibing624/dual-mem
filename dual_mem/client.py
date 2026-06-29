@@ -261,9 +261,14 @@ class MemoryClient:
                 ]
                 from dual_mem.coding.preproc import has_any_tool_message, strip_tool_messages
                 if has_any_tool_message(raw_dicts):
-                    coding_result = await self._coding_writer.write(
-                        raw_dicts, user_id=user_id, agent_id=agent_id, session_id=session_id,
-                    )
+                    try:
+                        coding_result = await self._coding_writer.write(
+                            raw_dicts, user_id=user_id, agent_id=agent_id,
+                            session_id=session_id, app_id=resolved_app_id,
+                        )
+                    except Exception as exc:
+                        logger.warning("coding write failed: %s; falling back to chat", exc)
+                        coding_result = None
                     if coding_result is not None:
                         mids = coding_result.get("memory_ids") or []
                         return WriteResult(
@@ -557,13 +562,16 @@ class MemoryClient:
         )
 
     async def search_coding(
-        self, *, query: str, user_id: str, agent_id: str = "default_agent", top_k: int = 10
+        self, *, query: str, user_id: str, agent_id: str = "default_agent",
+        app_id: str | None = None, top_k: int = 10,
     ) -> list[dict]:
         """Search coding memories (tool-use / engineering memories)."""
         if not self._coding_writer:
             return []
+        resolved = self._resolve_app_id(app_id)
         return await self._coding_writer.search(
-            query=query, user_id=user_id, agent_id=agent_id, top_k=top_k,
+            query=query, user_id=user_id, agent_id=agent_id,
+            app_id=resolved, top_k=top_k,
         )
 
     async def aclose(self) -> None:

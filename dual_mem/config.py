@@ -228,6 +228,12 @@ class Settings(BaseSettings):
     # small model, so large blobs still use the iterative ReAct loop. 0 clusters disables it.
     system2_single_shot_max_clusters: int = 1
     system2_single_shot_max_facts: int = 80
+    # Hard cap on how many cluster facts are rendered into the System2 prompt, total across
+    # all clusters. Clustering can collapse 100s of facts into one cluster; without a cap the
+    # rendered prompt blows past the model context window (observed: 590 facts -> 32k tokens ->
+    # HTTP 400, the whole digest wasted). Excess facts are dropped from the prompt (still marked
+    # processed) and a note tells the model how many were omitted. 0 disables the cap.
+    system2_max_prompt_facts: int = 120
 
     # Attentional gate: skip extraction for low-value content (pleasantries, no novelty).
     gate_enabled: bool = True
@@ -314,7 +320,7 @@ class Settings(BaseSettings):
     # conversations containing tool calls. When enabled, add() first checks for tool
     # messages; if found, an LLM judge decides coding vs chat, and coding memories
     # go to a separate SQLite+VDB store with task/search_keys/solution schema.
-    coding_enabled: bool = True
+    coding_enabled: bool = False  # opt-in; experimental
     coding_db_path: str = ""  # empty = auto: {storage_dir}/coding_memory.db
     coding_tool_result_max_bytes: int = 2048
 

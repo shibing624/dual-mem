@@ -117,7 +117,7 @@ preset: default
 # reconsolidation_min_interval_sec: 0  # 0=每次 search 都跑；>0=同 user 最小间隔（秒）
 
 # --- Coding/tool-use memory（工程对话独立链路）---
-# coding_enabled: true                  # 开启后 add() 先检测 tool 消息，coding 走独立 store
+# coding_enabled: false                 # opt-in；开启后 add() 先检测 tool 消息，coding 走独立 store
 # coding_db_path: ""                    # 空=自动 {storage_dir}/coding_memory.db
 # coding_tool_result_max_bytes: 2048    # tool_result 截断字节上限
 

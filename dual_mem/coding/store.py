@@ -2,7 +2,12 @@
 """Coding memory store — SQLite (metadata) + VDB (vectors) dual-layer.
 
 Each CodingMemory has 1 SQLite row + 1+N VDB rows (task + search_keys).
-Separate VDB collection from chat memories.
+VDB isolation: coding vectors use app_id=f"coding_{real_app_id}" in the same
+VDB collection as chat memories (ChromaVectorStore uses one collection "memories").
+Chat searches filter by the real app_id, so they never see coding vectors, and
+vice versa. Multi-tenant isolation is preserved per app_id.
+
+SQLite: coding_memory_meta table, one row per memory, filtered by app_id + user_id.
 """
 import asyncio
 import json
@@ -26,6 +31,7 @@ CREATE TABLE IF NOT EXISTS coding_memory_meta (
     memory_id        TEXT PRIMARY KEY,
     user_id          TEXT NOT NULL,
     agent_id         TEXT NOT NULL DEFAULT 'default_agent',
+    app_id           TEXT NOT NULL DEFAULT 'default',
     task             TEXT NOT NULL,
     search_keys      TEXT NOT NULL DEFAULT '[]',
     solution         TEXT NOT NULL DEFAULT '',
@@ -42,11 +48,21 @@ CREATE TABLE IF NOT EXISTS coding_memory_meta (
 );
 """
 
+# Index for multi-tenant queries (app_id + user_id + agent_id)
+_CREATE_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_coding_user ON coding_memory_meta (app_id, user_id, agent_id);
+"""
+
 
 class CodingMemoryStore:
-    """Dual-layer store: SQLite metadata + VDB vectors for task + search_keys."""
+    """Dual-layer store: SQLite metadata + VDB vectors for task + search_keys.
 
-    LAYER = Layer.L2_FACT  # reuse L2 for VDB routing; custom flag in node.custom
+    VDB vectors use app_id=f"coding_{real_app_id}" for isolation from chat
+    memories (which use the bare app_id). Both live in the same Chroma
+    collection but are never cross-queried because search filters by app_id.
+    """
+
+    LAYER = Layer.L2_FACT  # reuse L2 for VDB routing; "coding" tag distinguishes
 
     def __init__(
         self,
@@ -54,12 +70,10 @@ class CodingMemoryStore:
         db_path: str,
         vector: VectorStore,
         embed: EmbedService,
-        collection: str = "coding_memory",
     ):
         self.db_path = db_path
         self.vector = vector
         self.embed = embed
-        self.collection = collection
         self._lock = threading.Lock()
         self._conn: Optional[sqlite3.Connection] = None
         self._init_db()
@@ -69,19 +83,25 @@ class CodingMemoryStore:
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute(_CREATE_TABLE_SQL)
+        self._conn.execute(_CREATE_INDEX_SQL)
         self._conn.commit()
+
+    @staticmethod
+    def _vdb_app_id(app_id: str) -> str:
+        """VDB app_id for coding memories: f"coding_{real_app_id}"."""
+        return f"coding_{app_id}"
 
     async def add(self, mem: CodingMemory) -> str:
         """Insert a new coding memory (SQLite + VDB)."""
         with self._lock:
             self._conn.execute(
                 """INSERT OR REPLACE INTO coding_memory_meta
-                   (memory_id, user_id, agent_id, task, search_keys, solution,
+                   (memory_id, user_id, agent_id, app_id, task, search_keys, solution,
                     boundary_envs, boundary_scope, workspace_id, branch, session_id,
                     files, confidence, source, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    mem.memory_id, mem.user_id, mem.agent_id, mem.task,
+                    mem.memory_id, mem.user_id, mem.agent_id, mem.app_id, mem.task,
                     json.dumps(mem.search_keys, ensure_ascii=False),
                     mem.solution, mem.boundary_envs, mem.boundary_scope,
                     mem.workspace_id, mem.branch, mem.session_id,
@@ -92,7 +112,6 @@ class CodingMemoryStore:
                 ),
             )
             self._conn.commit()
-
         await self._upsert_vectors(mem)
         return mem.memory_id
 
@@ -121,20 +140,22 @@ class CodingMemoryStore:
         return self._row_to_mem(row) if row else None
 
     def list_by_user(
-        self, *, user_id: str, agent_id: str = "default_agent", limit: int = 100
+        self, *, user_id: str, agent_id: str = "default_agent",
+        app_id: str = "default", limit: int = 100,
     ) -> List[CodingMemory]:
-        """List all coding memories for a user."""
+        """List all coding memories for a user in one app."""
         with self._lock:
             rows = self._conn.execute(
                 """SELECT * FROM coding_memory_meta
-                   WHERE user_id = ? AND agent_id = ?
+                   WHERE app_id = ? AND user_id = ? AND agent_id = ?
                    ORDER BY created_at DESC LIMIT ?""",
-                (user_id, agent_id, limit),
+                (app_id, user_id, agent_id, limit),
             ).fetchall()
         return [self._row_to_mem(r) for r in rows]
 
     async def search(
-        self, *, query: str, user_id: str, agent_id: str = "default_agent", top_k: int = 10
+        self, *, query: str, user_id: str, agent_id: str = "default_agent",
+        app_id: str = "default", top_k: int = 10,
     ) -> List[Dict[str, Any]]:
         """Semantic search over coding memories via VDB."""
         embedding = await self.embed.embed_batch([query])
@@ -142,7 +163,7 @@ class CodingMemoryStore:
             return []
         from dual_mem.isolation import build_filter
         where = build_filter(
-            app_ids=[self.collection],
+            app_ids=[self._vdb_app_id(app_id)],
             user_id=user_id,
             agent_ids=[agent_id],
             layers=[self.LAYER],
@@ -165,12 +186,13 @@ class CodingMemoryStore:
         """Embed task + search_keys and upsert to VDB."""
         texts = [mem.task] + list(mem.search_keys)
         embeddings = await self.embed.embed_batch(texts)
+        vdb_app_id = self._vdb_app_id(mem.app_id)
         nodes = []
         for i, (text, emb) in enumerate(zip(texts, embeddings)):
             node = MemoryNode(
                 content=text,
                 layer=self.LAYER,
-                app_id=self.collection,
+                app_id=vdb_app_id,
                 user_id=mem.user_id,
                 agent_id=mem.agent_id,
                 node_id=f"{mem.memory_id}_key{i}",
@@ -194,6 +216,7 @@ class CodingMemoryStore:
             memory_id=row["memory_id"],
             user_id=row["user_id"],
             agent_id=row["agent_id"],
+            app_id=row["app_id"],
             task=row["task"],
             search_keys=json.loads(row["search_keys"]),
             solution=row["solution"],

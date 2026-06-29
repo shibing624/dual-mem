@@ -48,6 +48,9 @@ class VectorStore(ABC):
     def update_payload(self, node_id: str, patch: dict) -> None: ...
 
     @abstractmethod
+    def update_payload_many(self, patches: dict[str, dict]) -> None: ...
+
+    @abstractmethod
     def update_status(self, node_id: str, status: MemoryStatus) -> None: ...
 
     @abstractmethod
@@ -159,6 +162,32 @@ class ChromaVectorStore(VectorStore):
             meta = dict(current["metadatas"][0])
             meta.update(patch)
             self.collection.update(ids=[node_id], metadatas=[meta])
+
+    def update_payload_many(self, patches: dict[str, dict]) -> None:
+        """Merge metadata patches into many existing nodes in two batched round-trips.
+
+        Reads all target ids in one ``get`` (metadata only, no embeddings) and writes
+        all merged metadatas in one ``update``. Embeddings are never rewritten. Ids that
+        do not exist are skipped. This replaces per-node get/upsert loops which otherwise
+        trigger one HNSW/SQLite write per node.
+        """
+        if not patches:
+            return
+        ids = list(patches.keys())
+        with self._lock:
+            current = self.collection.get(ids=ids, include=["metadatas"])
+            existing_ids = current["ids"]
+            if not existing_ids:
+                return
+            metas = current["metadatas"]
+            new_ids: list[str] = []
+            new_metas: list[dict] = []
+            for nid, meta in zip(existing_ids, metas):
+                merged = dict(meta)
+                merged.update(patches[nid])
+                new_ids.append(nid)
+                new_metas.append(merged)
+            self.collection.update(ids=new_ids, metadatas=new_metas)
 
     def update_status(self, node_id: str, status: MemoryStatus) -> None:
         """Update only the status field of a node."""

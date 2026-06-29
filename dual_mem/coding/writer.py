@@ -48,9 +48,10 @@ class CodingWriter:
         *,
         user_id: str,
         agent_id: str = "default_agent",
+        app_id: str = "default",
+        session_id: Optional[str] = None,
         workspace_id: Optional[str] = None,
         branch: Optional[str] = None,
-        session_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Run coding write path. Returns None if messages are not coding."""
         if not has_any_tool_message(messages):
@@ -64,6 +65,7 @@ class CodingWriter:
             messages,
             user_id=user_id,
             agent_id=agent_id,
+            app_id=app_id,
             workspace_id=workspace_id,
             branch=branch,
             session_id=session_id,
@@ -71,7 +73,7 @@ class CodingWriter:
         if not drafts:
             return {"success": True, "scene": "coding", "memory_ids": [], "ops": []}
 
-        existing = self.store.list_by_user(user_id=user_id, agent_id=agent_id)
+        existing = self.store.list_by_user(user_id=user_id, agent_id=agent_id, app_id=app_id)
         ops = self.reconciler.reconcile(drafts, existing)
 
         memory_ids: List[str] = []
@@ -86,6 +88,7 @@ class CodingWriter:
                     memory_id=str(uuid.uuid4()),
                     user_id=draft.user_id,
                     agent_id=draft.agent_id,
+                    app_id=draft.app_id,
                     task=draft.task,
                     search_keys=draft.search_keys,
                     solution=draft.solution,
@@ -126,7 +129,8 @@ class CodingWriter:
         }
 
     async def search(
-        self, *, query: str, user_id: str, agent_id: str = "default_agent", top_k: int = 10
+        self, *, query: str, user_id: str, agent_id: str = "default_agent",
+        app_id: str = "default", top_k: int = 10,
     ) -> List[Dict[str, Any]]:
         """Search coding memories."""
-        return await self.store.search(query=query, user_id=user_id, agent_id=agent_id, top_k=top_k)
+        return await self.store.search(query=query, user_id=user_id, agent_id=agent_id, app_id=app_id, top_k=top_k)
