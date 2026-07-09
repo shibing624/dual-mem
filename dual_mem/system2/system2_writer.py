@@ -16,7 +16,10 @@ from dual_mem.agent.gate import AttentionalGate
 from dual_mem.locks import LockRegistry
 from dual_mem.registry import ComponentFactory
 from dual_mem.system2.cross_domain_sweeper import CrossDomainSweeper
-from dual_mem.system2.reconciler_worker import ReconcilerWorker
+from dual_mem.system2.reconciler_worker import (
+    ReconcilerWorker,
+    link_evolution_chains_heuristic,
+)
 from dual_mem.system2.system2_agent import System2Agent
 from dual_mem.writer.memory_writer import MemoryWriter, WriterOutcome
 
@@ -202,6 +205,15 @@ class System2Writer:
                 drained += 1
             n_reconcile = drained
             logger.info("[s2] reconcile LLM skipped (skip_llm): drained %d tasks", drained)
+            if settings.reconcile_link_chains_heuristic:
+                t0 = time.perf_counter()
+                n_links = link_evolution_chains_heuristic(
+                    self.factory, app_id=app_id, user_id=user_id, agent_id=agent_id
+                )
+                t_reconcile = time.perf_counter() - t0
+                logger.info(
+                    "[s2] heuristic chain-linking: wired %d evolution edges", n_links
+                )
         else:
             worker = ReconcilerWorker(factory=self.factory)
             t0 = time.perf_counter()

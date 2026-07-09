@@ -229,6 +229,25 @@ class SyncMemoryClient:
     def digest(self) -> DigestResult:
         return self._run(self._client.digest())
 
+    def search_coding(
+        self,
+        *,
+        query: str,
+        user_id: str,
+        agent_id: str = "default_agent",
+        app_id: str | None = None,
+        top_k: int = 10,
+    ) -> list[dict]:
+        return self._run(
+            self._client.search_coding(
+                query=query,
+                user_id=user_id,
+                agent_id=agent_id,
+                app_id=app_id,
+                top_k=top_k,
+            )
+        )
+
     def close(self) -> None:
         """Release resources; idempotent. Prefer ``with SyncMemoryClient(...) as client:``."""
         if self._closed:

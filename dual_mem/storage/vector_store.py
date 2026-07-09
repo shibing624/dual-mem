@@ -54,7 +54,14 @@ class VectorStore(ABC):
     def update_status(self, node_id: str, status: MemoryStatus) -> None: ...
 
     @abstractmethod
-    def mark_superseded(self, node_id: str, *, superseded_by_id: str) -> bool: ...
+    def mark_superseded(
+        self, node_id: str, *, superseded_by_id: str, keep_active: bool = False
+    ) -> bool: ...
+
+    @abstractmethod
+    def link_supersedes(
+        self, *, new_id: str, old_id: str, keep_active: bool = False
+    ) -> bool: ...
 
     @abstractmethod
     def delete(self, node_ids: list[str]) -> None: ...
@@ -193,13 +200,21 @@ class ChromaVectorStore(VectorStore):
         """Update only the status field of a node."""
         self.update_payload(node_id, {"status": status.value})
 
-    def mark_superseded(self, node_id: str, *, superseded_by_id: str) -> bool:
+    def mark_superseded(
+        self, node_id: str, *, superseded_by_id: str, keep_active: bool = False
+    ) -> bool:
         """Atomically flag a node as superseded by ``superseded_by_id``.
 
-        Sets ``is_latest=False`` + ``status=SUPERSEDED`` and appends to ``superseded_by`` in a
-        single locked read-modify-write on the metadata only (the embedding is never rewritten),
-        so concurrent supersede operations on the same evolution chain cannot lose updates.
-        Returns False if the node does not exist.
+        Appends to ``superseded_by`` in a single locked read-modify-write on the metadata only
+        (the embedding is never rewritten), so concurrent supersede operations on the same
+        evolution chain cannot lose updates. Returns False if the node does not exist.
+
+        By default this also sets ``is_latest=False`` + ``status=SUPERSEDED`` (the old node is
+        hidden from ACTIVE-only recall). When ``keep_active=True`` only the ``superseded_by``
+        chain pointer is written and ``status``/``is_latest`` are left untouched — the node stays
+        ACTIVE and recallable while still participating in evolution-chain expansion. This is the
+        "link-but-don't-hide" mode used by the non-destructive heuristic reconcile path so
+        preference-evolution timelines can be reconstructed without dropping the old fact.
         """
         with self._lock:
             current = self.collection.get(ids=[node_id], include=["metadatas"])
@@ -211,9 +226,53 @@ class ChromaVectorStore(VectorStore):
             if superseded_by_id not in ids:
                 ids.append(superseded_by_id)
             meta["superseded_by"] = _LIST_SEP.join(ids)
-            meta["is_latest"] = False
-            meta["status"] = MemoryStatus.SUPERSEDED.value
+            if not keep_active:
+                meta["is_latest"] = False
+                meta["status"] = MemoryStatus.SUPERSEDED.value
             self.collection.update(ids=[node_id], metadatas=[meta])
+            return True
+
+    def link_supersedes(
+        self, *, new_id: str, old_id: str, keep_active: bool = False
+    ) -> bool:
+        """Atomically wire an evolution-chain edge ``new_id`` --supersedes--> ``old_id``.
+
+        In one locked read-modify-write appends ``old_id`` to the new node's ``supersedes`` and
+        ``new_id`` to the old node's ``superseded_by`` (metadata only; embeddings untouched), so
+        ``expand_evolution_chains`` can trace the chain in both directions. Returns False if
+        either node is missing (no partial edge is written).
+
+        When ``keep_active=True`` the old node keeps its ``status``/``is_latest`` — the
+        "link-but-don't-hide" mode: the superseded fact stays ACTIVE and recallable while still
+        appearing on the evolution timeline. When False the old node is hidden
+        (``status=SUPERSEDED``, ``is_latest=False``) like a destructive supersede.
+        """
+        with self._lock:
+            fetched = self.collection.get(ids=[new_id, old_id], include=["metadatas"])
+            by_id = dict(zip(fetched["ids"], fetched["metadatas"]))
+            if new_id not in by_id or old_id not in by_id:
+                return False
+
+            new_meta = dict(by_id[new_id])
+            sup = (new_meta.get("supersedes") or "").split(_LIST_SEP)
+            sup = [s for s in sup if s]
+            if old_id not in sup:
+                sup.append(old_id)
+            new_meta["supersedes"] = _LIST_SEP.join(sup)
+
+            old_meta = dict(by_id[old_id])
+            sby = (old_meta.get("superseded_by") or "").split(_LIST_SEP)
+            sby = [s for s in sby if s]
+            if new_id not in sby:
+                sby.append(new_id)
+            old_meta["superseded_by"] = _LIST_SEP.join(sby)
+            if not keep_active:
+                old_meta["is_latest"] = False
+                old_meta["status"] = MemoryStatus.SUPERSEDED.value
+
+            self.collection.update(
+                ids=[new_id, old_id], metadatas=[new_meta, old_meta]
+            )
             return True
 
     def delete(self, node_ids: list[str]) -> None:

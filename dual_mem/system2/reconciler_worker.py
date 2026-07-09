@@ -33,6 +33,81 @@ def _reflect_custom(op: ReconcileOp) -> dict:
     return out
 
 
+def _chain_sort_key(node: MemoryNode) -> tuple[int, int]:
+    """Chronological ordering key for evolution linking: session memory_at, then created ts."""
+    return (
+        node.memory_at if node.memory_at is not None else 0,
+        node.gmt_created or 0,
+    )
+
+
+def link_evolution_chains_heuristic(
+    factory: ComponentFactory, *, app_id: str, user_id: str, agent_id: str = ""
+) -> int:
+    """Zero-LLM heuristic that back-fills evolution-chain pointers on the skip_llm fast-path.
+
+    On the ``reconcile_skip_llm`` path the Extractor writes every fact/identity node as an
+    independent ACTIVE node and reconcile is skipped entirely, so preference updates never get
+    ``supersedes``/``superseded_by`` pointers and ``expand_evolution_chains`` has nothing to
+    trace (the root cause of PersonaMem ``track_full_preference_evolution`` misses).
+
+    This groups a user's ACTIVE L2/L4 nodes by shared tag and, within each tag bucket of 2+
+    ordered chronologically, wires ``older <-supersedes- newer`` edges via
+    ``vector.link_supersedes(keep_active=True)`` — the "link-but-don't-hide" mode: old nodes stay
+    ACTIVE and recallable while the timeline becomes reconstructable. Idempotent: skips edges
+    whose pointer already exists. Returns the number of edges created.
+    """
+    vector = factory.vector
+    nodes = vector.get_many(
+        {"$and": [{"app_id": app_id}, {"user_id": user_id}]},
+        limit=1000,
+    )
+    candidates = [
+        n
+        for n in nodes
+        if n.layer in (Layer.L2_FACT, Layer.L4_IDENTITY)
+        and n.status == MemoryStatus.ACTIVE
+        and (n.agent_id or "") == (agent_id or "")
+        and n.tags
+    ]
+    if len(candidates) < 2:
+        return 0
+
+    by_tag: dict[str, list[MemoryNode]] = {}
+    for node in candidates:
+        for tag in node.tags:
+            by_tag.setdefault(tag.strip().lower(), []).append(node)
+
+    edges = 0
+    linked_pairs: set[tuple[str, str]] = set()
+    for members in by_tag.values():
+        if len(members) < 2:
+            continue
+        ordered = sorted(members, key=_chain_sort_key)
+        for older, newer in zip(ordered, ordered[1:]):
+            if older.node_id == newer.node_id:
+                continue
+            pair = (newer.node_id, older.node_id)
+            if pair in linked_pairs:
+                continue
+            if older.node_id in (newer.supersedes or []):
+                linked_pairs.add(pair)
+                continue
+            if vector.link_supersedes(
+                new_id=newer.node_id, old_id=older.node_id, keep_active=True
+            ):
+                linked_pairs.add(pair)
+                edges += 1
+    if edges:
+        logger.info(
+            "[s2] heuristic evolution-linking: created %d chain edge(s) for %s::%s",
+            edges,
+            app_id,
+            user_id,
+        )
+    return edges
+
+
 class ReconcilerWorker:
     """Drains the reconcile_queue and merges freshly written nodes into the existing chain."""
 
