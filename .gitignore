@@ -227,6 +227,9 @@ exp/
 # scratch / smoke demos
 tmp/
 
+# conversation dumps
+conversation_*.json
+
 # example & runtime data
 examples/.data/
 .dual_mem_data/
