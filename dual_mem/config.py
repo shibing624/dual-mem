@@ -270,7 +270,7 @@ class Settings(BaseSettings):
     # Retry once on empty/unparseable JSON (temperature=0 + JSON-only reinforcement prompt).
     extract_retry_on_failure: bool = True
     # Few-shot 示例：extract prompt 末尾追加示例，引导 4B 模型稳定格式。
-    extract_few_shot_enabled: bool = True
+    extract_few_shot_enabled: bool = False
     # 历史上下文轮数：extract 时传最近 N 轮 L1_RAW 做共指消解。0=关闭。
     extract_history_turns: int = 20
     # Multi-turn extract input shaping (messages=...): no user/assistant turn is ever dropped.
