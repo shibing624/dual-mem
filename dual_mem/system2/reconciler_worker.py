@@ -51,7 +51,8 @@ def link_evolution_chains_heuristic(
     ``supersedes``/``superseded_by`` pointers and ``expand_evolution_chains`` has nothing to
     trace (the root cause of PersonaMem ``track_full_preference_evolution`` misses).
 
-    This groups a user's ACTIVE L2/L4 nodes by shared tag and, within each tag bucket of 2+
+    This groups a user's ACTIVE L2/L4 nodes by layer and normalized non-empty tag and,
+    within each bucket of 2+
     ordered chronologically, wires ``older <-supersedes- newer`` edges via
     ``vector.link_supersedes(keep_active=True)`` — the "link-but-don't-hide" mode: old nodes stay
     ACTIVE and recallable while the timeline becomes reconstructable. Idempotent: skips edges
@@ -73,10 +74,11 @@ def link_evolution_chains_heuristic(
     if len(candidates) < 2:
         return 0
 
-    by_tag: dict[str, list[MemoryNode]] = {}
+    by_tag: dict[tuple[Layer, str], list[MemoryNode]] = {}
     for node in candidates:
-        for tag in node.tags:
-            by_tag.setdefault(tag.strip().lower(), []).append(node)
+        normalized_tags = {tag.strip().lower() for tag in node.tags if tag.strip()}
+        for tag in normalized_tags:
+            by_tag.setdefault((node.layer, tag), []).append(node)
 
     edges = 0
     linked_pairs: set[tuple[str, str]] = set()

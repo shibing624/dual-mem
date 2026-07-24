@@ -10,7 +10,8 @@ from conftest import FakeLLMClient
 
 from dual_mem import MemoryClient
 from dual_mem.config import Settings
-from dual_mem.types import Layer, MemoryStatus
+from dual_mem.system2.reconciler_worker import link_evolution_chains_heuristic
+from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
 _JAVA = "用户最喜欢的编程语言是 Java"
 _PYTHON = "用户现在主要使用 Python"
@@ -146,3 +147,68 @@ async def test_heuristic_disabled_leaves_nodes_unlinked(tmp_storage, fake_embed)
     identity = [n for n in nodes if n.layer == Layer.L4_IDENTITY]
     # with the heuristic off, no supersedes edges are wired
     assert all(not (n.supersedes or []) for n in identity)
+
+
+async def test_heuristic_does_not_link_across_layers_or_blank_tags(
+    tmp_storage,
+    fake_embed,
+):
+    client = MemoryClient(
+        settings=Settings(
+            mode="dual",
+            storage_dir=tmp_storage,
+            system2_trigger_mode="manual",
+            gate_enabled=False,
+        ),
+        embed=fake_embed,
+        llm=FakeLLMClient(),
+    )
+    vector = client.factory.vector
+    vector.upsert(
+        [
+            MemoryNode(
+                node_id="fact",
+                app_id="app",
+                user_id="u",
+                layer=Layer.L2_FACT,
+                content="fact",
+                embedding=[1.0, 0.0],
+                tags=["lang"],
+            ),
+            MemoryNode(
+                node_id="identity",
+                app_id="app",
+                user_id="u",
+                layer=Layer.L4_IDENTITY,
+                content="identity",
+                embedding=[1.0, 0.0],
+                tags=["lang"],
+            ),
+            MemoryNode(
+                node_id="blank-old",
+                app_id="app",
+                user_id="u",
+                layer=Layer.L4_IDENTITY,
+                content="blank old",
+                embedding=[1.0, 0.0],
+                tags=[" "],
+            ),
+            MemoryNode(
+                node_id="blank-new",
+                app_id="app",
+                user_id="u",
+                layer=Layer.L4_IDENTITY,
+                content="blank new",
+                embedding=[1.0, 0.0],
+                tags=[""],
+            ),
+        ]
+    )
+
+    linked = link_evolution_chains_heuristic(
+        client.factory,
+        app_id="app",
+        user_id="u",
+    )
+
+    assert linked == 0
