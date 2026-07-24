@@ -33,6 +33,10 @@ cli = [
 mcp = [
     "mcp>=1.2",
 ]
+# agentica integration (`dual_mem.integrations.agentica`)
+agentica = [
+    "agentica",
+]
 # All optional frontends
 all = [
     "dual-mem[api,cli,mcp]",
@@ -48,6 +52,7 @@ dev = [
 [project.scripts]
 dual-mem = "dual_mem.cli.main:app"
 dual-mem-mcp = "dual_mem.mcp.server:main"
+dual-mem-hook = "dual_mem.integrations.claude_code:main"
 
 [tool.setuptools.packages.find]
 include = ["dual_mem*"]
