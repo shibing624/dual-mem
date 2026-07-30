@@ -52,7 +52,6 @@ async def test_content_hash_dedup_scoped_by_session(factory, fake_llm):
         mode="system1",
         storage_dir=factory.settings.storage_dir,
         content_hash_dedup=True,
-        gate_enabled=False,
     )
     fake_llm.responses["extract"] = {
         "facts": [{"content": "重复消息", "tags": []}],
@@ -92,7 +91,6 @@ async def test_content_hash_dedup_user_scope_hits_across_sessions(factory, fake_
         storage_dir=factory.settings.storage_dir,
         content_hash_dedup=True,
         content_hash_scope="user",
-        gate_enabled=False,
     )
     fake_llm.responses["extract"] = {
         "facts": [{"content": "重复消息", "tags": []}],
@@ -113,6 +111,8 @@ async def test_content_hash_dedup_user_scope_hits_across_sessions(factory, fake_
     )
     # user scope ignores session → second write is a cache hit returning the first outcome.
     assert r_a.memory_id == r_b.memory_id
+    assert len(fake_llm.calls) == 1
+    assert fake_llm.calls[0]["type"] == "chat_json"
 
 
 async def test_system1_write_ephemeral_returns_only_l1(factory, fake_llm):
@@ -123,8 +123,6 @@ async def test_system1_write_ephemeral_returns_only_l1(factory, fake_llm):
         "intentions": [],
         "is_ephemeral": True,
     }
-    # Use a longer informative-looking content so the gate lets it through and the
-    # extractor's is_ephemeral verdict is what determines the outcome.
     writer = MemoryWriter(factory=factory)
     result = await writer.write(
         content="今天的会议安排在下午三点开始具体讨论新版本的发布计划",
@@ -134,7 +132,8 @@ async def test_system1_write_ephemeral_returns_only_l1(factory, fake_llm):
         session_id="",
         request_id="req-2",
     )
-    assert result.gate_passed is True
+    assert result.commit_passed is False
+    assert result.gate_passed is False
     assert result.is_ephemeral is True
     assert result.extra_node_ids == []
     where = build_filter(app_ids=["app"], user_id="u")

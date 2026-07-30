@@ -81,7 +81,6 @@ async def test_reconcile_sync_inline_evolution_without_digest(tmp_storage, fake_
         settings=Settings(
             mode="system1",
             storage_dir=tmp_storage,
-            gate_enabled=False,
             reconcile_sync=True,
         ),
         embed=fake_embed,

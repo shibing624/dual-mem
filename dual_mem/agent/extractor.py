@@ -2,8 +2,8 @@
 """
 @author:XuMing(xuming624@qq.com)
 @description: Async extractor that pulls identity/facts/intentions/emotion/basic_info and
-is_ephemeral signal from a conversation in a single JSON-mode LLM call. L0 persistence is
-deferred to MemAgent so L0/L2/L4 embeddings can be batched post-extract.
+the is_ephemeral commit signal from a conversation in one JSON-mode LLM call. L0 persistence
+is deferred to MemAgent so L0/L2/L4 embeddings can be batched post-extract.
 """
 import logging
 
@@ -40,7 +40,6 @@ class Extractor:
         user_id: str,
         agent_id: str,
         session_id: str,
-        include_gate: bool = False,
         history_context: str = "",
     ) -> dict:
         """Return extracted fields; ``basic_info`` is persisted later by MemAgent."""
@@ -51,13 +50,6 @@ class Extractor:
                 prompts.EXTRACT_FEW_SHOT_EN,
                 content,
             )
-        if include_gate:
-            tmpl += prompts.pick(
-                prompts.EXTRACT_GATE_APPEND_ZH,
-                prompts.EXTRACT_GATE_APPEND_EN,
-                content,
-            )
-
         def _build_system(chunk: str) -> str:
             return tmpl.format(
                 content=chunk,
@@ -113,10 +105,6 @@ class Extractor:
         if not isinstance(basic_info, dict):
             basic_info = {}
 
-        gate_decision = parsed.get("gate_decision")
-        if not isinstance(gate_decision, dict):
-            gate_decision = None
-
         logger.debug(
             "extract identity=%d facts=%d intentions=%d ephemeral=%s basic_info=%s",
             len(identity) if isinstance(identity, list) else 0,
@@ -134,8 +122,6 @@ class Extractor:
             "is_ephemeral": is_ephemeral,
             "basic_info": basic_info,
         }
-        if gate_decision is not None:
-            out["gate_decision"] = gate_decision
         return out
 
     def _prepare_content(self, content: str) -> str:

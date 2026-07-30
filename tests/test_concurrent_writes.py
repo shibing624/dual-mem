@@ -29,7 +29,7 @@ def _identity_response(seq: int) -> dict:
 
 async def test_same_user_concurrent_add_no_chain_fork(tmp_storage, fake_embed):
     """50 concurrent same-user add() — is_latest == ACTIVE node count (no fork)."""
-    settings = Settings(mode="system1", storage_dir=tmp_storage, gate_enabled=False)
+    settings = Settings(mode="system1", storage_dir=tmp_storage)
 
     counter = {"n": 0}
 
@@ -51,7 +51,7 @@ async def test_same_user_concurrent_add_no_chain_fork(tmp_storage, fake_embed):
         ]
     )
 
-    # Each add() yields exactly one identity node (gate disabled, single identity per write).
+    # Each add() yields exactly one identity node from the scripted extractor response.
     where = build_filter(
         app_ids=["app"],
         user_id="u",
@@ -68,7 +68,7 @@ async def test_same_user_concurrent_add_no_chain_fork(tmp_storage, fake_embed):
 
 async def test_cross_user_writes_run_concurrently(tmp_storage, fake_embed):
     """Different users should NOT serialize on each other's write lock."""
-    settings = Settings(mode="system1", storage_dir=tmp_storage, gate_enabled=False)
+    settings = Settings(mode="system1", storage_dir=tmp_storage)
 
     counter = {"n": 0}
 

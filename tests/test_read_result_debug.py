@@ -8,7 +8,7 @@ from conftest import FakeLLMClient
 
 async def test_search_debug_returns_read_result(tmp_storage, fake_embed):
     """client.search(debug=True) → SearchResult.read_result 非空，含 final_count。"""
-    settings = Settings(mode="system1", storage_dir=tmp_storage, gate_enabled=False)
+    settings = Settings(mode="system1", storage_dir=tmp_storage)
     client = MemoryClient(settings=settings, embed=fake_embed,
                           llm=FakeLLMClient(responses={}))
 
@@ -35,7 +35,7 @@ async def test_search_debug_returns_read_result(tmp_storage, fake_embed):
 
 async def test_search_default_no_read_result(tmp_storage, fake_embed):
     """默认 debug=False → SearchResult.read_result 为 None，to_dict 不含 read_result key。"""
-    settings = Settings(mode="system1", storage_dir=tmp_storage, gate_enabled=False)
+    settings = Settings(mode="system1", storage_dir=tmp_storage)
     client = MemoryClient(settings=settings, embed=fake_embed,
                           llm=FakeLLMClient(responses={}))
     result = await client.search(query="x", app_ids=["app"], user_id="u")

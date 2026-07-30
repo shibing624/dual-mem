@@ -233,25 +233,22 @@ class MemoryClient:
         session_id: str = "",
         memory_at: int | None = None,
     ) -> WriteResult:
-        """Write one memory and run the cognition pipeline (Gate → Extract → …).
+        """Write one memory and run the cognition pipeline (Extract -> commit -> ...).
 
         Pass either ``content`` (single blob) or ``messages`` (multi-turn chat) — same API.
 
         ``app_id`` defaults to ``settings.default_app_id`` when omitted.
-        ``user_id`` is required. With ``messages``,
-        only ``role=='user'`` turns drive Gate vector novelty (max across turns); L1_RAW
-        and the extractor still see the full dialogue; the last assistant turn feeds Gate LLM context.
+        ``user_id`` is required. With ``messages``, L1_RAW and the extractor see the shaped
+        full dialogue after host-injected system turns are removed.
 
-        Each add costs ~2 LLM calls (Gate + Extract). For agent apps, you may batch
-        ``messages`` at session end to reduce cost; ``add(content=...)`` per turn is
-        also supported when low-latency persistence is required — see docs/skills tradeoff.
+        Each add performs one extraction call; long content may also trigger the optional
+        summarizer. Batch ``messages`` at session end to reduce cost when appropriate.
         """
         request_id = str(uuid.uuid4())
         start = time.perf_counter()
         resolved_app_id = self._resolve_app_id(app_id)
 
-        user_queries: list[str] = []
-        agent_context: str | None = None
+        user_turn_count = 0
         if messages:
             # Coding path: check for tool messages before chat normalization
             if self._coding_writer:
@@ -295,13 +292,14 @@ class MemoryClient:
                 threshold_chars=threshold_chars,
                 assistant_max_chars=int(self.settings.extract_assistant_max_tokens * cpt),
             )
-            user_queries = [m.content for m in normalized if m.role == "user" and m.content.strip()]
+            user_turn_count = sum(
+                1 for m in normalized if m.role == "user" and m.content.strip()
+            )
             content = _format_dialogue(normalized)
-            agent_context = _last_assistant_context(normalized)
 
         logger.info(
             "add app=%s user=%s mode=%s len=%d turns=%d",
-            resolved_app_id, user_id, self.mode, len(content), len(user_queries),
+            resolved_app_id, user_id, self.mode, len(content), user_turn_count,
         )
 
         async with self._user_write_lock_ctx(resolved_app_id, user_id):
@@ -313,8 +311,6 @@ class MemoryClient:
                 session_id=session_id,
                 request_id=request_id,
                 memory_at=memory_at,
-                user_queries=user_queries or None,
-                agent_context=agent_context,
             )
         return WriteResult(
             success=True,
@@ -322,7 +318,6 @@ class MemoryClient:
             request_id=request_id,
             processing_time_ms=round((time.perf_counter() - start) * 1000, 2),
             gate_passed=result.gate_passed,
-            gate_score=result.gate_score,
             extracted_count=len(result.extra_node_ids),
             extra_node_ids=list(result.extra_node_ids),
             is_ephemeral=result.is_ephemeral,
@@ -400,7 +395,7 @@ class MemoryClient:
         )
 
         # In per_write mode, drain reconsolidation tasks the read hook just enqueued so
-        # users do not have to wait for the next write to see the reactivation effects.
+        # users do not have to wait for the next write to see reconsolidation effects.
         # The hook runs as a fire-and-forget task inside the reader, so await it FIRST —
         # otherwise the drain races ahead of its own enqueue and finds an empty queue.
         if (
@@ -660,11 +655,3 @@ def _format_dialogue(messages: list[ChatMessage]) -> str:
             label = f"[{msg.role}]"
         parts.append(f"{label}: {msg.content}")
     return "\n".join(parts)
-
-
-def _last_assistant_context(messages: list[ChatMessage]) -> str | None:
-    """Return the last non-empty assistant turn for Gate context scoring."""
-    for msg in reversed(messages):
-        if msg.role == "assistant" and msg.content.strip():
-            return msg.content.strip()
-    return None

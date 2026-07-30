@@ -14,6 +14,33 @@ _LIST_SEP = "\x1f"
 
 
 class Layer(str, Enum):
+    """八层记忆分层模型（L0-L7），语义完全对标 hy_memory。
+
+    两条主线：
+    - 事实/情境线（episodic，读路径归入 ``NORMAL_LAYERS``）：
+      L1 原始 → L2 事实 → L3 摘要 → L5 知识
+    - 画像/意图线（profile，读路径归入 ``PROFILE_LAYERS`` / ``PROACTIVE_LAYERS``）：
+      L0 基础信息 → L4 身份 → L6 心智模型 → L7 意图
+
+    各层语义（参考 hy_memory）：
+    - L0_BASIC_INFO — 基础信息层：姓名/年龄/所在地等结构化基础画像。
+    - L1_RAW        — 原始对话层：写入即落、Append-Only 的原始文本。
+    - L2_FACT       — 原子事实层：从对话抽取的离散、版本化事实记录。
+    - L3_SUMMARY    — 会话摘要层：长文本（≥500 字）压缩出的摘要。
+    - L4_IDENTITY   — 身份画像层：用户身份与长期偏好的核心画像。
+    - L5_KNOWLEDGE  — 知识图谱层：实体/关系/主题类知识（Graph 层）。
+                      注意：dual-mem 当前**未实现**该层 producer，
+                      仅在读路径 ``NORMAL_LAYERS`` 中保留，不会有节点被创建。
+    - L6_SCHEMA     — 心智模型层：跨证据归纳的抽象行为模式/叙事模板（Graph 层）。
+    - L7_INTENTION  — 前瞻意图层：用户未来待触发的具象意图（Graph 层）。
+
+    存储分界（概念上对标 hy_memory 的 VDB/Graph 分界）：L0-L4 属事实/画像主线，
+    L5-L7 属高层知识/图主线。dual-mem 当前统一落库于 Chroma（VDB）+ SQLite，
+    尚未拆分独立 Graph 存储；L6/L7 以普通节点形式存在。
+
+    每个枚举值经由 ``LAYER_TO_CATEGORY`` 映射到一个 ``Category``。
+    """
+
     L0_BASIC_INFO = "L0_BASIC_INFO"
     L1_RAW = "L1_RAW"
     L2_FACT = "L2_FACT"

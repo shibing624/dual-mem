@@ -44,8 +44,6 @@ class FakeLLMClient:
     """Async scripted fake LLM.
 
     Routes by call type + system prompt keyword to entries in ``responses``:
-    - ``chat_json`` with system containing "记忆价值评估"/"memory value gate" → key ``"gate"``
-      (default passes threshold with high novelty/relevance).
     - ``chat_json`` with system containing "记忆分析专家"/"memory analyst" → key ``"extract"``
       (default ``{"facts": [], "identity": [], "intentions": [], "is_ephemeral": False}``).
     - ``chat_json`` with system containing "搜索查询生成器"/"search query generator" → key ``"search_query"``.
@@ -68,18 +66,6 @@ class FakeLLMClient:
 
     async def chat_json(self, *, system: str, user: str, **kw):
         self.calls.append({"type": "chat_json", "system": system, "user": user, "kw": kw})
-        if "记忆价值评估" in system or "memory value gate" in system:
-            return self._resolve(
-                "gate",
-                {
-                    "novelty": 0.8,
-                    "biographical_relevance": 0.8,
-                    "emotional_arousal": 0.3,
-                    "reason": "test gate pass",
-                },
-                system=system,
-                user=user,
-            )
         if "记忆分析专家" in system or "memory analyst" in system:
             if "extract" not in self.responses:
                 return {
@@ -95,12 +81,8 @@ class FakeLLMClient:
                 "identity": [],
                 "intentions": [],
                 "is_ephemeral": False,
-                "gate_decision": {
-                    "novelty": 0.8,
-                    "biographical_relevance": 0.8,
-                    "emotional_arousal": 0.3,
-                    "reason": "test gate pass",
-                },
+                "emotion": {"valence": 0.0, "arousal": 0.0, "dominant_emotion": None},
+                "basic_info": {},
             }
             return self._resolve(
                 "extract",

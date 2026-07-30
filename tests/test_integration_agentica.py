@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -140,6 +141,33 @@ async def test_workspace_forwards_file_methods() -> None:
     assert isinstance(ws.exists(), bool)
     # Workspace.get_context_prompt 是异步的（Agent 内部 await），转发后仍是 coroutine
     assert isinstance(await ws.get_context_prompt(), str)
+
+
+def test_workspace_forwards_all_native_public_methods() -> None:
+    from agentica.workspace import Workspace
+
+    native_public = {
+        name
+        for name, value in Workspace.__dict__.items()
+        if not name.startswith("_")
+        and (inspect.isfunction(value) or inspect.iscoroutinefunction(value))
+    }
+    adapter_public = {
+        name
+        for name, value in DualMemWorkspace.__dict__.items()
+        if not name.startswith("_")
+        and (inspect.isfunction(value) or inspect.iscoroutinefunction(value))
+    }
+
+    assert native_public <= adapter_public
+    for name in native_public:
+        adapter_signature = inspect.signature(getattr(DualMemWorkspace, name))
+        native_signature = inspect.signature(getattr(Workspace, name))
+        assert list(adapter_signature.parameters) == list(native_signature.parameters)
+        for parameter_name, native_parameter in native_signature.parameters.items():
+            adapter_parameter = adapter_signature.parameters[parameter_name]
+            assert adapter_parameter.kind == native_parameter.kind
+            assert adapter_parameter.default == native_parameter.default
 
 
 async def test_get_agentica_memory_backend_returns_workspace() -> None:

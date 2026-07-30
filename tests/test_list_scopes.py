@@ -6,7 +6,7 @@ from dual_mem.config import Settings
 
 async def test_list_scopes(tmp_storage, fake_embed, fake_llm):
     client = MemoryClient(
-        settings=Settings(mode="system1", storage_dir=tmp_storage, gate_enabled=False),
+        settings=Settings(mode="system1", storage_dir=tmp_storage),
         embed=fake_embed,
         llm=fake_llm,
     )

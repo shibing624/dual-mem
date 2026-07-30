@@ -1,8 +1,8 @@
 """R3: Reconsolidation drain 实现 — 入队的 reconsolidation task 被真正消费。
 
 测试目标：
-1. dual search → reconsolidation 入队 → _digest_reconsolidation_pending 消费 → 节点 custom 标记 reactivation
-2. 显著情绪差时打 reactivation flag；平淡 query 不打
+1. dual search → reconsolidation 入队 → _digest_reconsolidation_pending 消费 → 更新时间戳
+2. reconsolidation 不依赖情绪词表或额外 LLM
 3. scheduled 模式下 reconsolidation 也走 _run_reconsolidation 而不是只 log
 4. per_write 下 client.search 自动 fire-and-forget drain（at-least 不报错）
 """
@@ -24,10 +24,13 @@ def _seed_emotional_node(client, node_id: str, content: str, *, arousal: float =
     client.factory.vector.upsert([n])
 
 
-async def test_reconsolidation_drain_marks_reactivation_for_emotional_query(tmp_storage, fake_embed):
-    """High-arousal query against a calm stored memory → reactivation flag set."""
+async def test_reconsolidation_drain_refreshes_timestamp_without_emotion_inference(
+    tmp_storage,
+    fake_embed,
+):
+    """Any recalled node gets a timestamp without query-emotion classification."""
     settings = Settings(mode="dual", storage_dir=tmp_storage,
-                        system2_trigger_mode="manual", gate_enabled=False)
+                        system2_trigger_mode="manual")
     client = MemoryClient(settings=settings, embed=fake_embed,
                           llm=FakeLLMClient(responses={}))
 
@@ -46,20 +49,21 @@ async def test_reconsolidation_drain_marks_reactivation_for_emotional_query(tmp_
 
     n = client.factory.vector.get("n1")
     assert n.custom is not None
-    assert n.custom.get("reactivation") is True
-    assert "reactivation_at" in n.custom
     assert "last_reactivated_at" in n.custom
+    assert n.custom.get("reactivation") is None
+    assert "reactivation_at" not in n.custom
+    assert client.factory.llm.calls == []
 
     await client.aclose()
 
 
-async def test_reconsolidation_drain_calm_query_only_bumps_timestamp(tmp_storage, fake_embed):
-    """Low-arousal query → only last_reactivated_at, no reactivation flag."""
+async def test_reconsolidation_preserves_stored_emotion_metadata(tmp_storage, fake_embed):
+    """Timestamp refresh must preserve Extractor-authored node emotion metadata."""
     settings = Settings(mode="dual", storage_dir=tmp_storage,
-                        system2_trigger_mode="manual", gate_enabled=False)
+                        system2_trigger_mode="manual")
     client = MemoryClient(settings=settings, embed=fake_embed,
                           llm=FakeLLMClient(responses={}))
-    _seed_emotional_node(client, "n2", "用户喜欢喝咖啡", arousal=0.0)
+    _seed_emotional_node(client, "n2", "用户喜欢喝咖啡", arousal=0.6)
 
     client.factory.cache.enqueue_s2_task(
         user_id="u", app_id="app", agent_id="",
@@ -71,15 +75,15 @@ async def test_reconsolidation_drain_calm_query_only_bumps_timestamp(tmp_storage
     n = client.factory.vector.get("n2")
     assert n.custom is not None
     assert "last_reactivated_at" in n.custom
-    assert n.custom.get("reactivation") is None  # 平淡 query 不打 flag
+    assert n.custom["emotional_arousal"] == 0.6
 
     await client.aclose()
 
 
 async def test_reconsolidation_drain_logs_pipeline_stage(tmp_storage, fake_embed):
-    """Drain 应该写 RECONSOLIDATION_DRAIN pipeline log 包含 flagged_reactivation 计数。"""
+    """Drain 应写 RECONSOLIDATION_DRAIN pipeline log 和处理节点数。"""
     settings = Settings(mode="dual", storage_dir=tmp_storage,
-                        system2_trigger_mode="manual", gate_enabled=False)
+                        system2_trigger_mode="manual")
     client = MemoryClient(settings=settings, embed=fake_embed,
                           llm=FakeLLMClient(responses={}))
     _seed_emotional_node(client, "n3", "memo")
@@ -96,7 +100,8 @@ async def test_reconsolidation_drain_logs_pipeline_stage(tmp_storage, fake_embed
     assert any(r["stage"] == "RECONSOLIDATION_DRAIN" for r in rows)
     drain_log = next(r for r in rows if r["stage"] == "RECONSOLIDATION_DRAIN")
     assert "n_nodes" in drain_log["payload"]
-    assert "flagged_reactivation" in drain_log["payload"]
+    assert "flagged_reactivation" not in drain_log["payload"]
+    assert "query_arousal" not in drain_log["payload"]
 
     await client.aclose()
 
@@ -104,7 +109,7 @@ async def test_reconsolidation_drain_logs_pipeline_stage(tmp_storage, fake_embed
 async def test__digest_pending_runs_reconsolidation(tmp_storage, fake_embed):
     """digest() 调用的 _digest_pending 应该处理 cognition 和 reconsolidation 两类任务。"""
     settings = Settings(mode="dual", storage_dir=tmp_storage,
-                        system2_trigger_mode="manual", gate_enabled=False)
+                        system2_trigger_mode="manual")
     client = MemoryClient(settings=settings, embed=fake_embed,
                           llm=FakeLLMClient(responses={"tools": [{"content": "", "tool_calls": []}]}))
     _seed_emotional_node(client, "n4", "memo")

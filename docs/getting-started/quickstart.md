@@ -69,8 +69,8 @@ asyncio.run(main())
 
 | 方式 | 适用 | 行为 |
 |---|---|---|
-| `content="..."` | 单条陈述、日志、离线导入 | 整段走 Gate → Extract。 |
-| `messages=[{role, content}, ...]` | Agent 多轮对话（推荐） | L1_RAW 存完整对话；Extractor 看完整对话；Gate 向量新颖度只对 `role=="user"` 轮次计算（取 max）；LLM Gate 对整段打分；最后一条 assistant 作 Gate 上下文。 |
+| `content="..."` | 单条陈述、日志、离线导入 | 整段由 Extractor 处理并决定是否沉淀。 |
+| `messages=[{role, content}, ...]` | Agent 多轮对话（推荐） | L1_RAW 与 Extractor 都接收带角色标记的完整对话；宿主注入的 system 消息会先移除。 |
 
 ```python
 await client.add(
@@ -148,7 +148,7 @@ async def main() -> None:
         )
         print(
             f"Session persisted: memory_id={write.memory_id[:8]}…  "
-            f"extracted={write.extracted_count}  gate={write.gate_passed}"
+            f"extracted={write.extracted_count}  commit={write.commit_passed}"
         )
     finally:
         await memory.aclose()
@@ -161,8 +161,8 @@ if __name__ == "__main__":
 | 操作 | 建议 |
 |---|---|
 | `search` | 每轮用户输入前 |
-| `add` | 会话结束一次（或每 N 轮 batch）；不要每轮都写（~2×LLM/次） |
-| `WriteResult` | `gate_passed=False` / `is_ephemeral=True` 表示未沉淀 L2/L4 |
+| `add` | 会话结束一次（或每 N 轮 batch）；每次至少 1 次 Extract LLM，长文本可再触发摘要 |
+| `WriteResult` | 优先读取 `commit_passed`；`gate_passed` 是已弃用兼容字段。`False` 表示 Extractor 未提交 L0/L2+，`is_ephemeral=True` 表示纯临时内容 |
 
 ## dual 模式与 System2 触发
 

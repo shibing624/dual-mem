@@ -7,7 +7,7 @@
 | 能力 | 说明 |
 |------|------|
 | **演化链** | 写侧 `supersedes` / `superseded_by` 双向指针；读侧自动展开历史版本 |
-| **System1 写路径** | Attentional Gate（LLM）→ Extract → fast-write L2/L4 → 异步 Reconcile |
+| **System1 写路径** | Extract（单次 LLM）→ 提交判定 → fast-write L0/L2/L4 → 异步 Reconcile |
 | **System2 沉淀（dual）** | DBSCAN 聚类 + 8 工具 ReAct Agent → L6 Schema / L7 Intention |
 | **三路召回（零 LLM）** | profile / proactive / normal；默认 hybrid anchor + fusion |
 | **多入口** | SDK / REST / MCP / CLI / Skill 共享 `MemoryClient` |

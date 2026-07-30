@@ -69,7 +69,7 @@ dual-mem 的核心是一套 **八层记忆模型**——借鉴人脑「先感知
    向量 + 图 + 本地存储
 ```
 
-实现细节（Gate、Reconcile、混合检索管线等）见 [架构文档](docs/architecture.md) · [在线文档](https://shibing624.github.io/dual-mem/architecture/)。
+实现细节（Extractor 提交判定、Reconcile、混合检索管线等）见 [架构文档](docs/architecture.md) · [在线文档](https://shibing624.github.io/dual-mem/architecture/)。
 
 ## 安装
 

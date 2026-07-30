@@ -17,7 +17,7 @@ from tests.conftest import FakeLLMClient
 
 @pytest.fixture
 def worker_factory(tmp_storage, fake_embed):
-    settings = Settings(mode="system1", storage_dir=tmp_storage, gate_enabled=False)
+    settings = Settings(mode="system1", storage_dir=tmp_storage)
     return ComponentFactory(settings=settings, embed=fake_embed, llm=FakeLLMClient())
 
 

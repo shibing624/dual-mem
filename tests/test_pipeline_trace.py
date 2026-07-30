@@ -1,4 +1,4 @@
-"""P2-1: pipeline_logs trace — write GATE/EXTRACT, search READ_QU/READ_ANCHOR/.. stages."""
+"""Pipeline trace for Extract commit decisions and hybrid read stages."""
 from dual_mem.client import MemoryClient
 from dual_mem.config import Settings
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
@@ -16,8 +16,8 @@ _EXTRACT = {
 }
 
 
-async def test_write_logs_gate_and_extract(tmp_storage, fake_embed):
-    """add() 写完后，pipeline_logs 中应该有 GATE 和 EXTRACT 两个 stage 条目。"""
+async def test_write_logs_extract_commit_decision(tmp_storage, fake_embed):
+    """add() writes the Extract payload and its commit decision in one stage."""
     settings = Settings(mode="system1", storage_dir=tmp_storage)
     client = MemoryClient(
         settings=settings, embed=fake_embed,
@@ -26,12 +26,11 @@ async def test_write_logs_gate_and_extract(tmp_storage, fake_embed):
     result = await client.add(content="用户最近开始喝咖啡了，每天都要来一杯", app_id="app", user_id="u")
     logs = client.factory.cache.list_pipeline_logs(result.request_id)
     stages = {entry["stage"] for entry in logs}
-    assert "GATE" in stages
     assert "EXTRACT" in stages
-    # GATE payload contains the score
-    gate_log = next(e for e in logs if e["stage"] == "GATE")
-    assert "score" in gate_log["payload"]
-    assert "passed" in gate_log["payload"]
+    assert "GATE" not in stages
+    extract_log = next(entry for entry in logs if entry["stage"] == "EXTRACT")
+    assert extract_log["payload"]["commit_passed"] is True
+    assert extract_log["payload"]["commit_reason"] == "extractor produced persistable memory"
 
     await client.aclose()
 

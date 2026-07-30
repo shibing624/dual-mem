@@ -31,7 +31,6 @@ async def test_hybrid_reader_default_returns_routes(tmp_storage, fake_embed):
     """默认 hybrid：L4 identity 走 normal 路由。"""
     settings = Settings(mode="system1", storage_dir=tmp_storage)
     assert settings.reader_mode == "hybrid"
-    assert settings.gate_enabled is True
     client = MemoryClient(settings=settings, embed=fake_embed,
                           llm=FakeLLMClient(responses={"extract": {
                               "is_ephemeral": False,
@@ -50,8 +49,7 @@ async def test_hybrid_reader_default_returns_routes(tmp_storage, fake_embed):
 
 async def test_legacy_reader_mode_kept_for_baseline(tmp_storage, fake_embed):
     """legacy 模式仍然可用（BM25+RRF 基线路径）。"""
-    settings = Settings(mode="system1", storage_dir=tmp_storage,
-                        gate_enabled=False, reader_mode="legacy")
+    settings = Settings(mode="system1", storage_dir=tmp_storage, reader_mode="legacy")
     client = MemoryClient(settings=settings, embed=fake_embed,
                           llm=FakeLLMClient(responses={"extract": {
                               "is_ephemeral": False,
@@ -68,7 +66,7 @@ async def test_legacy_reader_mode_kept_for_baseline(tmp_storage, fake_embed):
 
 async def test_hybrid_recalls_facts_too(tmp_storage, fake_embed):
     """hybrid 模式 normal 路由也要能命中 L2 fact。"""
-    settings = Settings(mode="system1", storage_dir=tmp_storage, gate_enabled=False)
+    settings = Settings(mode="system1", storage_dir=tmp_storage)
     client = MemoryClient(settings=settings, embed=fake_embed,
                           llm=FakeLLMClient(responses={"extract": {
                               "is_ephemeral": False,

@@ -1,100 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: Bilingual prompt templates for the dual-mem agents (gate, extract, reconcile,
-summary, system2 ops, cross-domain sweep). Dual ZH/EN forms picked by pick() from input language.
+@description: Bilingual prompt templates for the dual-mem agents (extract, reconcile, summary,
+system2 ops, cross-domain sweep). Dual ZH/EN forms are picked by input language.
 """
 from dual_mem.providers.llm import is_chinese
-
-
-# =====================================================================
-# Attentional Gate — LLM-primary three-dimension scoring with heuristic fallback
-# =====================================================================
-
-GATE_CONTEXT_ZH = """对话上下文 (Agent 的上一条消息):
----
-{agent_context}
----
-注意: 用户的回复可能是对上面这条消息的回应。即使回复很短, 也要结合上下文判断其信息价值。"""
-
-GATE_CONTEXT_EN = """Agent context (the assistant's previous message):
----
-{agent_context}
----
-Note: the user's reply may respond to the message above. Even a short reply can carry value in context."""
-
-GATE_ZH = """你是一个记忆价值评估系统。判断一段对话内容是否值得被记忆系统长期记住。
-
-输入可能是单条消息，也可能是多轮对话（用户-助手来回多轮）。**请把整段对话作为整体评估**，不要逐条单独评分。
-
-请从以下三个维度对内容进行评分（0.0 ~ 1.0）：
-
-1. **novelty**（新颖度/信息量）
-   - 纯寒暄、敷衍回复、无实质内容 → 0.0~0.1（如 "嗯嗯好的"）
-   - 多轮对话中只要有一轮包含有价值的新信息，就应给较高分
-   - 例："我比较喜欢川菜，但是花生过敏" → 0.85
-
-2. **biographical_relevance**（传记相关性）
-   - 涉及用户持久属性（身份、偏好、习惯、家庭、健康、工作、重大事件）→ 高分
-   - 安全关键信息（过敏、疾病等）→ 极高分
-   - 与用户画像无关的闲聊 → 低分
-
-3. **emotional_arousal**（情绪唤醒度）
-   - 强烈情绪表达 → 高分
-   - 平淡/无情绪 → 低分
-   - 多轮对话中取最高情绪强度
-
-{context_section}
-
-对话内容：
----
-{content}
----
-
-只输出严格 JSON，不要其它文字：
-{{
-    "novelty": 0.0,
-    "biographical_relevance": 0.0,
-    "emotional_arousal": 0.0,
-    "reason": "一句话简要说明判断依据"
-}}"""
-
-GATE_EN = """You are a memory value gate. Decide whether a passage is worth long-term memory.
-
-Input may be a single message or a multi-turn dialogue (user-assistant turns). Score the
-WHOLE passage as one unit; do NOT score each turn separately.
-
-Rate three dimensions on a 0.0 to 1.0 scale:
-
-1. **novelty** (new-information density)
-   - Pure pleasantry / filler / no substantive info → 0.0–0.1 (e.g. "ok thanks")
-   - In multi-turn input, if any single turn carries valuable new info, score high overall
-   - Example: "I love Sichuan food but I'm allergic to peanuts" → 0.85
-
-2. **biographical_relevance** (relevance to who the user is)
-   - Touches a durable attribute (identity, preference, habit, family, health, work, major events) → high
-   - Safety-critical info (allergies, illnesses) → very high
-   - Pure chit-chat unrelated to the user's profile → low
-
-3. **emotional_arousal** (intensity of emotional expression)
-   - Strong emotion → high
-   - Flat / neutral → low
-   - In multi-turn input, take the maximum intensity across turns
-
-{context_section}
-
-Conversation content:
----
-{content}
----
-
-Output strict JSON only, nothing else:
-{{
-    "novelty": 0.0,
-    "biographical_relevance": 0.0,
-    "emotional_arousal": 0.0,
-    "reason": "one short sentence explaining the rationale"
-}}"""
 
 
 # =====================================================================
@@ -249,33 +159,6 @@ EXTRACT_ZH = """你是一位专业的记忆分析专家。请从以下对话中�
   ],
   "basic_info": {{}}
 }}
-```"""
-
-EXTRACT_GATE_APPEND_ZH = """
-
-## gate_decision（与提取同一次输出）
-
-同时评估该对话是否值得长期记忆（三个维度 0.0–1.0）：
-- `novelty`：信息新颖度
-- `biographical_relevance`：与用户传记/偏好的相关性
-- `emotional_arousal`：情绪唤醒度
-- `reason`：简短理由
-
-在 JSON 顶层增加 `gate_decision` 对象（与 identity/facts 同级）：
-```json
-"gate_decision": {{"novelty": 0.8, "biographical_relevance": 0.7, "emotional_arousal": 0.2, "reason": "..."}}
-```"""
-
-EXTRACT_GATE_APPEND_EN = """
-
-## gate_decision (same response as extraction)
-
-Also score whether this passage is worth long-term memory (each 0.0–1.0):
-- `novelty`, `biographical_relevance`, `emotional_arousal`, `reason`
-
-Add a top-level `gate_decision` object alongside identity/facts:
-```json
-"gate_decision": {{"novelty": 0.8, "biographical_relevance": 0.7, "emotional_arousal": 0.2, "reason": "..."}}
 ```"""
 
 EXTRACT_RETRY_APPEND_ZH = """

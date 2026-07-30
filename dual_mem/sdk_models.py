@@ -48,38 +48,28 @@ class ChatMessage:
 
 
 @dataclass
-class GateResult:
-    """Outcome of the attentional gate on a write (only when gate runs)."""
+class CommitResult:
+    """Extractor-backed decision on whether a raw write should produce derived memories."""
 
-    # 是否通过门控并进入抽取；False 时通常只写 L1_RAW
+    # 是否存在值得沉淀到 L0/L2+ 的结构化记忆；False 时只保留 L1_RAW
     passed: bool
-    # 综合门控分（novelty / relevance / arousal 加权）
-    gate_score: float
-    # 相对已有记忆的新颖度 0–1
-    novelty: float
-    # 与用户画像/传记相关性 0–1
-    biographical_relevance: float
-    # 情绪唤起度 0–1
-    emotional_arousal: float
-    # 可读拒绝/通过原因（LLM 或启发式）
+    # 可读的提交/跳过原因
     reason: str = ""
-    # 打分来源：llm / heuristic
-    scoring_method: str = "heuristic"
-    # 门控向量探测时最相似的已有记忆 id（无则 None）
-    top_similar_id: str | None = None
-    # 与 top_similar_id 的相似度
-    top_similar_score: float = 0.0
 
     def to_dict(self) -> dict:
-        """Flatten this gate result into a dict for logging or contract responses."""
+        """Flatten this commit decision into a dict for logging or contract responses."""
         return _omit_none(asdict(self))
+
+
+# Deprecated compatibility name; use CommitResult for new code.
+GateResult = CommitResult
 
 
 @dataclass
 class WriteResult:
     """Outcome of a single MemoryClient.add call."""
 
-    # 写入是否成功（门控拒绝时 success 仍可为 True，见 is_ephemeral）
+    # 写入是否成功（仅保留 L1_RAW 时仍为 True，见 is_ephemeral）
     success: bool
     # 本次写入的 L1_RAW 节点 id（主 raw id）
     memory_id: str
@@ -87,20 +77,24 @@ class WriteResult:
     request_id: str
     # 端到端处理耗时（毫秒）
     processing_time_ms: float
-    # 门控是否放行（gate_enabled=False 时为占位 True）
+    # Extractor 是否产出了值得沉淀到 L0/L2+ 的结构化记忆
     gate_passed: bool = True
-    # 门控综合分；未跑门控或未记录时为 None
-    gate_score: float | None = None
-    # 抽取并 fast-write 的 L2/L4 等子节点数量
+    # 本次写入产生的 L0/L2/L3/L4/L7 等衍生节点数量
     extracted_count: int = 0
     # 除 L1 raw 外写入的节点 id 列表
     extra_node_ids: list[str] = field(default_factory=list)
-    # True 表示门控拒绝，仅落 L1、无抽取子节点
+    # True 表示 Extractor 判定为纯寒暄/无信息量，仅落 L1
     is_ephemeral: bool = False
     # REST 风格错误码；成功时为 None
     error_code: int | None = None
     # 错误描述；成功时为 None
     error_message: str | None = None
+
+    @property
+    def commit_passed(self) -> bool:
+        """Whether the extractor committed derived memories for this write."""
+
+        return self.gate_passed
 
     def to_dict(self) -> dict:
         """Flatten the write result into the contract dict (None fields omitted)."""

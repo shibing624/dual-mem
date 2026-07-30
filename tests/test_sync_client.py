@@ -96,12 +96,11 @@ def test_sync_client_mirrors_every_async_data_op():
 def test_sync_client_add_search(tmp_storage, fake_embed, fake_llm):
     llm = FakeLLMClient(
         responses={
-            "gate": '{"novelty":0.9,"biographical_relevance":0.8,"emotional_arousal":0.2,"reason":"ok"}',
             "extract": '{"identity":[],"facts":[{"content":"likes tea","confidence":0.9}],"is_ephemeral":false}',
         }
     )
     with SyncMemoryClient(
-        settings=Settings(mode="system1", storage_dir=tmp_storage, gate_enabled=False),
+        settings=Settings(mode="system1", storage_dir=tmp_storage),
         embed=fake_embed,
         llm=llm,
     ) as client:

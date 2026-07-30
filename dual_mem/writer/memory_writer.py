@@ -2,7 +2,7 @@
 """
 @author:XuMing(xuming624@qq.com)
 @description: Synchronous-write path: persist a raw L1 memory node, log it, and run the
-System1 cognition pipeline (gate -> extract -> fast-write) which queues async reconcile work
+System1 cognition pipeline (extract -> commit decision -> fast-write) which queues reconcile work
 and writes any L7 intentions / L3 summary in line. dual-mem requires LLM + embedding API
 keys; there is no embedding-only / no-LLM mode.
 """
@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 
 from dual_mem.agent.mem_agent import MemAgent
 from dual_mem.registry import ComponentFactory
-from dual_mem.sdk_models import GateResult
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
 logger = logging.getLogger("dual_mem.writer")
@@ -41,8 +40,13 @@ class WriterOutcome:
     memory_id: str
     extra_node_ids: list[str] = field(default_factory=list)
     gate_passed: bool = True
-    gate_score: float | None = None
     is_ephemeral: bool = False
+
+    @property
+    def commit_passed(self) -> bool:
+        """Whether the extractor committed derived memories for this write."""
+
+        return self.gate_passed
 
 
 class MemoryWriter:
@@ -61,14 +65,8 @@ class MemoryWriter:
         session_id: str,
         request_id: str,
         memory_at: int | None = None,
-        user_queries: list[str] | None = None,
-        agent_context: str | None = None,
     ) -> WriterOutcome:
-        """Persist content as a raw node, then derive and link extra memories via System1.
-
-        ``user_queries`` carries the per-turn user texts for multi-turn writes; the gate uses
-        them for novelty=max-across-turns. None means single-turn (fall back to ``content``).
-        """
+        """Persist content as a raw node, then derive and link extra memories via System1."""
         settings = self.factory.settings
         iso_key = _content_iso_key(
             app_id=app_id,
@@ -91,8 +89,9 @@ class MemoryWriter:
                 return WriterOutcome(
                     memory_id=str(cached["memory_id"]),
                     extra_node_ids=list(cached.get("extra_node_ids") or []),
-                    gate_passed=bool(cached.get("gate_passed", True)),
-                    gate_score=cached.get("gate_score"),
+                    gate_passed=bool(
+                        cached.get("commit_passed", cached.get("gate_passed", True))
+                    ),
                     is_ephemeral=bool(cached.get("is_ephemeral", False)),
                 )
 
@@ -107,18 +106,7 @@ class MemoryWriter:
             memory_at=memory_at,
         )
 
-        gate_turn_embeddings: list[list[float]] | None = None
-        if user_queries and settings.embed_merge_l1_gate:
-            # One embed RTT for L1 + Gate user turns; bypasses embed_queued coalescing — enable
-            # only when single-write latency matters more than concurrent write throughput.
-            batch_texts = [content, *user_queries]
-            vectors = await self.factory.embed.embed_batch(batch_texts)
-            embedding = vectors[0]
-            gate_turn_embeddings = vectors[1:]
-        else:
-            embedding = await self.factory.embed.embed_queued(content)
-
-        node.embedding = embedding
+        node.embedding = await self.factory.embed.embed_queued(content)
         await asyncio.to_thread(self.factory.vector.upsert, [node])
         self.factory.history.append(
             event="ADD",
@@ -133,19 +121,14 @@ class MemoryWriter:
         )
 
         agent = MemAgent(factory=self.factory)
-        extra_node_ids, gate_result, is_ephemeral = await agent.run(
-            raw_node=node,
+        extra_node_ids, commit_result, is_ephemeral = await agent.run(
             content=content,
-            embedding=embedding,
             app_id=app_id,
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
             request_id=request_id,
             memory_at=memory_at,
-            user_queries=user_queries,
-            agent_context=agent_context,
-            gate_turn_embeddings=gate_turn_embeddings,
         )
 
         if extra_node_ids:
@@ -155,8 +138,7 @@ class MemoryWriter:
         outcome = WriterOutcome(
             memory_id=node.node_id,
             extra_node_ids=extra_node_ids,
-            gate_passed=gate_result.passed,
-            gate_score=gate_result.gate_score,
+            gate_passed=commit_result.passed,
             is_ephemeral=is_ephemeral,
         )
         if settings.content_hash_dedup and content_hash is not None:
@@ -166,13 +148,12 @@ class MemoryWriter:
                 {
                     "memory_id": outcome.memory_id,
                     "extra_node_ids": outcome.extra_node_ids,
+                    "commit_passed": outcome.commit_passed,
                     "gate_passed": outcome.gate_passed,
-                    "gate_score": outcome.gate_score,
                     "is_ephemeral": outcome.is_ephemeral,
                 },
             )
         return outcome
 
 
-# Re-export GateResult for callers that want to inspect gate decisions on a write.
-__all__ = ["MemoryWriter", "WriterOutcome", "GateResult"]
+__all__ = ["MemoryWriter", "WriterOutcome"]

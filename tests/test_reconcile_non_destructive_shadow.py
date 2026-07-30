@@ -23,7 +23,6 @@ def _make_factory(tmp_storage, fake_embed, *, non_destructive: bool):
     settings = Settings(
         mode="system1",
         storage_dir=tmp_storage,
-        gate_enabled=False,
         reconcile_concurrency=1,
         reconcile_non_destructive=non_destructive,
         # keep the LLM in the loop: we want to exercise the

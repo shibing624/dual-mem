@@ -88,7 +88,6 @@ async def test_fast_write_reconcile_digest_evolution_chain(tmp_storage, fake_emb
             mode="dual",
             storage_dir=tmp_storage,
             system2_trigger_mode="manual",
-            gate_enabled=False,
             reconcile_sync=False,
         ),
         embed=fake_embed,

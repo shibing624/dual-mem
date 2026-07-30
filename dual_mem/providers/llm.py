@@ -155,31 +155,6 @@ def merge_extract_results(parts: list[dict]) -> dict:
     return merged
 
 
-def merge_gate_results(parts: list[dict]) -> dict:
-    """Merge chunked gate scores — take max per dimension across chunks."""
-    best = {
-        "novelty": 0.0,
-        "biographical_relevance": 0.0,
-        "emotional_arousal": 0.0,
-        "reason": "",
-    }
-    reasons: list[str] = []
-    for part in parts:
-        if not isinstance(part, dict):
-            continue
-        for key in ("novelty", "biographical_relevance", "emotional_arousal"):
-            try:
-                best[key] = max(best[key], float(part.get(key, 0.0)))
-            except (TypeError, ValueError):
-                pass
-        reason = str(part.get("reason", "")).strip()
-        if reason:
-            reasons.append(reason)
-    if reasons:
-        best["reason"] = "; ".join(reasons)
-    return best
-
-
 def merge_text_chunks(parts: list[str]) -> str:
     """Join chunked text completions (e.g. map-reduce summarizer)."""
     return "\n\n".join(p.strip() for p in parts if p and p.strip())

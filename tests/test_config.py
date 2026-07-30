@@ -24,7 +24,6 @@ def test_defaults():
     assert s.auth_disabled is True
     assert s.default_app_id == "default"
     assert s.system2_trigger_mode == "per_write"
-    assert s.gate_enabled is True
     assert s.persist_history is False
     assert s.purge_done_queues is True
 
@@ -160,8 +159,6 @@ def test_preset_high_recall_fills_knobs():
     assert s.reconcile_policy == "conservative"
     assert s.reader_suppress_derived_on_factual is True
     # latency knobs are orthogonal — NOT touched by any preset
-    assert s.combined_gate_extract is False
-    assert s.embed_merge_l1_gate is False
 
 
 def test_explicit_field_overrides_preset():

@@ -69,7 +69,7 @@ Recall groups results into **profile / proactive / normal**; hybrid semantic + k
    Vector + graph + local storage
 ```
 
-Implementation details (gate, reconcile, hybrid retrieval, etc.): [architecture.md](docs/architecture.md) · [docs site](https://shibing624.github.io/dual-mem/architecture/).
+Implementation details (Extractor commit decisions, reconcile, hybrid retrieval, etc.): [architecture.md](docs/architecture.md) · [docs site](https://shibing624.github.io/dual-mem/architecture/).
 
 ## Installation
 

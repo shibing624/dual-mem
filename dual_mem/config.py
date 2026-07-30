@@ -99,8 +99,6 @@ EMBED_RETRY_BASE_DELAY = 0.5
 # The single axis a preset chooses is recall vs. compactness:
 #   default     — balanced: merge/evolve facts → compact store + evolution chains.
 #   high_recall — never merge/drop facts → every fact kept (counting / audit / eval).
-# Write-path latency is an ORTHOGONAL concern, NOT a preset: open the individual knobs
-# (combined_gate_extract / embed_merge_l1_gate) in the YAML advanced section if you want it.
 PRESETS: dict[str, dict[str, Any]] = {
     # General-purpose SDK usage. Balanced, conservative defaults == code defaults.
     "default": {},
@@ -123,7 +121,7 @@ class Settings(BaseSettings):
     )
 
     # Mode:
-    #   system1 — synchronous System1 cognition: gate -> LLM extract -> fast-write L0-L4.
+    #   system1 — synchronous System1 cognition: LLM extract -> fast-write L0-L4.
     #   dual    — System1 + async System2 distillation/graph (L6 schema / L7 intention).
     # Both modes require LLM and embedding API keys; missing credentials fail at construction.
     mode: Literal["system1", "dual"] = "system1"
@@ -176,7 +174,7 @@ class Settings(BaseSettings):
     # Serialize concurrent add() for the same (app_id, user_id) behind a per-user asyncio.Lock
     # so the fast-write -> reconcile evolution chain never races. Default on (production-safe).
     # Set False for batch ingestion where many sessions of ONE user are written concurrently
-    # and reconcile is deferred (manual/scheduled trigger) — lets per-session gate/extract
+    # and reconcile is deferred (manual/scheduled trigger) — lets per-session extract
     # overlap instead of running strictly one at a time. The vector store is internally
     # thread-safe, so disabling the lock is safe under deferred reconcile.
     write_serialize_per_user: bool = True
@@ -240,18 +238,6 @@ class Settings(BaseSettings):
     # processed) and a note tells the model how many were omitted. 0 disables the cap.
     system2_max_prompt_facts: int = 120
 
-    # Attentional gate: skip extraction for low-value content (pleasantries, no novelty).
-    gate_enabled: bool = True
-    gate_threshold: float = 0.3
-    # Single LLM call: extract JSON includes gate_decision (saves one gate LLM RTT per turn).
-    combined_gate_extract: bool = False
-    # High vector novelty + heuristic relevance → skip gate LLM (borderline still uses LLM).
-    gate_heuristic_shortcircuit: bool = True
-    gate_shortcircuit_novelty: float = 0.8
-    gate_shortcircuit_relevance: float = 0.5
-    # High duplication (vector novelty below this) + no biographical relevance → REJECT
-    # without a gate LLM call. 0 disables the reject short-circuit (borderline always uses LLM).
-    gate_shortcircuit_reject_novelty: float = 0.12
     # Skip extract/reconcile when identical content was already written for this scope.
     content_hash_dedup: bool = True
     # Dedup key granularity: "session" = per app/user/agent/session (strict, fewer hits);
@@ -285,11 +271,6 @@ class Settings(BaseSettings):
     embed_queue_batch_size: int = 32
     embed_queue_window_ms: float = 200.0
     embed_cache_size: int = 10_000
-    # Merge L1 dialogue + Gate user-turn embeds into one API call on add(messages=...).
-    # Saves ~1 RTT + queue window; bypasses embed_queued coalescing — keep false for
-    # high-concurrency write throughput (default).
-    embed_merge_l1_gate: bool = False
-
     # Cross-domain Sweeper: behavior abstraction + cosine collision + Union-Find induction.
     cross_domain_enable: bool = False
     cross_domain_min_basics: int = 5

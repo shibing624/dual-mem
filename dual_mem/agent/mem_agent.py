@@ -12,14 +12,12 @@ import time
 import uuid
 from datetime import datetime
 
-from dual_mem.agent.basic_profile import BasicProfileTool
+from dual_mem.agent.basic_profile import BasicProfileTool, render_content
 from dual_mem.agent.extractor import Extractor
-from dual_mem.agent.gate import AttentionalGate, GateConfig
 from dual_mem.agent.reconciler import ReconcileOp, Reconciler
 from dual_mem.agent.summarizer import Summarizer
-from dual_mem.isolation import build_filter
 from dual_mem.registry import ComponentFactory
-from dual_mem.sdk_models import GateResult
+from dual_mem.sdk_models import CommitResult
 from dual_mem.storage.graph_store import GraphNode
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
@@ -27,7 +25,7 @@ logger = logging.getLogger("dual_mem.agent.mem")
 
 
 class MemAgent:
-    """Coordinates gate, extractor, reconciler and summarizer for one input memory."""
+    """Coordinates extractor, reconciler and summarizer for one input memory."""
 
     def __init__(self, *, factory: ComponentFactory):
         self.factory = factory
@@ -58,17 +56,6 @@ class MemAgent:
             policy=self.settings.reconcile_policy,
             weak_candidate_score=self.settings.reconcile_weak_candidate_score,
             non_destructive=self.settings.reconcile_non_destructive,
-        )
-        self.gate = AttentionalGate(
-            threshold=self.settings.gate_threshold,
-            llm=llm,
-            config=GateConfig(
-                threshold=self.settings.gate_threshold,
-                heuristic_shortcircuit=self.settings.gate_heuristic_shortcircuit,
-                shortcircuit_novelty=self.settings.gate_shortcircuit_novelty,
-                shortcircuit_relevance=self.settings.gate_shortcircuit_relevance,
-                shortcircuit_reject_novelty=self.settings.gate_shortcircuit_reject_novelty,
-            ),
         )
         # Per-user history ring buffer for extract coreference.
         self._history: dict[str, list[str]] = {}
@@ -101,146 +88,65 @@ class MemAgent:
     async def run(
         self,
         *,
-        raw_node: MemoryNode,
         content: str,
-        embedding: list[float],
         app_id: str,
         user_id: str,
         agent_id: str,
         session_id: str,
         request_id: str,
         memory_at: int | None,
-        user_queries: list[str] | None = None,
-        agent_context: str | None = None,
-        gate_turn_embeddings: list[list[float]] | None = None,
-    ) -> tuple[list[str], GateResult, bool]:
+    ) -> tuple[list[str], CommitResult, bool]:
         """Run the System1 pipeline for one raw memory.
 
-        Returns (extra_node_ids, gate_result, is_ephemeral). Caller decides what to do with
-        the raw L1 node based on extra_node_ids being non-empty (shadow it).
-
-        ``user_queries`` carries the per-turn user-only texts for multi-turn writes; when
-        present each turn is embedded separately so Gate novelty = max(1 - max_sim) across
-        turns. None means single-turn fallback to whole-content novelty.
+        Returns ``(extra_node_ids, commit_result, is_ephemeral)``. The Extractor output is
+        the only commit decision: ephemeral or empty structured output stays L1-only.
         """
         current_time = (
             datetime.fromtimestamp(memory_at).isoformat(timespec="seconds") if memory_at else ""
         )
 
-        use_combined = self.settings.combined_gate_extract and self.settings.gate_enabled
-        summary_task: asyncio.Task | None = None
-
-        if use_combined:
-            sims = await self._gate_similarity_context(
-                embedding=embedding,
-                app_id=app_id,
-                user_id=user_id,
-                agent_id=agent_id,
-                user_queries=user_queries,
-                gate_turn_embeddings=gate_turn_embeddings,
-            )
-            shortcircuited = await self.gate.try_shortcircuit_pass(
-                content=content,
-                existing_similarities=sims,
-            )
-            if shortcircuited is None:
-                rejected = await self.gate.try_shortcircuit_reject(
-                    content=content,
-                    existing_similarities=sims,
-                )
-                if rejected is not None:
-                    logger.info(
-                        "gate REJECT (short-circuit) score=%.3f novelty=%.3f reason=%s",
-                        rejected.gate_score, rejected.novelty, rejected.reason,
-                    )
-                    return [], rejected, False
-            include_gate = shortcircuited is None
-            summary_task = self._begin_summarize_task(
-                content=content,
-                current_time=current_time,
-            )
-            _hist = self._get_history_context(app_id, user_id)
-            extracted = await self.extractor.extract(
-                content=content,
-                current_time=current_time,
-                app_id=app_id,
-                user_id=user_id,
-                agent_id=agent_id,
-                session_id=session_id,
-                include_gate=include_gate,
-                history_context=_hist,
-            )
-            self._append_history(app_id, user_id, content)
-            if shortcircuited is not None:
-                gate_result = shortcircuited
-                if not (
-                    extracted.get("identity")
-                    or extracted.get("facts")
-                    or extracted.get("intentions")
-                ):
-                    logger.warning(
-                        "gate short-circuit PASS but extract empty (content len=%d)",
-                        len(content),
-                    )
-            else:
-                gate_result = await self.gate.finalize_from_llm(
-                    content=content,
-                    llm_scores=extracted.get("gate_decision"),
-                    existing_similarities=sims,
-                    scoring_method="llm",
-                )
-        else:
-            gate_result = await self._evaluate_gate(
-                content=content,
-                embedding=embedding,
-                app_id=app_id,
-                user_id=user_id,
-                agent_id=agent_id,
-                user_queries=user_queries,
-                agent_context=agent_context,
-                gate_turn_embeddings=gate_turn_embeddings,
-            )
-            if self.settings.gate_enabled and not gate_result.passed:
-                return [], gate_result, False
-
-            summary_task = self._begin_summarize_task(
-                content=content,
-                current_time=current_time,
-            )
-            _hist = self._get_history_context(app_id, user_id)
-            extracted = await self.extractor.extract(
-                content=content,
-                current_time=current_time,
-                app_id=app_id,
-                user_id=user_id,
-                agent_id=agent_id,
-                session_id=session_id,
-                history_context=_hist,
-            )
-            self._append_history(app_id, user_id, content)
-
-        try:
-            self.cache.log_pipeline(
-                request_id=request_id,
-                stage="GATE",
-                payload={
-                    "passed": gate_result.passed,
-                    "score": gate_result.gate_score,
-                    "novelty": gate_result.novelty,
-                    "reason": gate_result.reason,
-                    "combined": use_combined,
-                },
-            )
-        except Exception:
-            pass
-        logger.info(
-            "gate %s score=%.3f novelty=%.3f reason=%s",
-            "PASS" if gate_result.passed else "REJECT",
-            gate_result.gate_score, gate_result.novelty, gate_result.reason,
+        summary_task = self._begin_summarize_task(
+            content=content,
+            current_time=current_time,
         )
-        if self.settings.gate_enabled and not gate_result.passed:
-            await self._cancel_summarize_task(summary_task, reason="gate reject")
-            return [], gate_result, False
+        history_context = self._get_history_context(app_id, user_id)
+        extracted = await self.extractor.extract(
+            content=content,
+            current_time=current_time,
+            app_id=app_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            history_context=history_context,
+        )
+        self._append_history(app_id, user_id, content)
+
+        for key in ("identity", "facts", "intentions"):
+            extracted[key] = self._normalize_memory_items(extracted.get(key))
+        is_ephemeral = bool(extracted.get("is_ephemeral"))
+        basic_info = extracted.get("basic_info")
+        has_basic_info = isinstance(basic_info, dict) and bool(render_content(basic_info))
+        has_persistable_output = bool(
+            extracted["identity"]
+            or extracted["facts"]
+            or extracted["intentions"]
+            or has_basic_info
+        )
+        if is_ephemeral:
+            commit_result = CommitResult(
+                passed=False,
+                reason="extractor marked content ephemeral",
+            )
+        elif not has_persistable_output:
+            commit_result = CommitResult(
+                passed=False,
+                reason="extractor produced no persistable memory",
+            )
+        else:
+            commit_result = CommitResult(
+                passed=True,
+                reason="extractor produced persistable memory",
+            )
 
         try:
             self.cache.log_pipeline(
@@ -250,27 +156,31 @@ class MemAgent:
                     "n_identity": len(extracted.get("identity") or []),
                     "n_facts": len(extracted.get("facts") or []),
                     "n_intentions": len(extracted.get("intentions") or []),
-                    "is_ephemeral": bool(extracted.get("is_ephemeral")),
+                    "has_basic_info": has_basic_info,
+                    "is_ephemeral": is_ephemeral,
+                    "commit_passed": commit_result.passed,
+                    "commit_reason": commit_result.reason,
                 },
             )
         except Exception:
-            pass
+            logger.warning("Failed to log extract pipeline result", exc_info=True)
         logger.info(
             "extract identity=%d facts=%d intentions=%d ephemeral=%s",
             len(extracted.get("identity") or []),
             len(extracted.get("facts") or []),
             len(extracted.get("intentions") or []),
-            bool(extracted.get("is_ephemeral")),
+            is_ephemeral,
         )
-        if extracted.get("is_ephemeral"):
-            await self._cancel_summarize_task(summary_task, reason="extract ephemeral")
-            return [], gate_result, True
+        if not commit_result.passed:
+            await self._cancel_summarize_task(
+                summary_task,
+                reason=commit_result.reason,
+            )
+            return [], commit_result, is_ephemeral
 
         emotion = extracted.get("emotion") or {}
         new_memories, new_meta = self._collect_new_memories(extracted)
-        basic_info_present = isinstance(extracted.get("basic_info"), dict) and bool(
-            extracted["basic_info"]
-        )
+        basic_info_present = has_basic_info
 
         stored_ids: list[str] = []
 
@@ -342,7 +252,7 @@ class MemAgent:
                     },
                 )
             except Exception:
-                pass
+                logger.warning("Failed to log fast-write pipeline result", exc_info=True)
 
         try:
             summary = await summary_task if summary_task is not None else None
@@ -407,7 +317,7 @@ class MemAgent:
             )
             stored_ids.append(summary_node.node_id)
 
-        return stored_ids, gate_result, False
+        return stored_ids, commit_result, False
 
     def _begin_summarize_task(
         self,
@@ -437,119 +347,22 @@ class MemAgent:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-    async def _maybe_summarize(self, *, content: str, current_time: str) -> str | None:
-        if not self.settings.summarizer_enabled:
-            return None
-        return await self.summarizer.summarize(content=content, current_time=current_time)
-
     # ---- Internal helpers ------------------------------------------------------------
 
-    async def _evaluate_gate(
-        self,
-        *,
-        content: str,
-        embedding: list[float],
-        app_id: str,
-        user_id: str,
-        agent_id: str,
-        user_queries: list[str] | None = None,
-        agent_context: str | None = None,
-        gate_turn_embeddings: list[list[float]] | None = None,
-    ) -> GateResult:
-        """Evaluate the attentional gate using existing L2/L4 hits as similarity context."""
-        if not self.settings.gate_enabled:
-            return GateResult(
-                passed=True,
-                gate_score=1.0,
-                novelty=1.0,
-                biographical_relevance=0.0,
-                emotional_arousal=0.0,
-                reason="gate disabled",
-                scoring_method="bypass",
-            )
-
-        sims = await self._gate_similarity_context(
-            embedding=embedding,
-            app_id=app_id,
-            user_id=user_id,
-            agent_id=agent_id,
-            user_queries=user_queries,
-            gate_turn_embeddings=gate_turn_embeddings,
-        )
-        if isinstance(sims, list) and sims and isinstance(sims[0], list):
-            per_turn_sims: list[list[dict]] = sims  # type: ignore[assignment]
-            return await self.gate.evaluate(
-                content=content,
-                existing_similarities=per_turn_sims,
-                agent_context=agent_context,
-            )
-        return await self.gate.evaluate(
-            content=content,
-            existing_similarities=sims,  # type: ignore[arg-type]
-            agent_context=agent_context,
-        )
-
-    async def _gate_similarity_context(
-        self,
-        *,
-        embedding: list[float],
-        app_id: str,
-        user_id: str,
-        agent_id: str,
-        user_queries: list[str] | None = None,
-        gate_turn_embeddings: list[list[float]] | None = None,
-    ) -> list[dict] | list[list[dict]]:
-        """Vector similarity hits for gate novelty (multi-turn or single-turn)."""
-        where = build_filter(
-            app_ids=[app_id],
-            user_id=user_id,
-            agent_ids=[agent_id],
-            layers=[Layer.L2_FACT, Layer.L4_IDENTITY],
-            statuses=[MemoryStatus.ACTIVE],
-        )
-
-        if user_queries:
-            if gate_turn_embeddings is not None:
-                turn_embs = gate_turn_embeddings
-            else:
-                try:
-                    turn_embs = await self.embed.embed_batch(user_queries)
-                except Exception:
-                    turn_embs = [embedding]
-
-            async def _hits_for_emb(emb: list[float]) -> list[dict]:
-                try:
-                    nodes = await asyncio.to_thread(
-                        self.vector.query,
-                        embedding=emb,
-                        where=where,
-                        top_k=5,
-                    )
-                    return [
-                        {"node_id": h.node_id, "score": h.score}
-                        for h in nodes
-                        if h.score >= 0.3
-                    ]
-                except Exception:
-                    return []
-
-            per_turn = await asyncio.gather(*[_hits_for_emb(e) for e in turn_embs])
-            return list(per_turn)
-
-        try:
-            nodes = await asyncio.to_thread(
-                self.vector.query,
-                embedding=embedding,
-                where=where,
-                top_k=5,
-            )
-            return [
-                {"node_id": h.node_id, "score": h.score}
-                for h in nodes
-                if h.score >= 0.3
-            ]
-        except Exception:
+    @staticmethod
+    def _normalize_memory_items(items: object) -> list[dict]:
+        """Keep only structured items with non-blank content."""
+        if not isinstance(items, list):
             return []
+        normalized: list[dict] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            normalized.append({**item, "content": content.strip()})
+        return normalized
 
     @staticmethod
     def _collect_new_memories(extracted: dict) -> tuple[list[str], list[dict]]:

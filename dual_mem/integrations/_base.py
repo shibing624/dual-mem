@@ -27,12 +27,6 @@ from dual_mem.sdk_models import MemoryItem
 
 logger = logging.getLogger("dual_mem.integrations")
 
-# 过短的确认类 query 不去搜记忆（与 hy_memory 一致）。
-_SKIP_QUERIES = {
-    "ok", "好", "好的", "thanks", "谢谢", "y", "n", "yes", "no",
-    "继续", "go", "嗯", "嗯嗯", "对", "对的",
-}
-
 
 class AsyncRunner:
     """Run an async MemoryClient from synchronous plugin callbacks.
@@ -336,7 +330,7 @@ class _SyncMemoryProvider:
         if not self._backend or not self._runner or not query:
             return ""
         q = query.strip()
-        if len(q) < 3 or q.lower() in _SKIP_QUERIES:
+        if not q:
             return ""
         try:
             result = self._runner.run(

@@ -1,4 +1,4 @@
-"""P1-5: 结构化 messages 输入 — Gate novelty=max(各轮 user)，assistant 不参与 novelty。"""
+"""Structured messages input is normalized and sent intact to L1 and Extractor."""
 from dual_mem.client import MemoryClient, _format_dialogue, _normalize_messages
 from dual_mem.config import Settings
 from dual_mem.sdk_models import ChatMessage
@@ -42,8 +42,8 @@ def test_format_dialogue_uses_role_labels():
     assert text == "[user]: 今天累死了\n[assistant]: 辛苦了\n[user]: 明天还要加班"
 
 
-async def test_messages_input_user_queries_drive_gate(tmp_storage, fake_embed):
-    """messages 输入：仅 user 各轮 embed 驱动 Gate novelty；assistant 不参与。"""
+async def test_messages_input_reaches_l1_and_extractor(tmp_storage, fake_embed):
+    """messages 输入：L1 和 Extractor 都接收保留角色标记的完整对话。"""
     settings = Settings(mode="system1", storage_dir=tmp_storage)
 
     captured: dict = {}
@@ -83,7 +83,7 @@ async def test_messages_input_user_queries_drive_gate(tmp_storage, fake_embed):
 
 async def test_messages_input_compatible_with_chat_message_objects(tmp_storage, fake_embed):
     """ChatMessage dataclass 直接传也能跑通。"""
-    settings = Settings(mode="system1", storage_dir=tmp_storage, gate_enabled=False)
+    settings = Settings(mode="system1", storage_dir=tmp_storage)
     client = MemoryClient(
         settings=settings,
         embed=fake_embed,

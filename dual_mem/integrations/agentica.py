@@ -27,12 +27,9 @@ agentica 是可选依赖：本模块在 import 时不强制要求它已安装，
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, List, Optional
 
-from dual_mem.integrations._base import (
-    MemoryBackend,
-    _SKIP_QUERIES,
-)
+from dual_mem.integrations._base import MemoryBackend
 
 logger = logging.getLogger("dual_mem.integrations.agentica")
 
@@ -245,7 +242,8 @@ class DualMemWorkspace:
     async def get_relevant_memories(
         self, query: str = "", limit: int = 5, already_surfaced: Optional[list] = None
     ) -> str:
-        if not query or query.strip().lower() in _SKIP_QUERIES:
+        query = query.strip()
+        if not query:
             return ""
         surfaced: set[str] = set()
         if already_surfaced:
@@ -280,6 +278,9 @@ class DualMemWorkspace:
         memory_type: str = "project",
         description: str = "",
         sync_to_global_agent_md: bool = False,
+        *,
+        source: str = "verified",
+        evidence_refs: Optional[List[str]] = None,
     ) -> str:
         res = await self._backend.add(
             content=content,
@@ -287,7 +288,7 @@ class DualMemWorkspace:
             app_id=self._app_id,
             agent_id=self._agent_id,
         )
-        memory_id = getattr(res, "memory_id", None) if res is not None else None
+        memory_id = res.memory_id if res is not None else None
         return memory_id or f"dual-mem://{title}"
 
     def get_frozen_memory(self) -> Optional[str]:
@@ -323,10 +324,10 @@ class DualMemWorkspace:
         _, MemoryEntry = _ensure_agentica()
         entries = []
         for m in items:
-            mid = getattr(m, "memory_id", None) or ""
+            mid = m.memory_id or ""
             entries.append(
                 MemoryEntry(
-                    name=mid or getattr(m, "category", ""),
+                    name=mid or m.category,
                     description=(m.content or "")[:80],
                     content=m.content or "",
                     memory_type="project",
@@ -342,12 +343,121 @@ class DualMemWorkspace:
         bullets = "\n".join(f"- {(m.content or '').strip()}" for m in items)
         return f"Relevant memories for {query}:\n{header}\n{bullets}"
 
-    # ---- 其余 Workspace 协议方法转发给原生 Workspace -----------------------
-    def __getattr__(self, name: str) -> Any:
-        ws = self.__dict__.get("_ws")
-        if ws is None:
-            raise AttributeError(name)
-        return getattr(ws, name)
+    # ---- 原生 Workspace 文件型 / 工具型协议：显式转发给组合的原生 Workspace ----
+    # 不依赖 __getattr__：明确列出 agentica Workspace 的全部公开接口，覆盖
+    # Agent / BuiltinMemoryTool / gateway / hooks / handoff / skill_tool 的调用点。
+    # 语义记忆相关方法（get_relevant_memories / get_relevant_experiences /
+    # save_memory / write_memory_entry / get_frozen_memory / set_frozen_memory /
+    # compute_relevance_score）已在上方覆盖为调用 dual_mem，不在此转发。
+    def sanitize_user_id(self, user_id: Optional[str]) -> str:
+        return self._ws.sanitize_user_id(user_id)
+
+    def set_user(self, user_id: Optional[str]) -> None:
+        self._ws.set_user(user_id)
+
+    def initialize(self, force: bool = False) -> bool:
+        return self._ws.initialize(force=force)
+
+    def exists(self) -> bool:
+        return self._ws.exists()
+
+    async def read_file_async(self, filename: str) -> Optional[str]:
+        return await self._ws.read_file_async(filename)
+
+    def read_file(self, filename: str) -> Optional[str]:
+        return self._ws.read_file(filename)
+
+    def write_file(self, filename: str, content: str) -> None:
+        self._ws.write_file(filename, content)
+
+    def append_file(self, filename: str, content: str) -> None:
+        self._ws.append_file(filename, content)
+
+    async def get_context_prompt(self) -> str:
+        return await self._ws.get_context_prompt()
+
+    async def freeze_snapshots(self, query: str = "") -> None:
+        await self._ws.freeze_snapshots(query=query)
+
+    def get_frozen_context(self) -> Optional[str]:
+        return self._ws.get_frozen_context()
+
+    def get_user_learning_reports_dir(self):
+        return self._ws.get_user_learning_reports_dir()
+
+    def get_git_context(self, max_status_lines: int = 30) -> Optional[str]:
+        return self._ws.get_git_context(max_status_lines=max_status_lines)
+
+    async def sync_memories_to_global_agent_md(self, limit: int = 30) -> str:
+        return await self._ws.sync_memories_to_global_agent_md(limit=limit)
+
+    def list_memory_candidates(self) -> list:
+        return self._ws.list_memory_candidates()
+
+    async def promote_memory_candidate(
+        self,
+        filename: str,
+        sync_to_global_agent_md: bool = False,
+    ):
+        return await self._ws.promote_memory_candidate(
+            filename,
+            sync_to_global_agent_md=sync_to_global_agent_md,
+        )
+
+    def reject_memory_candidate(self, filename: str) -> bool:
+        return self._ws.reject_memory_candidate(filename)
+
+    def get_skills_dir(self):
+        return self._ws.get_skills_dir()
+
+    def list_files(self) -> dict:
+        return self._ws.list_files()
+
+    def get_all_memory_files(self) -> list:
+        return self._ws.get_all_memory_files()
+
+    def search_memory(self, query: str, limit: int = 5, min_score: float = 0.1) -> list:
+        return self._ws.search_memory(query=query, limit=limit, min_score=min_score)
+
+    def clear_daily_memory(self, keep_days: int = 7) -> None:
+        self._ws.clear_daily_memory(keep_days=keep_days)
+
+    async def archive_conversation(
+        self, messages: list, session_id: Optional[str] = None
+    ) -> str:
+        return await self._ws.archive_conversation(messages, session_id=session_id)
+
+    def search_conversations(
+        self, query: str, limit: int = 10, max_files: Optional[int] = None
+    ) -> list:
+        return self._ws.search_conversations(
+            query=query, limit=limit, max_files=max_files
+        )
+
+    def get_conversation_files(self, max_files: Optional[int] = None) -> list:
+        return self._ws.get_conversation_files(max_files=max_files)
+
+    async def write_memory(self, content: str, to_daily: bool = True):
+        return await self._ws.write_memory(content, to_daily=to_daily)
+
+    def get_experience_event_store(self):
+        return self._ws.get_experience_event_store()
+
+    def get_compiled_experience_store(self):
+        return self._ws.get_compiled_experience_store()
+
+    def list_users(self) -> list:
+        return self._ws.list_users()
+
+    def get_user_info(self, user_id: Optional[str] = None) -> dict:
+        return self._ws.get_user_info(user_id=user_id)
+
+    def delete_user(self, user_id: str, confirm: bool = False) -> bool:
+        return self._ws.delete_user(user_id, confirm=confirm)
+
+    @property
+    def config(self):
+        return self._ws.config
 
 
 def get_agentica_memory_backend(

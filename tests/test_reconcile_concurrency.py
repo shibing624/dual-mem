@@ -19,7 +19,6 @@ def _make_factory(tmp_storage, fake_embed, concurrency: int):
     settings = Settings(
         mode="system1",
         storage_dir=tmp_storage,
-        gate_enabled=False,
         reconcile_concurrency=concurrency,
     )
     # reconcile op: one ADD echoing the new memory content verbatim (no supersede), so the

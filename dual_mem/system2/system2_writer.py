@@ -5,14 +5,12 @@
 System2 cognition. Supports three trigger modes (per_write / manual / scheduled) with a
 per-user lock so concurrent writes for the same user serialize through reconcile -> S2
 agent -> cross-domain sweeper, while different users run in parallel. Reconsolidation
-tasks (enqueued by the read-side hook) drain through ``_run_reconsolidation`` which marks
-recalled nodes as reactivated and detects emotional valence shifts vs the query.
+tasks (enqueued by the read-side hook) refresh recall timestamps without extra LLM calls.
 """
 import asyncio
 import logging
 import time
 
-from dual_mem.agent.gate import AttentionalGate
 from dual_mem.locks import LockRegistry
 from dual_mem.registry import ComponentFactory
 from dual_mem.system2.cross_domain_sweeper import CrossDomainSweeper
@@ -27,9 +25,6 @@ logger = logging.getLogger("dual_mem.system2.writer")
 
 _PER_WRITE = "per_write"
 _SCHEDULED = "scheduled"
-
-# Significant valence shift triggers a reactivation flag (the user "re-feels" a memory).
-_REACTIVATION_VALENCE_DELTA = 0.4
 
 
 class System2Writer:
@@ -58,8 +53,6 @@ class System2Writer:
         session_id: str,
         request_id: str,
         memory_at: int | None = None,
-        user_queries: list[str] | None = None,
-        agent_context: str | None = None,
     ) -> WriterOutcome:
         """Run System1, queue an S2 cognition task, and dispatch per the trigger mode."""
         result = await self.inner.write(
@@ -70,8 +63,6 @@ class System2Writer:
             session_id=session_id,
             request_id=request_id,
             memory_at=memory_at,
-            user_queries=user_queries,
-            agent_context=agent_context,
         )
 
         # Hy parity: manual mode does not enqueue S2 on write (explicit digest() only).
@@ -252,46 +243,27 @@ class System2Writer:
             logger.exception("[s2] reconsolidation failed: %s", exc)
 
     async def _run_reconsolidation(self, task: dict) -> None:
-        """Mark recalled nodes as reactivated; flag emotional shift vs the recall query.
-
-        Strategy (zero extra LLM cost): score the query through the existing AttentionalGate
-        heuristic, compare its arousal/valence with each recalled node's stored emotion in
-        ``custom``. Significant valence delta → set ``custom.reactivation = True`` and
-        ``custom.reactivation_at`` (timestamp). Always bumps ``custom.last_reactivated_at``.
-        """
+        """Refresh the last-reactivated timestamp for recalled nodes without extra inference."""
         payload = task.get("payload") or {}
         query = payload.get("query") or ""
         node_ids = payload.get("node_ids") or []
         if not node_ids:
             return
 
-        gate = AttentionalGate(threshold=0.0, llm=None)
-        gate_result = await gate.evaluate(content=query)
-        # Heuristic: gate emotional_arousal + valence inferred from gate result. The gate
-        # itself does not return signed valence, but biographical_relevance × arousal sign
-        # is a decent proxy. We err on the side of caution and only flag when arousal high.
-        query_arousal = float(gate_result.emotional_arousal)
-
-        flagged = 0
         now = int(time.time())
         for nid in node_ids:
             node = self.factory.vector.get(nid)
             if node is None:
                 continue
             custom = dict(node.custom or {})
-            stored_arousal = float(custom.get("emotional_arousal", 0.0) or 0.0)
-            arousal_delta = abs(query_arousal - stored_arousal)
             custom["last_reactivated_at"] = now
-            if arousal_delta >= _REACTIVATION_VALENCE_DELTA:
-                custom["reactivation"] = True
-                custom["reactivation_at"] = now
-                flagged += 1
             node.custom = custom
             self.factory.vector.upsert([node])
 
         logger.info(
-            "reconsolidation user=%s n_nodes=%d flagged=%d",
-            task.get("user_id", ""), len(node_ids), flagged,
+            "reconsolidation user=%s n_nodes=%d",
+            task.get("user_id", ""),
+            len(node_ids),
         )
 
         try:
@@ -301,8 +273,6 @@ class System2Writer:
                 payload={
                     "query": query[:120],
                     "n_nodes": len(node_ids),
-                    "flagged_reactivation": flagged,
-                    "query_arousal": round(query_arousal, 3),
                 },
             )
         except Exception:

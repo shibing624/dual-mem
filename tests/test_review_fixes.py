@@ -57,7 +57,7 @@ async def test_reconcile_excludes_given_node_ids(tmp_storage, fake_embed):
     """The just-written originals must not appear as 'existing' candidates."""
     from dual_mem.agent.reconciler import Reconciler
 
-    settings = Settings(mode="system1", storage_dir=tmp_storage, gate_enabled=False)
+    settings = Settings(mode="system1", storage_dir=tmp_storage)
     client = MemoryClient(settings=settings, embed=fake_embed,
                           llm=FakeLLMClient(responses={}))
     vector = client.factory.vector
@@ -118,7 +118,7 @@ async def test_fast_write_embeds_in_single_batch(tmp_storage):
             return await super().embed_queued(text)
 
     embed = _CountingEmbed()
-    settings = Settings(mode="system1", storage_dir=tmp_storage, gate_enabled=False)
+    settings = Settings(mode="system1", storage_dir=tmp_storage)
     # Extractor returns two facts + one identity so fast-write has >1 node.
     llm = FakeLLMClient(responses={
         "extract": {
@@ -149,7 +149,7 @@ async def test_per_write_search_drains_reconsolidation_without_race(tmp_storage,
     """In per_write mode, a search should enqueue AND drain the reconsolidation task
     within the same call — the drain must not run before its own enqueue."""
     settings = Settings(mode="dual", storage_dir=tmp_storage,
-                        system2_trigger_mode="per_write", gate_enabled=False)
+                        system2_trigger_mode="per_write")
     client = MemoryClient(settings=settings, embed=fake_embed,
                           llm=FakeLLMClient(responses={}))
 

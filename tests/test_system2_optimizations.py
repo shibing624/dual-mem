@@ -141,7 +141,7 @@ async def test_conservative_policy_appends_addendum(tmp_storage, fake_embed):
 
 async def test_uncovered_original_stays_active(tmp_storage, fake_embed):
     """A reconcile ADD that does NOT re-emit an original's content must NOT shadow it."""
-    settings = Settings(mode="system1", storage_dir=tmp_storage, gate_enabled=False)
+    settings = Settings(mode="system1", storage_dir=tmp_storage)
     # reconcile merges everything into one unrelated "MERGED" node (does not cover originals).
     llm = FakeLLMClient(
         responses={"reconcile": [{"op": "ADD", "content": "MERGED", "layer": "L2_FACT"}]}

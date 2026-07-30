@@ -16,7 +16,7 @@
 # 【必填】改完这几项即可运行
 # ============================================================================
 
-# --- LLM（Gate / Extract / Reconcile / Summarize 用）---
+# --- LLM（Extract / Reconcile / Summarize 用）---
 llm_api_key: ""                       # 必填；或设环境变量 DUAL_MEM_LLM_API_KEY
 llm_base_url: https://api.openai.com/v1
 llm_model: gpt-4o-mini
@@ -28,7 +28,7 @@ embed_model: text-embedding-3-small
 embed_dim: 1536                       # 须与 embed 模型输出维度一致（bge-m3→1024，3-small→1536）
 
 # --- 运行模式与存储 ---
-# system1：同步 System1（Gate → Extract → 快写 L0–L4），秒级可用
+# system1：同步 System1（Extract → 快写 L0–L4），秒级可用
 # dual   ：System1 + 异步 System2（图 / L6 schema / L7 intention）
 mode: system1
 storage_dir: ./.dual_mem_data        # 数据目录（Chroma / SQLite / Kuzu 均在此下）
@@ -37,8 +37,6 @@ storage_dir: ./.dual_mem_data        # 数据目录（Chroma / SQLite / Kuzu 均
 # 【档位】preset —— 一键套用一组“召回 vs 紧凑”调优，免去手调下面几个旋钮
 #   default     —— 均衡：合并/演化事实 → 记忆库紧凑 + 演化链（通用 SDK 首选）
 #   high_recall —— 高召回：永不合并/删除事实，每条都留（计数 / 审计 / 评测）
-# 注：写入延迟是“正交”维度，不做成 preset；想要低延迟就在下方高级区单独打开
-#     combined_gate_extract 和 embed_merge_l1_gate 两个开关。
 # preset 只会填你没有显式设置的字段；本文件 / env / 传参里写的值始终覆盖 preset。
 # ============================================================================
 preset: default
@@ -85,14 +83,7 @@ preset: default
 # cluster_stage1_sim: 0.42            # System2 两阶段聚类 cosine 阈值
 # cluster_stage2_sim: 0.55
 
-# --- Attentional Gate（写入前过滤低价值内容）---
-# gate_enabled: true
-# gate_threshold: 0.3
-# combined_gate_extract: false        # true：Gate+Extract 合一，每 turn 省 1 次 RTT（低延迟，可单独开）
-# gate_heuristic_shortcircuit: true   # 高 novelty + 高 relevance 时跳过 Gate LLM
-# gate_shortcircuit_novelty: 0.8
-# gate_shortcircuit_relevance: 0.5
-# gate_shortcircuit_reject_novelty: 0.12  # 高度重复且无传记相关性直接 REJECT；0=关闭
+# --- Extract 提交门控（单次 LLM 输出 is_ephemeral + 结构化记忆）---
 # content_hash_dedup: true            # 同 scope 重复 content 跳过 extract
 # content_hash_scope: session         # session（严格）/ user（跨会话，命中率更高）
 
@@ -125,8 +116,6 @@ preset: default
 # embed_queue_batch_size: 32
 # embed_queue_window_ms: 200.0
 # embed_cache_size: 10000
-# embed_merge_l1_gate: false          # true：L1 对话 + Gate user 轮合并为一次 embed（低延迟，可单独开）
-
 # --- Cross-domain Sweeper（默认关；将多个 base schema 归纳为核心 schema）---
 # cross_domain_enable: false
 # cross_domain_min_basics: 5
