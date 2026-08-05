@@ -133,7 +133,7 @@ async def test_system1_write_ephemeral_returns_only_l1(factory, fake_llm):
         request_id="req-2",
     )
     assert result.commit_passed is False
-    assert result.gate_passed is False
+    assert result.commit_passed is False
     assert result.is_ephemeral is True
     assert result.extra_node_ids == []
     where = build_filter(app_ids=["app"], user_id="u")

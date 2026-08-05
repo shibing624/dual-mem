@@ -49,7 +49,7 @@ Agent / Cursor  ──MCP──▶  MCP Server（受 Skill 指导）  ──▶ 
 > 复用 `MemoryClient`），但**职责上与 SDK 并列**——它们只做协议转换，不含业务逻辑。
 > 这与 Mem0 等项目把 `mem0` 核心与 `openmemory`(MCP) 同仓并存的取舍一致。
 
-## 八层记忆框架（SDK 内部）
+## 七个实现层（SDK 内部）
 
 各层语义、产生方、读路径归属的权威说明见 [`memory_layers.md`](./memory_layers.md)。
 
@@ -58,26 +58,24 @@ Agent / Cursor  ──MCP──▶  MCP Server（受 Skill 指导）  ──▶ 
 | L0_BASIC_INFO | 基础信息层：结构化基础画像（姓名/年龄/所在地…） | System1 `BasicProfile` |
 | L1_RAW | 原始对话层：写入即落、Append-Only | 写入即落 |
 | L2_FACT | 原子事实层：抽取的离散、版本化事实 | System1 抽取 |
-| L3_SUMMARY | 会话摘要层：长文本（≥500 字）摘要 | System1 摘要 |
+| L3_SUMMARY | 会话摘要层：超过配置阈值的长文本摘要（默认关闭） | System1 摘要 |
 | L4_IDENTITY | 身份画像层：身份/长期偏好 | System1 抽取 + 整理 |
-| L5_KNOWLEDGE | 知识图谱层（实体/关系/主题，Graph 层） | **暂未实现**（读路径保留，无 producer） |
 | L6_SCHEMA | 心智模型层：跨证据归纳的行为模式 | System2 聚类 |
 | L7_INTENTION | 前瞻意图层：用户的具体未来意图 | System2 |
 
-- **System1（写侧）**：L1_RAW 先落盘 → Extractor（1 次 LLM，出 identity/facts/intentions/emotion/basic_info 与 `is_ephemeral`）→ 提交判定 → fast-write 直接落 L0/L2/L4 → 入队 reconcile 任务 → Summarizer（仅长文本出 L3）。`is_ephemeral=true` 或无结构化输出时只保留 L1；exact content hash 在 Extract 前去重，语义重复由 reconcile 处理。默认 **fast-write + 异步 reconcile**（`reconcile_sync=false`，最终一致）；置 `reconcile_sync=true` 可在写侧同步跑 Reconciler（强一致）。
-- **System2（异步，仅 dual）**：`ReconcilerWorker` 排空 reconcile 队列（ADD/SUPERSEDE/DELETE，构建演化链、软删 fast-write 原件）→ `System2Agent` 两阶段 DBSCAN 聚类后跑**真 ReAct 循环**（`chat_with_tools` + `s2_tools` 八工具，`tool_choice="auto"`，至多 `system2_max_iters=10` 轮）写 L6 Schema / L7 Intention / 图边 → `CrossDomainSweeper`（受 `cross_domain_enable` 控制，默认关）将 ≥5 条基础 Schema 升维为核心 Schema。触发由 `system2_trigger_mode` ∈ `{per_write, manual, scheduled}` 决定，同 user 用 `asyncio.Lock` 串行；`manual` 需 `client.digest()`。
-- **混合召回（读侧，`reader_mode=hybrid` 默认）**：**不调用 LLM**（意图分类、时间词解析均为 regex/关键词启发式），但会 **调用 Embedding API** 做 query 向量化，并在 Chroma/Kuzu 上做向量检索。管线（`retrieval/hybrid_engine.py`）：`query_understanding` → 并行召回（语义 VDB、L0 profile VDB、L6 graph schema）→ 在**已召回的语义池内**做 BM25 重排（稀有词/数字精确命中加权，无全库扫描），按 `hybrid_w_sem`/`hybrid_w_bm25` 融合，**先融合后门控**（`min_score` 作用于融合分，关键词强命中不会被语义门挤掉）→ L6 正/反向查找（`graph.evidence_counts` 批量证据加成 + RRF 融合）→ 演化链展开 → 按 profile / proactive / normal 分组。读后 fire-and-forget `ReconsolidationHook` 累加访问计数并建弱关联边。
-- **legacy 读路径（`reader_mode=legacy`）**：旧版三路向量召回 + normal 路 BM25+RRF 重排；同样无 LLM，有 embedding。
+- **System1（写侧）**：L1_RAW 先落盘 → Extractor（1 次 LLM，输出 identity/facts/intentions/basic_info 与 `is_ephemeral`）→ 提交判定 → fast-write 直接落 L0/L2/L4。摘要默认关闭；开启后长文本可写 L3。System1 不产生无人消费的 reconcile 队列；`reconcile_sync=true` 是显式强一致选项。
+- **System2（仅 dual）**：写入登记待处理 scope；只有 `await client.digest()` 才依次运行 `ReconcilerWorker` 与 `System2Agent`。后者对新鲜 L2/L4 做 DBSCAN 聚类，再通过 single-shot 或 ReAct 工具调用写 L6 Schema、L7 Intention 与图边。SDK 不启动 per-write 或 scheduled 后台任务。
+- **混合召回（读侧）**：不调用 LLM，但会调用 Embedding API。管线并行召回语义 VDB、L0 profile 和 L6 graph schema，在语义召回池内做 BM25 重排，融合图证据与演化链后按 profile / proactive / normal 分组。时间窗与派生层分别由 `created_after`、`include_derived` 显式控制，不从 query 猜测意图。
 
 ## 两档模式
 
 | 维度 | system1（默认） | dual |
 |---|---|---|
-| 写侧 LLM 调用 | Extract（长文本 +1 summarize） | 同 system1；reconcile + S2 ReAct 异步 |
-| 写入层 | L0–L4 | L0–L7 |
+| 写侧 LLM 调用 | Extract（显式启用后长文本 +1 summarize） | 同 system1；digest 时 reconcile + S2 |
+| 写入层 | L0–L4 | L0–L4、L6–L7 |
 | System2 / 图库 | ✗ | ✓ |
 | proactive 召回 | 空 | 有 L7 意图 |
 
-> 读路径说明：hybrid 读路径的关键词通道是在语义召回池上做 BM25 重排（不再单独全库扫描），融合权重/证据加成由 `hybrid_w_sem`、`hybrid_w_bm25`、`hybrid_evidence_boost_max`、`hybrid_evidence_saturate` 控制；读侧 `ReconsolidationHook` 入队的 `reconsolidation` 任务由 `system2_writer._run_reconsolidation` 以**零 LLM**方式刷新召回节点的 `last_reactivated_at`，不执行 query 情绪推断；`sdk_models.ReadResult`（trace 字段）经 `Reader.search_with_trace`（`client.search(debug=True)`）返回，`Reader.search` 仅返回 `SearchMemories`。
+> 读路径说明：关键词通道只重排语义召回池，不做全库扫描。融合权重与证据加成由 `hybrid_w_sem`、`hybrid_w_bm25`、`hybrid_evidence_boost_max`、`hybrid_evidence_saturate` 控制；`client.search(debug=True)` 返回精简的 `ReadResult`。
 
 更多接入与部署细节见 [`mcp_integration.md`](./mcp_integration.md)。

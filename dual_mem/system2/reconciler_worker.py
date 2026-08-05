@@ -131,21 +131,19 @@ class ReconcilerWorker:
     async def reconcile_pending(self, *, app_id: str, user_id: str, agent_id: str = "") -> int:
         """Process all pending reconcile tasks for one (app, user, agent) triple; return count.
 
-        Tasks are drained then processed with bounded concurrency (``reconcile_concurrency``).
+        Tasks are acknowledged only after successful processing. They run with bounded
+        concurrency (``reconcile_concurrency``).
         Each task's bottleneck is one large-prompt LLM call inside ``reconcile()`` (recall +
         LLM is read-only; apply is a fast vector upsert), so running several concurrently
         collapses an otherwise serial chain of ~9s LLM round-trips. ``reconcile_concurrency=1``
         preserves the original strict-serial behaviour.
         """
         cache = self.factory.cache
-        tasks: list[dict] = []
-        while True:
-            task = cache.dequeue_reconcile_task(
-                app_id=app_id, user_id=user_id, agent_id=agent_id
-            )
-            if task is None:
-                break
-            tasks.append(task)
+        tasks = cache.list_pending_reconcile_tasks(
+            app_id=app_id,
+            user_id=user_id,
+            agent_id=agent_id,
+        )
         if not tasks:
             return 0
 
@@ -153,27 +151,26 @@ class ReconcilerWorker:
         if concurrency == 1 or len(tasks) == 1:
             processed = 0
             for task in tasks:
-                if await self._process_task_safely(task):
-                    processed += 1
+                await self._process_task(task)
+                cache.mark_reconcile_task_done(task["id"])
+                processed += 1
             return processed
 
         sem = asyncio.Semaphore(concurrency)
 
-        async def _guarded(task: dict) -> bool:
+        async def _guarded(task: dict) -> None:
             async with sem:
-                return await self._process_task_safely(task)
+                await self._process_task(task)
+                cache.mark_reconcile_task_done(task["id"])
 
-        results = await asyncio.gather(*[_guarded(t) for t in tasks])
-        return sum(1 for ok in results if ok)
-
-    async def _process_task_safely(self, task: dict) -> bool:
-        """Run one reconcile task, swallowing failures so siblings still drain."""
-        try:
-            await self._process_task(task)
-            return True
-        except Exception as exc:
-            logger.exception("[reconcile] task failed: %s", exc)
-            return False
+        results = await asyncio.gather(
+            *[_guarded(task) for task in tasks],
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        return len(results)
 
     async def _process_task(self, task: dict) -> None:
         """Reconcile the freshly written node ids carried by a single task."""

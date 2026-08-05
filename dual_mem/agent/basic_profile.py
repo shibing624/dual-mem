@@ -33,8 +33,11 @@ def render_content(kv: dict) -> str:
     return "The user's " + ", ".join(parts) + "."
 
 
-def _sanitize_arguments(arguments: dict) -> dict:
-    """Keep only valid basic fields, trimming strings and coercing age to int."""
+def normalize_basic_info(arguments: object) -> dict:
+    """Return supported, persistable basic-profile fields in canonical form."""
+    if not isinstance(arguments, dict):
+        return {}
+
     result: dict = {}
     for k in BASIC_FIELDS:
         if k not in arguments:
@@ -77,7 +80,7 @@ class BasicProfileTool:
         session_id: str,
     ) -> PreparedL0 | None:
         """Build an L0 head candidate without embedding or upsert (for post-extract batching)."""
-        new_kv = _sanitize_arguments(arguments)
+        new_kv = normalize_basic_info(arguments)
         if not new_kv:
             return None
 

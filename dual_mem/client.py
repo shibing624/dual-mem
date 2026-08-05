@@ -37,7 +37,6 @@ from dual_mem.sdk_models import (
     UpdateResult,
     WriteResult,
 )
-from dual_mem.system2.cross_domain_sweeper import CrossDomainSweeper
 from dual_mem.system2.system2_writer import System2Writer
 from dual_mem.types import MemoryStatus
 from dual_mem.writer.memory_writer import MemoryWriter
@@ -68,9 +67,8 @@ class MemoryClient:
     - ``app_ids`` (optional on search): defaults to ``[default_app_id]``.
     - ``agent_id`` / ``session_id`` (optional): finer isolation within one user.
 
-    Lifecycle: reuse one client per process (FastAPI lifespan / agent runtime). Call
-    ``await aclose()`` on shutdown when ``mode="dual"`` and ``system2_trigger_mode="scheduled"``;
-    optional otherwise. Do **not** call ``aclose()`` after every add/search.
+    Lifecycle: reuse one client per process (FastAPI lifespan / agent runtime) and call
+    ``await aclose()`` once at shutdown. Do **not** close it after every add/search.
     """
 
     def __init__(
@@ -284,7 +282,7 @@ class MemoryClient:
             cpt = self.settings.chars_per_token
             threshold_chars = int(
                 self.settings.llm_context_window
-                * self.settings.extract_history_context_ratio
+                * self.settings.extract_dialogue_context_ratio
                 * cpt
             )
             normalized = _shape_history(
@@ -317,7 +315,7 @@ class MemoryClient:
             memory_id=result.memory_id,
             request_id=request_id,
             processing_time_ms=round((time.perf_counter() - start) * 1000, 2),
-            gate_passed=result.gate_passed,
+            commit_passed=result.commit_passed,
             extracted_count=len(result.extra_node_ids),
             extra_node_ids=list(result.extra_node_ids),
             is_ephemeral=result.is_ephemeral,
@@ -336,6 +334,7 @@ class MemoryClient:
         profile_limit: int = -1,
         profile_min_score: float = 0.3,
         intention_limit: int = 0,
+        include_derived: bool = True,
         created_after: int | None = None,
         request_id: str | None = None,
         debug: bool = False,
@@ -353,8 +352,8 @@ class MemoryClient:
             agent_ids: 智能体隔离域（多 agent 共享同一 user 时用）/
                 agent scope (when several agents share one user).
             session_ids: 限定在某些会话内检索 / restrict recall to specific sessions.
-            limit: normal 路（L2/L5/L3/L1 事实类）返回上限 /
-                cap on the normal route (episodic facts L2/L5/L3/L1).
+            limit: normal 路（L2/L3/L4）返回上限 /
+                cap on the normal route (L2/L3/L4 memories).
             min_score: normal 路最低融合分，低于此分丢弃 / min fused score for the normal route.
             profile_limit: profile 路（L0/L4/L6 画像类）上限，``-1`` = 不限 /
                 cap on the profile route (identity/schema), ``-1`` = unlimited.
@@ -365,6 +364,8 @@ class MemoryClient:
                 are forward-looking "what the user plans to do" nudges — only enable for
                 proactive recommendation; keep 0 for factual QA so intention noise does not
                 crowd out facts.
+            include_derived: 是否返回 System2 派生的 L6/L7；事实型评测应显式设为
+                ``False``，偏好与泛化任务保持 ``True``。
             created_after: 只返回该 Unix 秒之后创建的记忆（时间窗过滤）/
                 only memories created after this Unix-second cutoff.
             request_id: 日志/链路追踪 id，省略自动生成 / trace id for logs; auto-generated.
@@ -389,27 +390,11 @@ class MemoryClient:
             profile_limit=profile_limit,
             profile_min_score=profile_min_score,
             intention_limit=intention_limit,
+            include_derived=include_derived,
             created_after=created_after,
             request_id=request_id,
             collect_trace=debug,
         )
-
-        # In per_write mode, drain reconsolidation tasks the read hook just enqueued so
-        # users do not have to wait for the next write to see reconsolidation effects.
-        # The hook runs as a fire-and-forget task inside the reader, so await it FIRST —
-        # otherwise the drain races ahead of its own enqueue and finds an empty queue.
-        if (
-            isinstance(self.writer, System2Writer)
-            and self.settings.system2_trigger_mode == "per_write"
-        ):
-            enqueue_task = self.reader.last_reconsolidation_task
-            if enqueue_task is not None:
-                try:
-                    await enqueue_task
-                except Exception:
-                    pass  # enqueue failures are logged by the hook's done-callback
-            task = asyncio.create_task(self.writer._digest_reconsolidation_pending())
-            task.add_done_callback(_swallow_task_exception)
 
         return SearchResult(
             success=True,
@@ -538,23 +523,14 @@ class MemoryClient:
         ]
 
     async def digest(self) -> DigestResult:
-        """Drain every pending System2 task: reconcile chains, run S2 agent, sweeper."""
+        """Explicitly drain pending reconcile work and run System2 cognition."""
         if not isinstance(self.writer, System2Writer):
             return DigestResult(success=True, processed=0)
-        processed = await self.writer._digest_pending()
+        processed = await self.writer.digest_pending()
         timing = dict(self.writer.last_digest_stats)
-        cores = 0
-        if self.settings.cross_domain_enable:
-            sweeper = CrossDomainSweeper(factory=self.factory)
-            for app_id, user_id in self.writer.processed_pairs:
-                result = await sweeper.run(app_id=app_id, user_id=user_id)
-                if result.get("cores"):
-                    cores += int(result["cores"])
         if self.settings.purge_done_queues:
             self.factory.cache.purge_done_queues()
-        return DigestResult(
-            success=True, processed=processed, cores_created=cores, timing=timing
-        )
+        return DigestResult(success=True, processed=processed, timing=timing)
 
     async def search_coding(
         self, *, query: str, user_id: str, agent_id: str = "default_agent",
@@ -570,24 +546,10 @@ class MemoryClient:
         )
 
     async def aclose(self) -> None:
-        """Release dual-mode background resources. Idempotent.
-
-        Cancels the scheduled System2 loop when ``system2_trigger_mode="scheduled"`` and
-        releases the embedded Kuzu graph lock. No-op extras for ``system1``. Does **not**
-        await in-flight ``per_write`` digest tasks. Call once at application shutdown.
-        """
-        if isinstance(self.writer, System2Writer):
-            await self.writer.aclose()
+        """Release storage resources. Idempotent; call once at application shutdown."""
         if self._coding_writer is not None:
             self._coding_writer.store.close()
         self.factory.close()
-
-
-def _swallow_task_exception(task: asyncio.Task) -> None:
-    """Drop any exception raised in a fire-and-forget background task."""
-    if task.cancelled():
-        return
-    task.exception()
 
 
 def _normalize_messages(messages: list) -> list[ChatMessage]:

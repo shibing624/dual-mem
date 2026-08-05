@@ -11,7 +11,7 @@
 
 ## Memory architecture (L0–L7)
 
-The core idea is an **eight-layer memory model** — inspired by how the brain moves from raw experience → encoding → consolidation → abstraction: from chat traces to profile, habits, and plans, with **evolution chains** (preference updates keep history instead of blind overwrite):
+dual-mem implements **seven memory layers (L0–L4, L6, L7)** — inspired by how the brain moves from raw experience → encoding → consolidation → abstraction: from chat traces to profile, habits, and plans, with **evolution chains** (preference updates keep history instead of blind overwrite):
 
 | Layer | What it holds | Example |
 |---|---|---|
@@ -20,7 +20,6 @@ The core idea is an **eight-layer memory model** — inspired by how the brain m
 | **L2 Facts** | Verifiable statements | “Flying to Beijing next week” |
 | **L3 Summaries** | Long-text compression | Key points from a long note |
 | **L4 Identity & prefs** | Stable “who you are” | “Main language is Python” |
-| **L5 Knowledge** | Domain snippets | Concepts the user taught you |
 | **L6 Patterns** | Habits from many facts | “Lists everything before trips; loves organizing” |
 | **L7 Intentions** | Plans and goals | “Training for a marathon” |
 
@@ -31,14 +30,14 @@ When preferences change (Java → Python), old entries aren’t erased — an **
 | | **System1 · short-term** | **System2 · deep memory** |
 |---|---|---|
 | **Like** | Hear and note it now | Sleep on it; understand deeper over time |
-| **When** | Every `add`, ready in seconds | `dual` mode, async in background (or on a schedule) |
+| **When** | Every `add`, ready in seconds | Explicit `digest()` in `dual` mode |
 | **Produces** | L0–L4: facts, prefs, profile | L6 patterns, L7 intentions, linked knowledge |
 | **How to enable** | `mode="system1"` (default) | `mode="dual"` |
 
 ```
 add conversation ──▶ System1 short-term memory (usable immediately)
                          │
-                         └──▶ System2 deep memory (dual: background consolidation)
+                         └──▶ System2 deep memory (dual: consolidate on digest)
 ```
 
 Recall groups results into **profile / proactive / normal**; hybrid semantic + keyword search; **no extra LLM on read** (embedding only).
@@ -55,7 +54,7 @@ Recall groups results into **profile / proactive / normal**; hybrid semantic + k
 ## 🔥 News
 
 - [2026/06/20] **v0.1.2**: MemoryOperations for REST/MCP; SyncMemoryClient; CLI messages; post-extract embed batching; MCP bootstrap fixes and docs.
-- [2026/06/19] **v0.1.1**: Attentional Gate is now **LLM-primary** (heuristic fallback); dependencies split into `[api]` / `[cli]` / `[mcp]` extras; hybrid reader V2 by default.
+- [2026/06/19] **v0.1.1**: Dependencies split into `[api]` / `[cli]` / `[mcp]` extras; hybrid reader V2 became the default.
 - [2026/06/18] **v0.1.0**: Initial release — system1 / dual modes, evolution chains, REST `/v1/memories/` contract, MCP tools.
 
 ## Architecture at a glance
@@ -137,9 +136,9 @@ Config lives at `~/.dual_mem/config.yaml` (**auto-created on first startup**). *
 
 ## Features
 
-- **Eight layers + evolution chains** — from raw chat to patterns and intentions; preference history preserved
-- **System1 short-term memory** — structured on write; filters small talk, keeps what matters
-- **System2 deep memory** (dual) — background consolidation into L6/L7
+- **Seven implemented layers + evolution chains** — from raw chat to patterns and intentions; preference history preserved
+- **System1 short-term memory** — structured on write; the Extractor decides whether to commit derived memories
+- **System2 deep memory** (dual) — explicit `digest()` consolidates L6/L7 at a business boundary
 - **Hybrid retrieval** — semantic + keyword; profile / proactive / normal routes
 - **Sync & async SDK** — `SyncMemoryClient` for scripts; `MemoryClient` for FastAPI / agents
 - **OpenAI-compatible** — any LLM / embedding endpoint
@@ -150,7 +149,7 @@ Config lives at `~/.dual_mem/config.yaml` (**auto-created on first startup**). *
 | | **system1** (default) | **dual** |
 |---|---|---|
 | Short-term memory | ✓ | ✓ |
-| Deep memory | — | ✓ (background or scheduled consolidation) |
+| Deep memory | — | ✓ (explicit `digest()` consolidation) |
 | Best for | Assistants, support bots, quick integration | Deeper user modeling, intentions, behavior patterns |
 | Graph links | off | on |
 
@@ -176,7 +175,7 @@ See [examples/](https://github.com/shibing624/dual-mem/tree/main/examples) for r
 | Category | Content |
 |----------|---------|
 | **SDK basics** | Short-term writes, evolution chains, multi-turn `messages` |
-| **Deep memory** | dual mode, scheduled consolidation |
+| **Deep memory** | dual mode with explicit consolidation |
 | **REST** | FastAPI TestClient against `/v1/memories/` |
 | **CLI** | `dual-mem` add / search / list / delete |
 

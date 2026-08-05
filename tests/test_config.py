@@ -23,7 +23,7 @@ def test_defaults():
     assert s.embed_input_max_chars == int(EMBED_MAX_TOKENS * CHARS_PER_TOKEN)
     assert s.auth_disabled is True
     assert s.default_app_id == "default"
-    assert s.system2_trigger_mode == "per_write"
+    assert s.summarizer_enabled is False
     assert s.persist_history is False
     assert s.purge_done_queues is True
 
@@ -149,7 +149,6 @@ def test_preset_default_equals_code_defaults():
     assert s.reconcile_non_destructive is False
     assert s.reconcile_skip_llm is False
     assert s.reconcile_policy == "balanced"
-    assert s.reader_suppress_derived_on_factual is False
 
 
 def test_preset_high_recall_fills_knobs():
@@ -157,7 +156,6 @@ def test_preset_high_recall_fills_knobs():
     assert s.reconcile_non_destructive is True
     assert s.reconcile_skip_llm is True
     assert s.reconcile_policy == "conservative"
-    assert s.reader_suppress_derived_on_factual is True
     # latency knobs are orthogonal — NOT touched by any preset
 
 

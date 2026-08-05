@@ -134,11 +134,13 @@ async def test_reconcile_sync_basic_info_only_writes_l0_no_enqueue(tmp_storage):
     l0 = factory.vector.get(stored_ids[0])
     assert l0 is not None and l0.layer is Layer.L0_BASIC_INFO
     # No reconcile task enqueued for an L0-only write.
-    assert factory.cache.dequeue_reconcile_task(app_id="app", user_id="u", agent_id="ag") is None
+    assert factory.cache.list_pending_reconcile_tasks(
+        app_id="app", user_id="u", agent_id="ag"
+    ) == []
 
 
-async def test_async_path_enqueues_only_l2l4_not_l0(tmp_storage):
-    """Default (async) path: the reconcile task carries L2/L4 ids only, never the L0 id."""
+async def test_system1_fast_write_does_not_leave_reconcile_work(tmp_storage):
+    """System1 has no digest consumer, so fast writes must not accumulate queue rows."""
     embed = CountingEmbed()
     factory = ComponentFactory(
         settings=Settings(mode="system1", storage_dir=tmp_storage),
@@ -158,10 +160,8 @@ async def test_async_path_enqueues_only_l2l4_not_l0(tmp_storage):
         request_id="req", memory_at=None,
     )
 
-    l0_ids = {nid for nid in stored_ids
-              if (n := factory.vector.get(nid)) is not None and n.layer is Layer.L0_BASIC_INFO}
-    task = factory.cache.dequeue_reconcile_task(app_id="app", user_id="u", agent_id="ag")
-    assert task is not None
-    enqueued = set(task["node_ids"])
-    assert enqueued  # L4 identity was queued
-    assert enqueued.isdisjoint(l0_ids)  # but the L0 id never enters the reconcile queue
+    tasks = factory.cache.list_pending_reconcile_tasks(
+        app_id="app", user_id="u", agent_id="ag"
+    )
+    assert stored_ids
+    assert tasks == []

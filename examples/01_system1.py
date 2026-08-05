@@ -1,8 +1,8 @@
 """Demo 1 — system1 档：System1 抽取 + 演化链 + 多轮 messages 输入。
 
 场景：用户偏好随时间变化，记忆系统应自动用新认知"取代"旧认知，并保留可追溯的演化链。
-system1 档每次 `add` 会跑一次 Extractor LLM：提交判定 → fast-write 直落 L0/L2/L4 → 异步 reconcile
-合并演化链（默认 `reconcile_sync=false`；置 true 则写路径同步 reconcile）。本 demo 同时
+system1 档每次 `add` 会跑一次 Extractor LLM：提交判定 → fast-write 直落 L0/L2/L4。
+本 demo 显式设置 `reconcile_sync=true` 来展示演化链，同时
 演示 `add(messages=[...])`：L1_RAW 与 Extractor 都接收带角色标记的完整对话。
 
 环境要求：`llm_*` + `embed_*` 全部齐全；会产生真实 LLM 调用与少量费用。
@@ -16,10 +16,17 @@ import asyncio
 from _common import fresh_storage, section, show_memories
 
 from dual_mem import MemoryClient
+from dual_mem.config import Settings
 
 
 async def main() -> None:
-    client = MemoryClient(mode="system1", storage_dir=fresh_storage("system1"))
+    client = MemoryClient(
+        settings=Settings(
+            mode="system1",
+            storage_dir=fresh_storage("system1"),
+            reconcile_sync=True,
+        )
+    )
     user = "bob"
     try:
         section("第 1 轮：单轮 content 写入（自我介绍 + 旧偏好）")
@@ -30,7 +37,7 @@ async def main() -> None:
             res = await client.add(content=text, user_id=user)
             print(
                 f"  + {text}\n    -> id={res.memory_id[:8]}  "
-                f"commit={res.gate_passed}  "
+                f"commit={res.commit_passed}  "
                 f"({res.processing_time_ms / 1000:.2f}s)"
             )
 
@@ -44,7 +51,7 @@ async def main() -> None:
         res = await client.add(messages=dialogue, user_id=user)
         print(
             f"  -> id={res.memory_id[:8]}  extracted={res.extracted_count}  "
-            f"commit={res.gate_passed}  "
+            f"commit={res.commit_passed}  "
             f"({res.processing_time_ms / 1000:.2f}s)"
         )
 

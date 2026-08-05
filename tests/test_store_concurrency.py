@@ -137,7 +137,6 @@ async def test_cache_parallel_writes_under_lock(tmp_storage):
             stage="TEST",
             payload={"i": i},
         )
-        await asyncio.to_thread(cache.bump_access, [f"node-{i}"])
         await asyncio.to_thread(
             cache.enqueue_reconcile_task,
             app_id="app",

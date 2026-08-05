@@ -84,7 +84,6 @@ async def test_sai_mock_recall_at_k(tmp_storage, fake_embed):
     hits = 0
     for facts, query, must_contain in _CASES:
         # Fresh storage per case to avoid cross-pollination.
-        client.factory.cache.bump_access([])  # noop, just sanity
         _seed(client, fake_embed, facts)
         result = await client.search(
             query=query, app_ids=["app"], user_id="u_bench", limit=5, min_score=0.0,

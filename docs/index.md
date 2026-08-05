@@ -1,15 +1,15 @@
 # dual-mem
 
-**dual-mem** 是面向 LLM 应用与 Agent 的**双系统分层记忆 SDK**：写侧 System1 同步认知 + System2 异步沉淀，读侧 hybrid 混合召回，演化链显式追踪偏好与事实变更。
+**dual-mem** 是面向 LLM 应用与 Agent 的**双系统分层记忆 SDK**：写侧 System1 同步认知，System2 在显式 `digest()` 时沉淀；读侧用 hybrid 混合召回，演化链追踪偏好与事实变更。
 
 ## 核心能力
 
 | 能力 | 说明 |
 |------|------|
 | **演化链** | 写侧 `supersedes` / `superseded_by` 双向指针；读侧自动展开历史版本 |
-| **System1 写路径** | Extract（单次 LLM）→ 提交判定 → fast-write L0/L2/L4 → 异步 Reconcile |
+| **System1 写路径** | Extract（单次 LLM）→ 提交判定 → fast-write L0/L2/L4 |
 | **System2 沉淀（dual）** | DBSCAN 聚类 + 8 工具 ReAct Agent → L6 Schema / L7 Intention |
-| **三路召回（零 LLM）** | profile / proactive / normal；默认 hybrid anchor + fusion |
+| **三路召回（零 LLM）** | profile / proactive / normal；单一 hybrid 检索路径 |
 | **多入口** | SDK / REST / MCP / CLI / Skill 共享 `MemoryClient` |
 
 ## 快速链接

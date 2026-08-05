@@ -75,6 +75,7 @@ def build_mcp(
         limit: int = 10,
         min_score: float = 0.4,
         intention_limit: int = 0,
+        include_derived: bool = True,
     ) -> dict:
         return await ops.memory_search(
             query=query,
@@ -84,6 +85,7 @@ def build_mcp(
             limit=limit,
             min_score=min_score,
             intention_limit=intention_limit,
+            include_derived=include_derived,
         )
 
     @mcp.tool(description="列出某 scope 下 ACTIVE 记忆。")

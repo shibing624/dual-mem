@@ -9,16 +9,14 @@ def test_profile_roundtrip(tmp_storage):
     assert c.get_profile("u::a::s") == {"name": "Alice"}
 
 
-def test_s2_queue_enqueue_dequeue(tmp_storage):
+def test_s2_queue_acknowledges_scope_after_success(tmp_storage):
     c = CacheStore(tmp_storage)
-    assert c.dequeue_s2_task() is None
+    assert c.list_pending_s2_scopes() == []
     c.enqueue_s2_task("u1", "app1")
     c.enqueue_s2_task("u2", "app1")
-    t1 = c.dequeue_s2_task()
-    assert t1["user_id"] == "u1"
-    t2 = c.dequeue_s2_task()
-    assert t2["user_id"] == "u2"
-    assert c.dequeue_s2_task() is None
+    assert [task["user_id"] for task in c.list_pending_s2_scopes()] == ["u1", "u2"]
+    c.mark_s2_scope_done(app_id="app1", user_id="u1", agent_id="")
+    assert [task["user_id"] for task in c.list_pending_s2_scopes()] == ["u2"]
 
 
 def test_pipeline_log(tmp_storage):
@@ -64,8 +62,8 @@ def test_history_disabled_is_noop(tmp_storage):
 def test_purge_done_queues(tmp_storage):
     c = CacheStore(tmp_storage)
     c.enqueue_reconcile_task(app_id="app", user_id="u", agent_id="", node_ids=["a"])
-    task = c.dequeue_reconcile_task(app_id="app", user_id="u")
-    assert task is not None
+    task = c.list_pending_reconcile_tasks(app_id="app", user_id="u")[0]
+    c.mark_reconcile_task_done(task["id"])
     assert c.purge_done_queues() == 1
     row = c.conn.execute("SELECT COUNT(*) AS n FROM reconcile_queue").fetchone()
     assert int(row["n"]) == 0

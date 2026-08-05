@@ -121,6 +121,27 @@ async def test_blank_structured_items_reject_commit(tmp_storage, fake_embed):
     assert is_ephemeral is False
 
 
+async def test_malformed_basic_info_rejects_commit(tmp_storage, fake_embed):
+    response = {
+        **EXTRACT_RESPONSE,
+        "identity": [],
+        "facts": [],
+        "intentions": [],
+        "basic_info": {"name": {}, "age": []},
+    }
+    factory = _factory(tmp_storage, fake_embed, {"extract": response})
+
+    stored_ids, commit_result, is_ephemeral = await _run(
+        MemAgent(factory=factory),
+        "Extractor 返回了类型错误的基本信息",
+    )
+
+    assert stored_ids == []
+    assert commit_result.passed is False
+    assert commit_result.reason == "extractor produced no persistable memory"
+    assert is_ephemeral is False
+
+
 async def test_passed_extract_summarizer_overlaps(tmp_storage, fake_embed):
     long_text = "x" * 1600
     order: list[str] = []

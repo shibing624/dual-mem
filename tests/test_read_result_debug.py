@@ -22,7 +22,6 @@ async def test_search_debug_returns_read_result(tmp_storage, fake_embed):
     result = await client.search(query="咖啡", app_ids=["app"], user_id="u", debug=True)
     assert result.read_result is not None
     rr = result.read_result
-    assert rr.intent in ("FACTUAL", "CONCEPTUAL", "NAVIGATIONAL")
     assert rr.final_count >= 1
     assert rr.elapsed_ms >= 0.0
     # to_dict 应该包含 read_result

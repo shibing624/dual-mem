@@ -3,6 +3,7 @@ import pytest
 from dual_mem.agent.basic_profile import (
     BASIC_FIELDS,
     BasicProfileTool,
+    normalize_basic_info,
     render_content,
 )
 from dual_mem.isolation import build_filter
@@ -28,6 +29,20 @@ def _full_kv(nodes):
 def test_render_content():
     assert render_content({"name": "张三", "age": 30}) == "The user's name is 张三, age is 30."
     assert render_content({}) == ""
+
+
+def test_normalize_basic_info_rejects_unknown_empty_and_malformed_fields():
+    assert normalize_basic_info(
+        {
+            "name": {},
+            "age": [],
+            "location": "  北京  ",
+            "occupation": None,
+            "employer": "null",
+            "nickname": "小明",
+        }
+    ) == {"location": "北京"}
+    assert normalize_basic_info(None) == {}
 
 
 async def test_evolution_chain_two_applies(store, fake_embed):

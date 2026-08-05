@@ -59,7 +59,7 @@ async def test_reconcile_pending_drains_all_tasks(tmp_storage, fake_embed, concu
 
     assert processed == 6
     # queue fully drained
-    assert factory.cache.dequeue_reconcile_task(app_id="app", user_id="u") is None
+    assert factory.cache.list_pending_reconcile_tasks(app_id="app", user_id="u") == []
     # each fast-write original was re-emitted by a reconcile ADD → covered → shadowed
     for i in range(6):
         node = factory.vector.get(f"fw_{i}")
@@ -86,3 +86,23 @@ async def test_reconcile_concurrency_matches_serial_result(tmp_path, fake_embed)
     )
 
     assert n_serial == n_parallel == 5
+
+
+async def test_failed_reconcile_task_remains_pending(
+    tmp_storage,
+    fake_embed,
+    monkeypatch,
+):
+    factory = _make_factory(tmp_storage, fake_embed, 1)
+    _enqueue_tasks(factory, 1)
+    worker = ReconcilerWorker(factory=factory)
+
+    async def _fail(_task):
+        raise RuntimeError("reconcile failed")
+
+    monkeypatch.setattr(worker, "_process_task", _fail)
+    with pytest.raises(RuntimeError, match="reconcile failed"):
+        await worker.reconcile_pending(app_id="app", user_id="u", agent_id="")
+
+    tasks = factory.cache.list_pending_reconcile_tasks(app_id="app", user_id="u")
+    assert len(tasks) == 1

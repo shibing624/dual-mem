@@ -49,6 +49,7 @@ class MemoryOperations:
         profile_limit: int = -1,
         profile_min_score: float = 0.3,
         intention_limit: int = 0,
+        include_derived: bool = True,
         created_after: int | None = None,
         debug: bool = False,
     ) -> dict:
@@ -63,6 +64,7 @@ class MemoryOperations:
             profile_limit=profile_limit,
             profile_min_score=profile_min_score,
             intention_limit=intention_limit,
+            include_derived=include_derived,
             created_after=created_after,
             debug=debug,
         )

@@ -108,7 +108,6 @@ PRESETS: dict[str, dict[str, Any]] = {
         "reconcile_non_destructive": True,
         "reconcile_skip_llm": True,
         "reconcile_policy": "conservative",
-        "reader_suppress_derived_on_factual": True,
     },
 }
 PRESET_NAMES = tuple(PRESETS.keys())
@@ -167,14 +166,10 @@ class Settings(BaseSettings):
     # Default tenant namespace when add/list/search omit app_id (single-product default).
     default_app_id: str = "default"
 
-    system2_trigger_mode: Literal["per_write", "manual", "scheduled"] = "per_write"
-    # Scheduled-mode background loop period in seconds (only used when trigger_mode=scheduled).
-    system2_schedule_interval_sec: int = 300
-
     # Serialize concurrent add() for the same (app_id, user_id) behind a per-user asyncio.Lock
     # so the fast-write -> reconcile evolution chain never races. Default on (production-safe).
     # Set False for batch ingestion where many sessions of ONE user are written concurrently
-    # and reconcile is deferred (manual/scheduled trigger) — lets per-session extract
+    # and reconcile is deferred until digest() — lets per-session extract
     # overlap instead of running strictly one at a time. The vector store is internally
     # thread-safe, so disabling the lock is safe under deferred reconcile.
     write_serialize_per_user: bool = True
@@ -216,7 +211,7 @@ class Settings(BaseSettings):
     reconcile_concurrency: int = 1
     # Run reconciler synchronously inside the write path (strong consistency for evolution
     # chains; also raises latency to ~2 LLM calls per add). Default off: async reconcile
-    # via ReconcilerWorker (per_write task drains chains within seconds).
+    # via ReconcilerWorker during explicit digest().
     reconcile_sync: bool = False
     # System2 ReAct loop iteration cap (the agent stops earlier when the LLM emits no more
     # tool_calls). Only the residual ReAct path uses this — single-shot handles the small/
@@ -245,7 +240,7 @@ class Settings(BaseSettings):
     content_hash_scope: Literal["session", "user"] = "session"
 
     # L3 summarizer (long content only). Threshold is token-based (× chars_per_token internally).
-    summarizer_enabled: bool = True
+    summarizer_enabled: bool = False
     summarizer_min_content_tokens: int = 600
 
     # Extract final-blob hard cap in tokens (0 = disabled → rely on the LLM chunk+merge path).
@@ -257,51 +252,30 @@ class Settings(BaseSettings):
     extract_retry_on_failure: bool = True
     # Few-shot 示例：extract prompt 末尾追加示例，引导 4B 模型稳定格式。
     extract_few_shot_enabled: bool = False
-    # 历史上下文轮数：extract 时传最近 N 轮 L1_RAW 做共指消解。0=关闭。
-    extract_history_turns: int = 20
     # Multi-turn extract input shaping (messages=...): no user/assistant turn is ever dropped.
-    # When the dialogue exceeds ``extract_history_context_ratio`` of ``llm_context_window``,
+    # When the dialogue exceeds ``extract_dialogue_context_ratio`` of ``llm_context_window``,
     # only assistant turns are truncated to ``extract_assistant_max_tokens``; user turns stay
     # full (primary memory signal). role=system dialogue turns are ignored (not memory).
     # The extract LLM's EXTRACT_* template system prompt is instruction-only, not chat history.
-    extract_history_context_ratio: float = 0.7
+    extract_dialogue_context_ratio: float = 0.7
     extract_assistant_max_tokens: int = 512
 
     # Embedding write-side batching window for embed_queued (does not affect search-side embed).
     embed_queue_batch_size: int = 32
     embed_queue_window_ms: float = 200.0
     embed_cache_size: int = 10_000
-    # Cross-domain Sweeper: behavior abstraction + cosine collision + Union-Find induction.
-    cross_domain_enable: bool = False
-    cross_domain_min_basics: int = 5
-    cross_domain_threshold: float = 0.7
-
     # Append-only history.db audit log (ADD/SUPERSEDE/DELETE snapshots). Off by default —
     # not used on the read path; enable for compliance / debugging.
     persist_history: bool = False
     # Drop reconcile/s2 queue rows after digest drains them (keeps cache.db small).
     purge_done_queues: bool = True
 
-    # Read pipeline: hybrid (default) = semantic recall + in-pool BM25 rerank + graph
-    # evidence fusion (L0/L6 profile, L4 in normal); legacy = original three-route + bm25
-    # RRF rerank baseline.
-    reader_mode: Literal["hybrid", "legacy"] = "hybrid"
     # Hybrid read fusion tunables (semantic vs in-pool BM25 rerank weight; graph L6 evidence
     # boost). Sum of the two weights need not be 1; evidence boost saturates at the given count.
     hybrid_w_sem: float = 0.6
     hybrid_w_bm25: float = 0.4
     hybrid_evidence_boost_max: float = 0.3
     hybrid_evidence_saturate: int = 5
-    # 降噪开关（默认关）：开启后，FACTUAL/NAVIGATIONAL 查询不返回 System2 派生层 L6 schema /
-    # L7 intention，把 top-k 名额全留给原始事实。这是为"原始事实召回/计数"类基准（如 LME）准备的
-    # opt-in；对"偏好演化/泛化"类场景（如 PersonaMem）和通用 SDK 用户，schema/intention 正是价值
-    # 所在，故默认 False 保留它们。零额外 LLM（启发式 intent）。
-    reader_suppress_derived_on_factual: bool = False
-
-    # Read-side reconsolidation hook (access bump + co-recall edges + optional S2 enqueue).
-    reconsolidation_enabled: bool = True
-    reconsolidation_min_interval_sec: float = 0.0
-
     # Coding/tool-use memory subsystem — separate write/store path for engineering
     # conversations containing tool calls. When enabled, add() first checks for tool
     # messages; if found, an LLM judge decides coding vs chat, and coding memories

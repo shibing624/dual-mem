@@ -4,17 +4,12 @@
 - reconcile no/weak-candidate fast path (skip LLM, SUPPLEMENT)
 - reconcile_policy=conservative prompt addendum
 - lossless shadow (uncovered fast-write originals stay ACTIVE)
-- include_evolution-by-intent heuristic
 """
 import json
-
-import pytest
 
 from dual_mem.agent.reconciler import Reconciler
 from dual_mem.config import Settings
 from dual_mem.registry import ComponentFactory
-from dual_mem.retrieval.formatter import include_evolution_for_query
-from dual_mem.retrieval.intent import wants_evolution_history
 from dual_mem.system2.reconciler_worker import ReconcilerWorker
 from dual_mem.system2.system2_agent import System2Agent
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
@@ -168,21 +163,3 @@ async def test_uncovered_original_stays_active(tmp_storage, fake_embed):
     # "MERGED" did not cover either original → both remain ACTIVE (no silent loss).
     assert factory.vector.get("fw0").status is MemoryStatus.ACTIVE
     assert factory.vector.get("fw1").status is MemoryStatus.ACTIVE
-
-
-# ------------------------------------------------------------------ evolution-by-intent
-
-
-@pytest.mark.parametrize(
-    "query,expected",
-    [
-        ("What laptop do I use now?", False),
-        ("What laptop did I use previously?", True),
-        ("我之前用的是什么笔记本？", True),
-        ("我现在用什么笔记本？", False),
-        ("用户原来住在哪里", True),
-    ],
-)
-def test_include_evolution_for_query(query, expected):
-    assert include_evolution_for_query(query) is expected
-    assert wants_evolution_history(query) is expected

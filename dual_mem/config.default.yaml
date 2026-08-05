@@ -29,7 +29,7 @@ embed_dim: 1536                       # 须与 embed 模型输出维度一致（
 
 # --- 运行模式与存储 ---
 # system1：同步 System1（Extract → 快写 L0–L4），秒级可用
-# dual   ：System1 + 异步 System2（图 / L6 schema / L7 intention）
+# dual   ：System1 + 显式 digest 的 System2（图 / L6 schema / L7 intention）
 mode: system1
 storage_dir: ./.dual_mem_data        # 数据目录（Chroma / SQLite / Kuzu 均在此下）
 
@@ -67,9 +67,7 @@ preset: default
 #   - default
 # default_app_id: default             # add/list/search 未传 app_id 时的默认租户
 
-# --- System2 异步管线（仅 mode=dual）---
-# system2_trigger_mode: per_write     # per_write / manual（client.digest() 触发）/ scheduled
-# system2_schedule_interval_sec: 300  # scheduled 模式的循环间隔（秒）
+# --- System2 显式管线（仅 mode=dual；调用 client.digest() 触发）---
 # reconcile_sync: false               # true：写入路径同步 Reconcile（强一致，延迟 +1 次 LLM）
 # system2_max_iters: 6                # ReAct 最大轮数（仅残余 ReAct 路径用）
 # system2_single_shot_max_clusters: 1 # single-shot 门槛：簇数 ≤ 此值
@@ -88,24 +86,19 @@ preset: default
 # content_hash_scope: session         # session（严格）/ user（跨会话，命中率更高）
 
 # --- Extract / Summarize ---
-# summarizer_enabled: true
+# summarizer_enabled: false
 # summarizer_min_content_tokens: 600  # L3 摘要触发阈值（token）
 # extract_max_content_tokens: 0       # Extract 输入硬上限（token，0=不截断走分块 merge）；benchmark 可设 4000
 # extract_retry_on_failure: true
 # extract_few_shot_enabled: true      # extract prompt 末尾追加 few-shot 示例（引导小模型稳定格式）
-# extract_history_turns: 20           # extract 时传最近 N 轮 L1_RAW 做共指消解；0=关闭
-# extract_history_context_ratio: 0.7  # 对话超此 context 比例时仅截断 assistant 轮，user 轮全保留
+# extract_dialogue_context_ratio: 0.7 # 对话超此 context 比例时仅截断 assistant 轮，user 轮全保留
 # extract_assistant_max_tokens: 512
 
 # --- 读路径 ---
-# reader_mode: hybrid                 # hybrid（语义召回 + 池内 BM25 重排 + 图证据融合）/ legacy
 # hybrid_w_sem: 0.6                    # hybrid 融合权重：语义
 # hybrid_w_bm25: 0.4                   # hybrid 融合权重：池内 BM25 重排
 # hybrid_evidence_boost_max: 0.3       # 图 L6 证据加成上限
 # hybrid_evidence_saturate: 5          # 证据加成饱和计数
-# reader_suppress_derived_on_factual: false  # true：FACTUAL/NAVIGATIONAL 查询不返回 L6/L7，top-k 全给原始事实 → preset high_recall
-# reconsolidation_enabled: true        # 读侧 reconsolidation（access bump + co-recall 边）
-# reconsolidation_min_interval_sec: 0  # 0=每次 search 都跑；>0=同 user 最小间隔（秒）
 
 # --- Coding/tool-use memory（工程对话独立链路）---
 # coding_enabled: false                 # opt-in；开启后 add() 先检测 tool 消息，coding 走独立 store
@@ -116,11 +109,6 @@ preset: default
 # embed_queue_batch_size: 32
 # embed_queue_window_ms: 200.0
 # embed_cache_size: 10000
-# --- Cross-domain Sweeper（默认关；将多个 base schema 归纳为核心 schema）---
-# cross_domain_enable: false
-# cross_domain_min_basics: 5
-# cross_domain_threshold: 0.7
-
 # --- 其它 ---
 # persist_history: false              # 写入审计 history.db（读路径不用；默认关）
 # purge_done_queues: true             # digest 后删除已完成队列行，防止 cache.db 膨胀

@@ -1,7 +1,7 @@
-"""P1-1 子PR4 + P1-3: 默认 hybrid reader 路径回归。
+"""Hybrid reader 路径回归。
 
-These tests pin the contract that hybrid mode (default) and legacy mode both produce a
-SearchMemories with profile/proactive/normal routes, and that hybrid runs the semantic +
+These tests pin the contract that the reader produces SearchMemories with
+profile/proactive/normal routes and runs the semantic +
 BM25-rerank + evidence-fusion pipeline. They do NOT validate every dimension of fusion
 (those have their own unit tests) — just the integration smoke.
 """
@@ -30,7 +30,6 @@ def _seed(client, content: str, layer: Layer, *, user_id: str = "u",
 async def test_hybrid_reader_default_returns_routes(tmp_storage, fake_embed):
     """默认 hybrid：L4 identity 走 normal 路由。"""
     settings = Settings(mode="system1", storage_dir=tmp_storage)
-    assert settings.reader_mode == "hybrid"
     client = MemoryClient(settings=settings, embed=fake_embed,
                           llm=FakeLLMClient(responses={"extract": {
                               "is_ephemeral": False,
@@ -43,23 +42,6 @@ async def test_hybrid_reader_default_returns_routes(tmp_storage, fake_embed):
     result = await client.search(query="咖啡", app_ids=["app"], user_id="u")
     assert result.success
     assert any("咖啡" in m.content for m in result.memories.normal)
-
-    await client.aclose()
-
-
-async def test_legacy_reader_mode_kept_for_baseline(tmp_storage, fake_embed):
-    """legacy 模式仍然可用（BM25+RRF 基线路径）。"""
-    settings = Settings(mode="system1", storage_dir=tmp_storage, reader_mode="legacy")
-    client = MemoryClient(settings=settings, embed=fake_embed,
-                          llm=FakeLLMClient(responses={"extract": {
-                              "is_ephemeral": False,
-                              "emotion": {"valence": 0.0, "arousal": 0.0, "dominant_emotion": None},
-                              "identity": [], "facts": [], "intentions": [], "basic_info": {}}}))
-
-    _seed(client, "用户喜欢喝咖啡", Layer.L4_IDENTITY)
-    result = await client.search(query="咖啡", app_ids=["app"], user_id="u")
-    assert result.success
-    assert any("咖啡" in m.content for m in result.memories.profile)
 
     await client.aclose()
 

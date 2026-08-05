@@ -79,6 +79,7 @@ def _item_to_memory(item: dict) -> MemoryItem:
         category=node.category.value,
         score=item["score"],
         tags=list(node.tags),
+        session_id=node.session_id,
         memory_at=node.memory_at,
         gmt_created=node.gmt_created,
         gmt_modified=node.gmt_modified,
@@ -101,7 +102,7 @@ async def search_hybrid(
     profile_min_score: float = 0.3,
     intention_limit: int = 0,
     created_after: int | None = None,
-    suppress_derived: bool = False,
+    include_derived: bool = True,
 ) -> SearchMemories:
     """Run hybrid recall + fusion; return profile/proactive/normal groups."""
     vector = factory.vector
@@ -163,7 +164,7 @@ async def search_hybrid(
         ]
 
     async def _graph_schema() -> list[dict]:
-        if graph is None:
+        if graph is None or not include_derived:
             return []
         hits = await asyncio.to_thread(
             graph.query_by_embedding,
@@ -198,9 +199,13 @@ async def search_hybrid(
 
     if isinstance(results[0], Exception):
         logger.warning("[hybrid] vdb semantic failed: %s", results[0])
+    if isinstance(results[1], Exception):
+        logger.warning("[hybrid] profile vdb failed: %s", results[1])
+    if isinstance(results[2], Exception):
+        logger.warning("[hybrid] graph schema failed: %s", results[2])
 
     intention_hits: list[dict] = []
-    if intention_limit > 0:
+    if include_derived and intention_limit > 0:
         intention_hits = await recall_intentions(
             vector,
             query_embedding,
@@ -285,7 +290,7 @@ async def search_hybrid(
     # Forward L6: batch the evidence-count lookup into a single graph round-trip instead of
     # one evidence_of() call per schema (the previous serial loop dominated read latency).
     forward_l6: list[dict] = []
-    if graph is not None and graph_schema_hits:
+    if include_derived and graph is not None and graph_schema_hits:
         schema_ids = [row["node_id"] for row in graph_schema_hits]
         try:
             ev_counts = await asyncio.to_thread(graph.evidence_counts, schema_ids)
@@ -312,7 +317,7 @@ async def search_hybrid(
         forward_l6.sort(key=lambda x: x["_internal"], reverse=True)
 
     reverse_l6: list[dict] = []
-    if graph is not None and vdb_scored:
+    if include_derived and graph is not None and vdb_scored:
         reverse_l6 = await reverse_lookup_l6(
             graph,
             [v["node_id"] for v in vdb_scored],
@@ -378,14 +383,11 @@ async def search_hybrid(
 
     l0_results = [it for it in expanded if _layer_of(it) in _PROFILE_LAYER_VALS]
     l0_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    profile_results = l0_results + ([] if suppress_derived else fused_l6)
+    profile_results = l0_results + (fused_l6 if include_derived else [])
     if profile_limit == 0:
         profile_results = []
     elif profile_limit > 0:
         profile_results = profile_results[:profile_limit]
-
-    if suppress_derived:
-        intention_hits = []
 
     logger.info(
         "read_hybrid user=%s vdb_sem=%d bm25_hits=%d profile_l0=%d fwd_l6=%d rev_l6=%d "

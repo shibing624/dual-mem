@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: MemAgent orchestrating the System1 cognitive pipeline. Defaults to fast-write
-(extract -> direct ADD into L2/L4, queue reconcile for the System2 background worker) so the
-write path stays light. When reconcile_sync=True we run reconcile inline for strong-consistency
-contracts. Also handles L7 intentions (dual graph), L0 basic profile, and L3 summary.
+@description: MemAgent orchestrating the System1 cognitive pipeline. It fast-writes extracted
+L2/L4 memories and, in dual mode, queues reconcile work for explicit digest(). When
+reconcile_sync=True it reconciles inline for strong consistency. It also handles L7 intentions,
+L0 basic profiles, and optional L3 summaries.
 """
 import asyncio
 import logging
@@ -12,7 +12,7 @@ import time
 import uuid
 from datetime import datetime
 
-from dual_mem.agent.basic_profile import BasicProfileTool, render_content
+from dual_mem.agent.basic_profile import BasicProfileTool, normalize_basic_info
 from dual_mem.agent.extractor import Extractor
 from dual_mem.agent.reconciler import ReconcileOp, Reconciler
 from dual_mem.agent.summarizer import Summarizer
@@ -57,34 +57,6 @@ class MemAgent:
             weak_candidate_score=self.settings.reconcile_weak_candidate_score,
             non_destructive=self.settings.reconcile_non_destructive,
         )
-        # Per-user history ring buffer for extract coreference.
-        self._history: dict[str, list[str]] = {}
-
-    def _history_key(self, app_id: str, user_id: str) -> str:
-        return f"{app_id}::{user_id}"
-
-    def _get_history_context(self, app_id: str, user_id: str) -> str:
-        """Format recent L1_RAW content as coreference context for the extractor."""
-        n = self.settings.extract_history_turns
-        if n <= 0:
-            return ""
-        buf = self._history.get(self._history_key(app_id, user_id)) or []
-        if not buf:
-            return ""
-        recent = buf[-n:]
-        return "\n## 最近对话历史（用于共指消解，不是当前要提取的内容）\n" + "\n---\n".join(recent) + "\n"
-
-    def _append_history(self, app_id: str, user_id: str, content: str) -> None:
-        """Record this write's content for future coreference (ring buffer, capped)."""
-        n = self.settings.extract_history_turns
-        if n <= 0:
-            return
-        key = self._history_key(app_id, user_id)
-        buf = self._history.setdefault(key, [])
-        buf.append(content[:2000])  # cap each entry to avoid unbounded growth
-        if len(buf) > n * 2:
-            self._history[key] = buf[-n:]
-
     async def run(
         self,
         *,
@@ -109,7 +81,6 @@ class MemAgent:
             content=content,
             current_time=current_time,
         )
-        history_context = self._get_history_context(app_id, user_id)
         extracted = await self.extractor.extract(
             content=content,
             current_time=current_time,
@@ -117,15 +88,14 @@ class MemAgent:
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
-            history_context=history_context,
         )
-        self._append_history(app_id, user_id, content)
 
         for key in ("identity", "facts", "intentions"):
             extracted[key] = self._normalize_memory_items(extracted.get(key))
         is_ephemeral = bool(extracted.get("is_ephemeral"))
-        basic_info = extracted.get("basic_info")
-        has_basic_info = isinstance(basic_info, dict) and bool(render_content(basic_info))
+        basic_info = normalize_basic_info(extracted.get("basic_info"))
+        extracted["basic_info"] = basic_info
+        has_basic_info = bool(basic_info)
         has_persistable_output = bool(
             extracted["identity"]
             or extracted["facts"]
@@ -178,7 +148,6 @@ class MemAgent:
             )
             return [], commit_result, is_ephemeral
 
-        emotion = extracted.get("emotion") or {}
         new_memories, new_meta = self._collect_new_memories(extracted)
         basic_info_present = has_basic_info
 
@@ -186,8 +155,8 @@ class MemAgent:
 
         # ---- Step 3: Persist L0/L2/L4 nodes ---------------------------------------------
         # reconcile_sync writes L0/L2/L4 first then reconciles inline (strong consistency);
-        # the default path fast-writes and hands only the L2/L4 nodes to the async reconcile
-        # worker (L0 evolves via its own supersede chain and never enters that queue).
+        # the default dual path fast-writes and leaves L2/L4 work for explicit digest().
+        # L0 evolves via its own supersede chain and never enters that queue.
         if new_memories or basic_info_present:
             if self.settings.reconcile_sync:
                 l0_ids, _ = await self._fast_write(
@@ -198,7 +167,6 @@ class MemAgent:
                     agent_id=agent_id,
                     session_id=session_id,
                     memory_at=memory_at,
-                    emotion=emotion,
                 )
                 if new_memories:
                     ops = await self.reconciler.reconcile(
@@ -216,7 +184,6 @@ class MemAgent:
                         agent_id=agent_id,
                         session_id=session_id,
                         memory_at=memory_at,
-                        emotion=emotion,
                     )
                 else:
                     l2l4_ids = []
@@ -230,10 +197,9 @@ class MemAgent:
                     agent_id=agent_id,
                     session_id=session_id,
                     memory_at=memory_at,
-                    emotion=emotion,
                 )
                 stored_ids = l0_ids + l2l4_ids
-                if l2l4_ids:
+                if l2l4_ids and self.settings.mode == "dual":
                     self.cache.enqueue_reconcile_task(
                         app_id=app_id,
                         user_id=user_id,
@@ -290,7 +256,6 @@ class MemAgent:
             app_id=app_id,
             user_id=user_id,
             agent_id=agent_id,
-            emotion=emotion,
         )
         stored_ids.extend(intention_ids)
 
@@ -409,7 +374,6 @@ class MemAgent:
         agent_id: str,
         session_id: str,
         memory_at: int | None,
-        emotion: dict,
     ) -> tuple[list[str], list[str]]:
         """Persist L0 (if any) + extracted L2/L4 in one embed_batch call.
 
@@ -451,7 +415,6 @@ class MemAgent:
                     speculate=meta.get("speculate"),
                     owner=meta.get("owner", ""),
                     memory_at=memory_at,
-                    custom=_emotion_custom(emotion) or None,
                 )
             )
 
@@ -511,7 +474,6 @@ class MemAgent:
         agent_id: str,
         session_id: str,
         memory_at: int | None,
-        emotion: dict,
     ) -> list[str]:
         """Apply reconcile ops to the stores (soft-delete, add, supersede)."""
         stored_ids: list[str] = []
@@ -553,7 +515,7 @@ class MemAgent:
                 is_latest=True,
                 supersedes=list(op.supersedes),
                 memory_at=memory_at,
-                custom=_merge_custom(_emotion_custom(emotion), _reflect_custom(op)) or None,
+                custom=_reflect_custom(op) or None,
             )
             node.embedding = await self.embed.embed_queued(node.content)
             await asyncio.to_thread(self.vector.upsert, [node])
@@ -581,7 +543,6 @@ class MemAgent:
         app_id: str,
         user_id: str,
         agent_id: str,
-        emotion: dict,
     ) -> list[str]:
         """Persist L7 intention candidates into the graph (dual only); no-op otherwise."""
         graph = self.factory.graph
@@ -610,29 +571,10 @@ class MemAgent:
                     embedding=embedding,
                     tags=intent.get("tags") or [],
                     gmt_created=int(time.time()),
-                    custom=_emotion_custom(emotion) or None,
                 )
             )
             ids.append(node_id)
         return ids
-
-
-def _emotion_custom(emotion: dict) -> dict:
-    """Pack non-zero emotion fields into a custom dict for storage on a memory node."""
-    out: dict = {}
-    if not isinstance(emotion, dict):
-        return out
-    valence = float(emotion.get("valence", 0.0) or 0.0)
-    arousal = float(emotion.get("arousal", 0.0) or 0.0)
-    dominant = emotion.get("dominant_emotion")
-    if abs(valence) > 1e-6:
-        out["emotional_valence"] = valence
-    if arousal > 1e-6:
-        out["emotional_arousal"] = arousal
-    if isinstance(dominant, str) and dominant:
-        out["dominant_emotion"] = dominant
-    return out
-
 
 def _reflect_custom(op: ReconcileOp) -> dict:
     """Pack reflector metadata (update_type, temporal_scope, negation) into node.custom."""
@@ -643,13 +585,4 @@ def _reflect_custom(op: ReconcileOp) -> dict:
         out["temporal_scope"] = op.temporal_scope
     if op.negation:
         out["negation"] = True
-    return out
-
-
-def _merge_custom(*parts: dict) -> dict:
-    """Shallow-merge custom dicts; later parts override earlier on key clash."""
-    out: dict = {}
-    for part in parts:
-        if part:
-            out.update(part)
     return out

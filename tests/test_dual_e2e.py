@@ -56,7 +56,6 @@ async def test_dual_digest_then_recall_schema_and_intention(tmp_storage, fake_em
         mode="dual",
         storage_dir=tmp_storage,
         system2_single_shot_max_clusters=0,
-        reader_suppress_derived_on_factual=False,
     )
     client = MemoryClient(
         settings=settings,
@@ -87,15 +86,16 @@ async def test_dual_digest_then_recall_schema_and_intention(tmp_storage, fake_em
     assert res3.memories.proactive == []
 
 
-async def test_factual_query_suppresses_derived_schema(tmp_storage, fake_embed):
-    """With reader_suppress_derived_on_factual opted in, a FACTUAL query drops L6 schema
-    from the profile route even though the schema exists and would otherwise be recalled."""
-    # Force the scripted ReAct loop so the schema gets created; opt into suppression.
+async def test_explicitly_excluding_derived_schema(
+    tmp_storage,
+    fake_embed,
+    monkeypatch,
+):
+    """include_derived=False excludes L6 schema without guessing query intent."""
     settings = Settings(
         mode="dual",
         storage_dir=tmp_storage,
         system2_single_shot_max_clusters=0,
-        reader_suppress_derived_on_factual=True,
     )
     client = MemoryClient(
         settings=settings,
@@ -106,6 +106,23 @@ async def test_factual_query_suppresses_derived_schema(tmp_storage, fake_embed):
     client.factory.cache.enqueue_s2_task("u", "app")
     await client.digest()
 
-    # _SCHEMA text classifies as FACTUAL (no how/why trigger) → schema suppressed.
-    res = await client.search(query=_SCHEMA, app_ids=["app"], user_id="u")
+    graph_queries = 0
+    original_query = client.factory.graph.query_by_embedding
+
+    def _track_query(**kwargs):
+        nonlocal graph_queries
+        graph_queries += 1
+        return original_query(**kwargs)
+
+    monkeypatch.setattr(client.factory.graph, "query_by_embedding", _track_query)
+
+    res = await client.search(
+        query=_SCHEMA,
+        app_ids=["app"],
+        user_id="u",
+        intention_limit=3,
+        include_derived=False,
+    )
     assert all(m.category != "schema" for m in res.memories.profile)
+    assert res.memories.proactive == []
+    assert graph_queries == 0

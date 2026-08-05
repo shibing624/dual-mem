@@ -1,18 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: Bilingual prompt templates for the dual-mem agents (extract, reconcile, summary,
-system2 ops, cross-domain sweep). Dual ZH/EN forms are picked by input language.
+@description: Bilingual prompt templates for extract, reconcile, summary and System2 agents.
+Chinese and English forms are selected from the input language.
 """
 from dual_mem.providers.llm import is_chinese
 
 
 # =====================================================================
-# Lightweight Extractor — facts + identity + basic_info + emotion + intentions + ephemeral
+# Lightweight Extractor — facts + identity + basic_info + intentions + ephemeral
 # =====================================================================
 
 EXTRACT_ZH = """你是一位专业的记忆分析专家。请从以下对话中提取关于用户的结构化信息。
-{history_context}
 对话内容:
 ---
 {content}
@@ -113,13 +112,6 @@ EXTRACT_ZH = """你是一位专业的记忆分析专家。请从以下对话中�
 ✅ facts: "用户最近开始喝手冲咖啡，周末会去咖啡馆。"
 ❌ 不要合并为一条："用户以前喜欢茶但现在改喝咖啡并周末去咖啡馆。"
 
-## emotion 与 is_ephemeral
-
-整段对话给出整体情绪：
-- `valence`: -1.0 ~ 1.0 之间（负面到正面），无明显情绪 → 0.0
-- `arousal`: 0.0 ~ 1.0 之间（平淡到强烈），无明显情绪 → 0.0
-- `dominant_emotion`: 主要情绪标签（如"焦虑"、"开心"、"平静"），无则 null
-
 如果整段对话都是纯寒暄/无信息量（如只有"好的"、"嗯嗯"），`is_ephemeral=true`，并把
 `identity` 与 `facts` 都置空数组；只要有任何实质信息就 `is_ephemeral=false`。
 
@@ -147,7 +139,6 @@ EXTRACT_ZH = """你是一位专业的记忆分析专家。请从以下对话中�
 ```json
 {{
   "is_ephemeral": false,
-  "emotion": {{"valence": 0.0, "arousal": 0.0, "dominant_emotion": null}},
   "identity": [
     {{"content": "用户...", "owner": "user", "speculate": null, "tags": ["..."]}}
   ],
@@ -188,7 +179,6 @@ EXTRACT_FEW_SHOT_ZH = """
 ```json
 {{
   "is_ephemeral": false,
-  "emotion": {{"valence": 0.6, "arousal": 0.4, "dominant_emotion": "开心"}},
   "identity": [
     {{"content": "用户最近开始喜欢手冲咖啡。", "owner": "user", "speculate": null, "tags": ["咖啡", "偏好"]}},
     {{"content": "用户以前只喝茶。", "owner": "user", "speculate": null, "tags": ["茶", "偏好"]}}
@@ -211,7 +201,6 @@ EXTRACT_FEW_SHOT_ZH = """
 ```json
 {{
   "is_ephemeral": false,
-  "emotion": {{"valence": 0.3, "arousal": 0.2, "dominant_emotion": null}},
   "identity": [],
   "facts": [
     {{"content": "助手向用户推荐学习 Python 和 Ruby 作为后端开发语言。", "owner": "agent", "speculate": null, "tags": ["编程", "学习"]}}
@@ -236,7 +225,6 @@ Output:
 ```json
 {{
   "is_ephemeral": false,
-  "emotion": {{"valence": 0.6, "arousal": 0.4, "dominant_emotion": "happy"}},
   "identity": [
     {{"content": "The user has recently gotten into pour-over coffee.", "owner": "user", "speculate": null, "tags": ["coffee", "preference"]}},
     {{"content": "The user used to only drink tea.", "owner": "user", "speculate": null, "tags": ["tea", "preference"]}}
@@ -259,7 +247,6 @@ Output:
 ```json
 {{
   "is_ephemeral": false,
-  "emotion": {{"valence": 0.3, "arousal": 0.2, "dominant_emotion": null}},
   "identity": [],
   "facts": [
     {{"content": "The assistant recommended Python and Ruby for backend development to the user.", "owner": "agent", "speculate": null, "tags": ["programming", "learning"]}}
@@ -272,7 +259,6 @@ Output:
 ```"""
 
 EXTRACT_EN = """You are an expert memory analyst. Extract structured user information from the conversation below.
-{history_context}
 Conversation content:
 ---
 {content}
@@ -340,13 +326,6 @@ Dialogue: "I used to prefer tea, but lately I've switched to pour-over coffee an
 - "The user was advised to learn Ruby, Python, and PHP for back-end development."
 Preserve domain constraints from the conversation (e.g. healthcare AI, medical image analysis, slow-cooker beef stew) — do not generalize away the topic.
 
-## emotion and is_ephemeral
-
-Score the WHOLE passage:
-- `valence`: -1.0 to 1.0 (negative to positive), 0.0 when neutral
-- `arousal`: 0.0 to 1.0 (flat to intense), 0.0 when neutral
-- `dominant_emotion`: short label (e.g., "anxious", "excited"), null when none
-
 If the whole passage is pure pleasantry / no substantive info (e.g. just "ok"/"thanks"), set `is_ephemeral=true` and leave `identity` / `facts` as empty arrays.
 
 ## speculate field (identity AND facts)
@@ -368,7 +347,6 @@ Output ONLY the JSON object, no extra text:
 ```json
 {{
   "is_ephemeral": false,
-  "emotion": {{"valence": 0.0, "arousal": 0.0, "dominant_emotion": null}},
   "identity": [
     {{"content": "The user ...", "owner": "user", "speculate": null, "tags": ["..."]}}
   ],
@@ -899,66 +877,6 @@ Output ONLY a JSON object whose key `ops` is the operations array. No prose, not
 
 Evidence fact_ids MUST come from the cluster ids provided.
 If the data is insufficient for reliable conclusions, output {{"ops": []}}."""
-
-
-# =====================================================================
-# Cross-Domain Sweeper — behavior abstraction + higher-order induction
-# =====================================================================
-
-BEHAVIOR_ABSTRACTION_ZH = """任务：你是一名行为心理学家。请把下列 schema 抽象为一段纯心理/行为描述。剥离所有领域具体名词和场景——只输出底层行为风格和心理动机。
-
-语言规则：输出语言必须与输入相同。
-
-输入 schema：
-{content}
-
-输出（严格 JSON）：
-{{"abstraction_for_embedding": "...纯行为描述，与输入语言一致..."}}"""
-
-BEHAVIOR_ABSTRACTION_EN = """Task: You are a behavioral psychologist. Abstract the following schema into a pure psychological/behavioral description. Strip ALL domain-specific nouns and scenarios — output ONLY the underlying behavioral style and psychological motivation.
-
-LANGUAGE RULE: Your output MUST be in the SAME language as the input schema.
-
-Input schema:
-{content}
-
-Output (strict JSON):
-{{"abstraction_for_embedding": "...pure behavioral description, same language as input..."}}"""
-
-
-CROSS_DOMAIN_INDUCTION_ZH = """任务：你是一名深层模式分析师。系统在用户不同生活领域的行为 schema 间发现了结构性共鸣：表面看不相关，但底层行为逻辑高度相似。
-
-请综合出一个**更高阶**的核心模式，解释这些行为为何共现（用户自己未必察觉）：
-- 深层认知风格（如何处理信息和做决策）
-- 核心心理需求（在最根本层面驱动他们的是什么）
-- 隐含的心智模型（这些行为背后的潜在信念体系）
-
-要有洞察力。要精准。质量优于数量——只在连接真正成立、逻辑严密时才输出。证据薄弱或连接表面化时，输出 null。
-
-语言规则：输出（core_pattern, reasoning）必须与输入 schema 相同语言。
-
-输入 schemas：
-{patterns}
-
-输出（严格 JSON，或 null 如果没有令人信服的综合）：
-{{"core_pattern": "...一句话描述更高阶模式，与输入语言一致...", "reasoning": "...为什么这些 schema 在深层相互连接...", "confidence": 0.85, "schema_ids": ["参与归纳的基础 schema_id", ...]}}"""
-
-CROSS_DOMAIN_INDUCTION_EN = """Task: You are a deep pattern analyst. The system has detected structural resonance among the following schemas from different areas of the user's life. On the surface they appear unrelated, but their underlying behavioral logic is strikingly similar.
-
-Your job: synthesize a HIGHER-ORDER pattern that explains WHY these behaviors co-occur — something the user themselves may not be consciously aware of. Think in terms of:
-- Deep cognitive style (how they process information and make decisions)
-- Core psychological need (what drives them at a fundamental level)
-- Hidden mental model (the implicit belief system behind these behaviors)
-
-Be insightful. Be precise. Quality over quantity — only output a synthesis if the connection is genuinely compelling and logically airtight. If the evidence is weak or the connection is superficial, output null.
-
-LANGUAGE RULE: Your output (core_pattern, reasoning) MUST be in the SAME language as the input schemas below.
-
-Input schemas:
-{patterns}
-
-Output (strict JSON, or null if no compelling synthesis):
-{{"core_pattern": "...one sentence describing the higher-order pattern, same language as input...", "reasoning": "...why these schemas are connected at a deep level, same language as input...", "confidence": 0.85, "schema_ids": ["basic schema_id involved", ...]}}"""
 
 
 def pick(zh_prompt: str, en_prompt: str, text: str) -> str:

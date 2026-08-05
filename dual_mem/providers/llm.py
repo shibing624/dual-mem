@@ -114,14 +114,9 @@ def merge_extract_results(parts: list[dict]) -> dict:
         "identity": [],
         "facts": [],
         "intentions": [],
-        "emotion": {"valence": 0.0, "arousal": 0.0, "dominant_emotion": None},
         "is_ephemeral": True,
         "basic_info": {},
     }
-    valences: list[float] = []
-    arousals: list[float] = []
-    dominant: str | None = None
-    best_arousal = -1.0
     for part in parts:
         if not isinstance(part, dict) or not part:
             continue
@@ -130,28 +125,12 @@ def merge_extract_results(parts: list[dict]) -> dict:
         merged["identity"].extend(part.get("identity") or [])
         merged["facts"].extend(part.get("facts") or [])
         merged["intentions"].extend(part.get("intentions") or [])
-        emo = part.get("emotion") or {}
-        if isinstance(emo, dict):
-            try:
-                valences.append(float(emo.get("valence", 0.0)))
-                arousal = float(emo.get("arousal", 0.0))
-                arousals.append(arousal)
-                if arousal > best_arousal and emo.get("dominant_emotion"):
-                    best_arousal = arousal
-                    dominant = str(emo["dominant_emotion"])
-            except (TypeError, ValueError):
-                pass
         basic_info = part.get("basic_info")
         if isinstance(basic_info, dict):
             merged["basic_info"].update(basic_info)
     merged["identity"] = _dedupe_memory_items(merged["identity"])
     merged["facts"] = _dedupe_memory_items(merged["facts"])
     merged["intentions"] = _dedupe_memory_items(merged["intentions"])
-    if valences:
-        merged["emotion"]["valence"] = sum(valences) / len(valences)
-    if arousals:
-        merged["emotion"]["arousal"] = sum(arousals) / len(arousals)
-    merged["emotion"]["dominant_emotion"] = dominant
     return merged
 
 

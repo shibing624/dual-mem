@@ -46,7 +46,7 @@ asyncio.run(main())
 
 | 参数 | 必填 | 含义 |
 |---|---|---|
-| `mode` | 否 | `"system1"`（默认，写 L0–L4）或 `"dual"`（+ 异步 System2 写 L6/L7）。可写在 YAML。 |
+| `mode` | 否 | `"system1"`（默认，写 L0–L4）或 `"dual"`（+ 显式 `digest()` 写 L6/L7）。可写在 YAML。 |
 | `storage_dir` | 否 | 本地数据目录（Chroma + Kuzu + SQLite），默认 `./.dual_mem_data`。 |
 | `settings` | 否 | 传入 `Settings` 对象，覆盖 YAML / 环境变量。 |
 | `embed` / `llm` | 否 | 注入自定义客户端（测试 / 自建后端）；注入后跳过对应 `api_key` 校验。 |
@@ -87,12 +87,10 @@ await client.add(
 
 | 场景 | 是否需要 |
 |---|---|
-| `system1` 短脚本 | 不必，几乎无操作 |
-| `dual` + `per_write`（默认） | 进程退出前建议调；**不是**每次 add/search 后都调；**不会**等待已在跑的后台 digest |
-| `dual` + `scheduled` | shutdown **必须**调，否则定时 loop 不会停 |
+| `system1` / `dual` 短脚本 | 建议调用，释放存储句柄 |
 | FastAPI / 长驻 Agent | lifespan shutdown 调一次；进程级单例一个 `MemoryClient` |
 
-不调的后果：`system1` 无影响；`scheduled` dual 可能停不干净；`per_write` 未完成的 System2 任务随进程退出丢弃（已 fast-write 的记忆不受影响）。
+`aclose()` 不触发 digest；dual 应在业务确定的巩固点显式调用 `digest()`。
 
 ## Agent 集成（Agentica 多轮对话）
 
@@ -162,30 +160,20 @@ if __name__ == "__main__":
 |---|---|
 | `search` | 每轮用户输入前 |
 | `add` | 会话结束一次（或每 N 轮 batch）；每次至少 1 次 Extract LLM，长文本可再触发摘要 |
-| `WriteResult` | 优先读取 `commit_passed`；`gate_passed` 是已弃用兼容字段。`False` 表示 Extractor 未提交 L0/L2+，`is_ephemeral=True` 表示纯临时内容 |
+| `WriteResult` | 读取 `commit_passed`；`False` 表示 Extractor 未提交 L0/L2+，`is_ephemeral=True` 表示纯临时内容 |
 
 ## dual 模式与 System2 触发
 
-| `system2_trigger_mode` | 行为 | 示例 |
-|---|---|---|
-| `per_write`（默认） | 每次 write 后后台 fire-and-forget digest | `examples/02_dual.py` |
-| `manual` | 仅入队，需 `await client.digest()` | `02_dual.py` 中也可设 `manual` |
-| `scheduled` | 后台每 N 秒批量 drain；**shutdown 必须 `aclose()`** | `examples/05_scheduled_system2.py` |
+dual 写入只登记待处理 scope，不启动后台任务。由应用在会话结束、批量导入完成或其它明确边界调用 `await client.digest()`。
 
 ```python
 from dual_mem import MemoryClient
 from dual_mem.config import Settings
 
-client = MemoryClient(
-    settings=Settings(
-        mode="dual",
-        storage_dir="./.dual_mem_data",
-        system2_trigger_mode="scheduled",
-        system2_schedule_interval_sec=300,  # 默认 300s；demo 可改短
-    ),
-)
-# ... await client.add(...) 若干次，等待 interval 后 search ...
-await client.aclose()  # scheduled 模式必须
+client = MemoryClient(settings=Settings(mode="dual", storage_dir="./.dual_mem_data"))
+# ... await client.add(...) 若干次 ...
+digest = await client.digest()
+await client.aclose()
 ```
 
 更多示例见 [examples/](https://github.com/shibing624/dual-mem/tree/main/examples)。

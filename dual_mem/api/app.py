@@ -152,6 +152,7 @@ def create_app(
             profile_limit=body.profile_limit,
             profile_min_score=body.profile_min_score,
             intention_limit=body.intention_limit,
+            include_derived=body.include_derived,
             created_after=body.created_after,
             debug=body.debug,
         )

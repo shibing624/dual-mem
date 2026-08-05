@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: SQLite-backed cache store holding profile caches, the System2/intention/reconcile
-task queues, pipeline logs, a memory-operation audit trail and read-side access counters.
+@description: SQLite-backed cache store holding profile caches, System2/intention/reconcile
+task queues, pipeline logs and memory-operation audit records.
 """
 import json
 import sqlite3
@@ -23,8 +23,6 @@ CREATE TABLE IF NOT EXISTS s2_queue (
     app_id    TEXT NOT NULL,
     agent_id  TEXT NOT NULL DEFAULT '',
     status    TEXT NOT NULL DEFAULT 'pending',
-    task_type TEXT NOT NULL DEFAULT 'cognition',
-    payload   TEXT NOT NULL DEFAULT '',
     ts        REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS reconcile_queue (
@@ -57,11 +55,6 @@ CREATE TABLE IF NOT EXISTS memory_operations (
     user_id TEXT NOT NULL,
     ts      REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS memory_access (
-    node_id          TEXT PRIMARY KEY,
-    access_count     INTEGER NOT NULL DEFAULT 0,
-    last_accessed_at REAL    NOT NULL
-);
 CREATE TABLE IF NOT EXISTS content_hash_cache (
     iso_key      TEXT NOT NULL,
     content_hash TEXT NOT NULL,
@@ -69,15 +62,11 @@ CREATE TABLE IF NOT EXISTS content_hash_cache (
     ts           REAL NOT NULL,
     PRIMARY KEY (iso_key, content_hash)
 );
-CREATE TABLE IF NOT EXISTS reconsolidation_throttle (
-    iso_key TEXT PRIMARY KEY,
-    last_ts REAL NOT NULL
-);
 """
 
 
 class CacheStore:
-    """SQLite store for profile caches, async task queues, pipeline logs, op records and access counters."""
+    """SQLite store for caches, explicit task queues, pipeline logs and audit records."""
 
     def __init__(self, storage_dir: str):
         self._lock = threading.RLock()
@@ -85,20 +74,7 @@ class CacheStore:
             self.conn = connect_sqlite(f"{storage_dir}/cache.db")
             self.conn.row_factory = sqlite3.Row
             self.conn.executescript(_DDL)
-            self._migrate_s2_queue()
             self.conn.commit()
-
-    def _migrate_s2_queue(self) -> None:
-        """Add task_type/payload columns to s2_queue when upgrading from older schemas."""
-        cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(s2_queue)").fetchall()}
-        if "task_type" not in cols:
-            self.conn.execute(
-                "ALTER TABLE s2_queue ADD COLUMN task_type TEXT NOT NULL DEFAULT 'cognition'"
-            )
-        if "payload" not in cols:
-            self.conn.execute(
-                "ALTER TABLE s2_queue ADD COLUMN payload TEXT NOT NULL DEFAULT ''"
-            )
 
     # ---- Profile cache --------------------------------------------------------------
 
@@ -126,63 +102,41 @@ class CacheStore:
         user_id: str,
         app_id: str,
         agent_id: str = "",
-        task_type: str = "cognition",
-        payload: dict | None = None,
     ) -> None:
-        """Append a pending S2 task; deduped per (app, user, agent, task_type)."""
+        """Append a pending cognition task, deduplicated per app/user/agent scope."""
         with self._lock:
             existing = self.conn.execute(
                 "SELECT 1 FROM s2_queue WHERE status = 'pending' "
-                "AND user_id = ? AND app_id = ? AND agent_id = ? AND task_type = ? LIMIT 1",
-                (user_id, app_id, agent_id, task_type),
+                "AND user_id = ? AND app_id = ? AND agent_id = ? LIMIT 1",
+                (user_id, app_id, agent_id),
             ).fetchone()
             if existing is not None:
                 return
-            payload_str = json.dumps(payload, ensure_ascii=False) if payload is not None else ""
             self.conn.execute(
-                "INSERT INTO s2_queue (user_id, app_id, agent_id, status, task_type, payload, ts) "
-                "VALUES (?, ?, ?, 'pending', ?, ?, ?)",
-                (user_id, app_id, agent_id, task_type, payload_str, time.time()),
+                "INSERT INTO s2_queue (user_id, app_id, agent_id, status, ts) "
+                "VALUES (?, ?, ?, 'pending', ?)",
+                (user_id, app_id, agent_id, time.time()),
             )
             self.conn.commit()
 
-    def dequeue_s2_task(self, task_type: str | None = None) -> dict | None:
-        """Pop the oldest pending System2 task (FIFO), marking it done; None if queue empty.
-
-        ``task_type`` filters the queue (e.g. ``"reconsolidation"``) so callers can drain a
-        specific class of work without touching cognition tasks.
-        """
-        with self._lock:
-            if task_type is None:
-                row = self.conn.execute(
-                    "SELECT * FROM s2_queue WHERE status = 'pending' ORDER BY id ASC LIMIT 1"
-                ).fetchone()
-            else:
-                row = self.conn.execute(
-                    "SELECT * FROM s2_queue WHERE status = 'pending' AND task_type = ? "
-                    "ORDER BY id ASC LIMIT 1",
-                    (task_type,),
-                ).fetchone()
-            if row is None:
-                return None
-            self.conn.execute(
-                "UPDATE s2_queue SET status = 'done' WHERE id = ?", (row["id"],)
-            )
-            self.conn.commit()
-            task = dict(row)
-            task["status"] = "done"
-            raw_payload = task.get("payload") or ""
-            task["payload"] = json.loads(raw_payload) if raw_payload else {}
-            return task
-
-    def list_pending_s2_users(self) -> list[dict]:
-        """Snapshot the unique (app, user, agent, task_type) tuples currently pending in the queue."""
+    def list_pending_s2_scopes(self) -> list[dict]:
+        """Return pending app/user/agent scopes without changing their status."""
         with self._lock:
             rows = self.conn.execute(
-                "SELECT DISTINCT app_id, user_id, agent_id, task_type "
-                "FROM s2_queue WHERE status = 'pending'"
+                "SELECT app_id, user_id, agent_id FROM s2_queue "
+                "WHERE status = 'pending' ORDER BY id ASC"
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def mark_s2_scope_done(self, *, app_id: str, user_id: str, agent_id: str) -> None:
+        """Acknowledge a cognition scope after its explicit digest succeeds."""
+        with self._lock:
+            self.conn.execute(
+                "UPDATE s2_queue SET status = 'done' WHERE status = 'pending' "
+                "AND app_id = ? AND user_id = ? AND agent_id = ?",
+                (app_id, user_id, agent_id),
+            )
+            self.conn.commit()
 
     # ---- Reconcile queue (asynchronous evolution chain merging) ---------------------
 
@@ -209,10 +163,10 @@ class CacheStore:
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def dequeue_reconcile_task(
+    def list_pending_reconcile_tasks(
         self, *, app_id: str | None = None, user_id: str | None = None, agent_id: str | None = None
-    ) -> dict | None:
-        """Pop the oldest pending reconcile task, optionally scoped to an (app/user/agent)."""
+    ) -> list[dict]:
+        """Return pending reconcile tasks without acknowledging them."""
         with self._lock:
             clauses = ["status = 'pending'"]
             params: list = []
@@ -227,19 +181,23 @@ class CacheStore:
                 params.append(agent_id)
             sql = (
                 f"SELECT * FROM reconcile_queue WHERE {' AND '.join(clauses)} "
-                "ORDER BY id ASC LIMIT 1"
+                "ORDER BY id ASC"
             )
-            row = self.conn.execute(sql, params).fetchone()
-            if row is None:
-                return None
+            rows = self.conn.execute(sql, params).fetchall()
+            tasks = [dict(row) for row in rows]
+            for task in tasks:
+                task["node_ids"] = json.loads(task["node_ids"]) if task["node_ids"] else []
+            return tasks
+
+    def mark_reconcile_task_done(self, task_id: int) -> None:
+        """Acknowledge one reconcile task after it has completed successfully."""
+        with self._lock:
             self.conn.execute(
-                "UPDATE reconcile_queue SET status = 'done' WHERE id = ?", (row["id"],)
+                "UPDATE reconcile_queue SET status = 'done' "
+                "WHERE id = ? AND status = 'pending'",
+                (task_id,),
             )
             self.conn.commit()
-            task = dict(row)
-            task["node_ids"] = json.loads(task["node_ids"]) if task["node_ids"] else []
-            task["status"] = "done"
-            return task
 
     def reconcile_queue_size(self) -> int:
         """Return how many reconcile tasks are still pending across all users."""
@@ -293,45 +251,6 @@ class CacheStore:
             )
             self.conn.commit()
 
-    # ---- Read-side access counters (used by Reconsolidation Hook) -------------------
-
-    def bump_access(self, node_ids: list[str]) -> None:
-        """Increment access_count and refresh last_accessed_at for each node id (no-op on empty)."""
-        if not node_ids:
-            return
-        with self._lock:
-            now = time.time()
-            for nid in node_ids:
-                self.conn.execute(
-                    "INSERT INTO memory_access (node_id, access_count, last_accessed_at) "
-                    "VALUES (?, 1, ?) ON CONFLICT(node_id) DO UPDATE SET "
-                    "access_count = access_count + 1, last_accessed_at = excluded.last_accessed_at",
-                    (nid, now),
-                )
-            self.conn.commit()
-
-    def get_access(self, node_id: str) -> dict | None:
-        """Return {access_count, last_accessed_at} for a node, or None if never accessed."""
-        with self._lock:
-            row = self.conn.execute(
-                "SELECT access_count, last_accessed_at FROM memory_access WHERE node_id = ?",
-                (node_id,),
-            ).fetchone()
-            return dict(row) if row else None
-
-    def get_access_batch(self, node_ids: list[str]) -> dict[str, dict]:
-        """Batch fetch access stats keyed by node_id."""
-        if not node_ids:
-            return {}
-        with self._lock:
-            placeholders = ",".join("?" * len(node_ids))
-            rows = self.conn.execute(
-                f"SELECT node_id, access_count, last_accessed_at FROM memory_access "
-                f"WHERE node_id IN ({placeholders})",
-                node_ids,
-            ).fetchall()
-            return {str(row["node_id"]): dict(row) for row in rows}
-
     # ---- Content-hash write dedup ---------------------------------------------------
 
     def get_content_hash_outcome(self, iso_key: str, content_hash: str) -> dict | None:
@@ -359,24 +278,3 @@ class CacheStore:
                 (iso_key, content_hash, json.dumps(outcome, ensure_ascii=False), time.time()),
             )
             self.conn.commit()
-
-    # ---- Reconsolidation throttle ---------------------------------------------------
-
-    def should_run_reconsolidation(self, iso_key: str, min_interval_sec: float) -> bool:
-        """Return True if reconsolidation may run; updates last_ts when allowed."""
-        if min_interval_sec <= 0:
-            return True
-        with self._lock:
-            now = time.time()
-            row = self.conn.execute(
-                "SELECT last_ts FROM reconsolidation_throttle WHERE iso_key = ?",
-                (iso_key,),
-            ).fetchone()
-            if row and (now - float(row["last_ts"])) < min_interval_sec:
-                return False
-            self.conn.execute(
-                "INSERT OR REPLACE INTO reconsolidation_throttle (iso_key, last_ts) VALUES (?, ?)",
-                (iso_key, now),
-            )
-            self.conn.commit()
-            return True

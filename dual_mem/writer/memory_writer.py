@@ -2,9 +2,9 @@
 """
 @author:XuMing(xuming624@qq.com)
 @description: Synchronous-write path: persist a raw L1 memory node, log it, and run the
-System1 cognition pipeline (extract -> commit decision -> fast-write) which queues reconcile work
-and writes any L7 intentions / L3 summary in line. dual-mem requires LLM + embedding API
-keys; there is no embedding-only / no-LLM mode.
+System1 cognition pipeline (extract -> commit decision -> fast-write). In dual mode, L2/L4
+writes queue reconcile work for explicit digest(). L7 intentions and optional L3 summaries
+are written inline. dual-mem requires both LLM and embedding providers.
 """
 import hashlib
 import logging
@@ -39,14 +39,9 @@ class WriterOutcome:
 
     memory_id: str
     extra_node_ids: list[str] = field(default_factory=list)
-    gate_passed: bool = True
+    commit_passed: bool = True
     is_ephemeral: bool = False
-
-    @property
-    def commit_passed(self) -> bool:
-        """Whether the extractor committed derived memories for this write."""
-
-        return self.gate_passed
+    deduplicated: bool = False
 
 
 class MemoryWriter:
@@ -89,10 +84,9 @@ class MemoryWriter:
                 return WriterOutcome(
                     memory_id=str(cached["memory_id"]),
                     extra_node_ids=list(cached.get("extra_node_ids") or []),
-                    gate_passed=bool(
-                        cached.get("commit_passed", cached.get("gate_passed", True))
-                    ),
+                    commit_passed=bool(cached.get("commit_passed", True)),
                     is_ephemeral=bool(cached.get("is_ephemeral", False)),
+                    deduplicated=True,
                 )
 
         node = MemoryNode(
@@ -138,7 +132,7 @@ class MemoryWriter:
         outcome = WriterOutcome(
             memory_id=node.node_id,
             extra_node_ids=extra_node_ids,
-            gate_passed=commit_result.passed,
+            commit_passed=commit_result.passed,
             is_ephemeral=is_ephemeral,
         )
         if settings.content_hash_dedup and content_hash is not None:
@@ -149,7 +143,6 @@ class MemoryWriter:
                     "memory_id": outcome.memory_id,
                     "extra_node_ids": outcome.extra_node_ids,
                     "commit_passed": outcome.commit_passed,
-                    "gate_passed": outcome.gate_passed,
                     "is_ephemeral": outcome.is_ephemeral,
                 },
             )

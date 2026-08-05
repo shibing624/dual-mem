@@ -8,12 +8,12 @@
 
 Extractor 快写 L2/L4 之后，新记忆可能与库里已有条目重复、冲突或构成时序更新。
 Reconciler 负责**召回相关旧记忆 → 让 LLM 判断关系 → 输出 ADD/DELETE 操作列表**，
-由下游（MemAgent 同步路径 或 ReconcilerWorker 异步路径）落盘并维护
+由下游（MemAgent 同步路径或显式 digest 调用的 ReconcilerWorker）落盘并维护
 ``supersedes`` / ``superseded_by`` 进化链指针。
 
 两条调用路径：
   - ``reconcile_sync=True``：``MemAgent`` 在写入路径内同步调用（强一致，多 ~1 次 LLM）
-  - 默认异步：``ReconcilerWorker`` 从 reconcile 队列取任务，后台调和（最终一致）
+  - 默认延迟处理：``ReconcilerWorker`` 在显式 ``digest()`` 时处理 reconcile 队列
 
 ## 核心流程（``Reconciler.reconcile``）
 

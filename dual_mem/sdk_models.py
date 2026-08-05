@@ -61,10 +61,6 @@ class CommitResult:
         return _omit_none(asdict(self))
 
 
-# Deprecated compatibility name; use CommitResult for new code.
-GateResult = CommitResult
-
-
 @dataclass
 class WriteResult:
     """Outcome of a single MemoryClient.add call."""
@@ -78,7 +74,7 @@ class WriteResult:
     # 端到端处理耗时（毫秒）
     processing_time_ms: float
     # Extractor 是否产出了值得沉淀到 L0/L2+ 的结构化记忆
-    gate_passed: bool = True
+    commit_passed: bool = True
     # 本次写入产生的 L0/L2/L3/L4/L7 等衍生节点数量
     extracted_count: int = 0
     # 除 L1 raw 外写入的节点 id 列表
@@ -89,12 +85,6 @@ class WriteResult:
     error_code: int | None = None
     # 错误描述；成功时为 None
     error_message: str | None = None
-
-    @property
-    def commit_passed(self) -> bool:
-        """Whether the extractor committed derived memories for this write."""
-
-        return self.gate_passed
 
     def to_dict(self) -> dict:
         """Flatten the write result into the contract dict (None fields omitted)."""
@@ -137,6 +127,8 @@ class MemoryItem:
     score: float
     # 标签列表（可能为空）
     tags: list[str] = field(default_factory=list)
+    # 来源会话 id；benchmark 可据此核验是否召回 gold evidence session
+    session_id: str = ""
     # 语义时间 Unix 秒（UTC）：对话/session 时间；write 时 memory_at= 传入
     memory_at: int | None = None
     # 入库 Unix 秒（UTC）：首次写入存储的时间
@@ -154,6 +146,7 @@ class MemoryItem:
             "category": self.category,
             "score": round(self.score, 4),
             "tags": list(self.tags),
+            "session_id": self.session_id,
         }
         if self.memory_at is not None:
             out["memory_at"] = self.memory_at
@@ -182,6 +175,7 @@ class MemoryItem:
             "memory_id": self.memory_id,
             "created_at": created_at,
             "category": self.category,
+            "session_id": self.session_id,
         }
 
 
@@ -193,7 +187,7 @@ class SearchMemories:
     profile: list[MemoryItem] = field(default_factory=list)
     # 主动路：L7 意图/计划（intention_limit=0 时常为空）
     proactive: list[MemoryItem] = field(default_factory=list)
-    # 常规路：L2/L3/L5/L1 等事实与摘要
+    # 常规路：L2/L3/L4 等事实、摘要与身份记忆
     normal: list[MemoryItem] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -251,20 +245,6 @@ class ReadResult:
 
     # 与 SearchResult.memories 相同的三路结果快照
     memories: SearchMemories
-    # 启发式意图标签（如 temporal / factual）
-    intent: str = ""
-    # QueryUnderstanding 建议的目标层（hybrid 读路径可能未完全采纳）
-    target_layers: list[str] = field(default_factory=list)
-    # 查询是否含时间词
-    has_temporal: bool = False
-    # 各 anchor 路径命中数
-    anchor_path_counts: dict[str, int] = field(default_factory=dict)
-    # anchor 阶段总命中数
-    anchor_count: int = 0
-    # 图扩展后新增节点数
-    expanded_count: int = 0
-    # 扩展边类型计数
-    edge_counts: dict[str, int] = field(default_factory=dict)
     # 融合打分后进入分组的条数
     final_count: int = 0
     # 读管线内部耗时（毫秒）
@@ -274,13 +254,6 @@ class ReadResult:
         """Flatten the trace into the contract dict for pipeline_logs / API debug."""
         return {
             "memories": self.memories.to_dict(),
-            "intent": self.intent,
-            "target_layers": list(self.target_layers),
-            "has_temporal": self.has_temporal,
-            "anchor_path_counts": dict(self.anchor_path_counts),
-            "anchor_count": self.anchor_count,
-            "expanded_count": self.expanded_count,
-            "edge_counts": dict(self.edge_counts),
             "final_count": self.final_count,
             "elapsed_ms": round(self.elapsed_ms, 2),
         }
@@ -288,14 +261,12 @@ class ReadResult:
 
 @dataclass
 class DigestResult:
-    """Outcome of MemoryClient.digest (dual mode: drain reconcile + S2 queues)."""
+    """Outcome of MemoryClient.digest (dual mode: reconcile then System2)."""
 
     # digest 调用是否成功
     success: bool
-    # 消费的任务数（reconcile + S2 等）
+    # 成功处理的 app/user/agent scope 数
     processed: int = 0
-    # CrossDomainSweeper 新升维的 core schema 数
-    cores_created: int = 0
     # 本次 digest 各阶段耗时与计数（性能分析用；非 dual 或无任务时为空）
     timing: dict = field(default_factory=dict)
 

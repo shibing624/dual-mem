@@ -1,12 +1,9 @@
 """Tests for the post-review fixes:
 
-#1 per_write search awaits the reconsolidation enqueue before draining (no race).
-#2 LockRegistry is LRU-bounded and never evicts a held lock.
-#3 _fast_write embeds all extracted nodes in a single batch call.
-#4 Reconciler excludes the just-written fast-write node ids from its candidate set.
+#1 LockRegistry is LRU-bounded and never evicts a held lock.
+#2 _fast_write embeds all extracted nodes in a single batch call.
+#3 Reconciler excludes the just-written fast-write node ids from its candidate set.
 """
-import asyncio
-
 import pytest
 
 from dual_mem.client import MemoryClient
@@ -139,40 +136,5 @@ async def test_fast_write_embeds_in_single_batch(tmp_storage):
     # a per-fact queued call for each of the 3 extracted nodes.)
     assert embed.batch_calls >= 1
     assert embed.queued_calls <= 1
-
-    await client.aclose()
-
-
-# ---- #1 per_write search drains reconsolidation (no race) -------------------------
-
-async def test_per_write_search_drains_reconsolidation_without_race(tmp_storage, fake_embed):
-    """In per_write mode, a search should enqueue AND drain the reconsolidation task
-    within the same call — the drain must not run before its own enqueue."""
-    settings = Settings(mode="dual", storage_dir=tmp_storage,
-                        system2_trigger_mode="per_write")
-    client = MemoryClient(settings=settings, embed=fake_embed,
-                          llm=FakeLLMClient(responses={}))
-
-    # Seed an ACTIVE node so search recalls something (→ hook enqueues a task).
-    n = MemoryNode(
-        content="用户喜欢登山", layer=Layer.L4_IDENTITY,
-        app_id="app", user_id="u", status=MemoryStatus.ACTIVE, node_id="n1",
-    )
-    n.embedding = fake_embed.embed_sync(n.content)
-    client.factory.vector.upsert([n])
-
-    await client.search(query="焦虑！崩溃了！登山", app_ids=["app"], user_id="u", min_score=0.0)
-    # Let the fire-and-forget drain task finish.
-    await asyncio.sleep(0)
-    for _ in range(5):
-        await asyncio.sleep(0)
-
-    # The reconsolidation queue should be empty (enqueued then drained), and the node
-    # should carry a reactivation timestamp from the drain.
-    leftover = client.factory.cache.dequeue_s2_task(task_type="reconsolidation")
-    assert leftover is None
-    refreshed = client.factory.vector.get("n1")
-    assert refreshed.custom is not None
-    assert "last_reactivated_at" in refreshed.custom
 
     await client.aclose()

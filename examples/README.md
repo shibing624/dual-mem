@@ -28,16 +28,15 @@ export DUAL_MEM_EMBED_API_KEY=sk-...
 
 各 demo 通过 `mode=` 覆盖运行档位，存储目录用 `examples/.data/` 下的独立子目录
 （每次运行清空，可复现）。async client demo（01 / 02）在结束时调用
-`await client.aclose()`，让 dual 的后台 System2 loop 干净退出。
+`await client.aclose()` 释放存储资源。
 
 ## 运行
 
 ```bash
-python examples/01_system1.py    # system1：System1 抽取 + 演化链 + 多轮 messages 写入
-python examples/02_dual.py       # dual：digest 触发 System2 ReAct + cross-domain
+python examples/01_system1.py    # system1：抽取 + 显式同步 reconcile + 多轮 messages
+python examples/02_dual.py       # dual：显式 digest 触发 reconcile + System2 ReAct
 python examples/03_rest_api.py   # REST：`/v1/memories/...` 契约（system1 档）
 python examples/04_cli.py        # CLI：dual-mem 子命令调用（system1 档）
-python examples/05_scheduled_system2.py  # dual + scheduled：定时批量 System2（须 aclose）
 ```
 
 > 所有 demo 都会产生真实 LLM + Embedding 调用（gpt-4o 等），有少量费用与数秒延迟。
@@ -50,12 +49,10 @@ python examples/05_scheduled_system2.py  # dual + scheduled：定时批量 Syste
   Extractor 都接收带角色标记的完整内容（`01_system1.py` 演示）。
 - 没有"无 LLM"模式：缺失 `llm_api_key` / `embed_api_key` 时 `MemoryClient(...)` 直接抛
   `MissingCredentialsError`（fail-fast，比静默降级更直白）。
-- `dual.digest()` 同时驱动 System2 ReAct 蒸馏和 Cross-domain Sweeper，可用
-  `Settings(cross_domain_enable=True)` 显式开启（`02_dual.py` 演示）。
-- `system2_trigger_mode=scheduled` 由后台 loop 周期性 drain 队列（默认 300s），
-  见 `05_scheduled_system2.py`；**必须** `await client.aclose()` 停止 loop。
-- 默认 reader 是 `hybrid`（QueryUnderstanding → 5 路 Anchor → GraphExpander →
-  FusionScorer），`Settings(reader_mode="legacy")` 切回旧三路用于对比。
+- `dual` 写入只登记待处理 scope；`await client.digest()` 显式驱动 reconcile 与
+  System2 ReAct。SDK 不启动后台或定时任务。
+- reader 使用唯一 hybrid 管线：语义召回、召回池内 BM25 重排、图证据融合。
+  `search(include_derived=False)` 可显式排除 L6/L7 派生记忆。
 
 ## 并发写入（按需）
 

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: Async extractor that pulls identity/facts/intentions/emotion/basic_info and
+@description: Async extractor that pulls identity/facts/intentions/basic_info and
 the is_ephemeral commit signal from a conversation in one JSON-mode LLM call. L0 persistence
 is deferred to MemAgent so L0/L2/L4 embeddings can be batched post-extract.
 """
@@ -40,7 +40,6 @@ class Extractor:
         user_id: str,
         agent_id: str,
         session_id: str,
-        history_context: str = "",
     ) -> dict:
         """Return extracted fields; ``basic_info`` is persisted later by MemAgent."""
         tmpl = prompts.pick(prompts.EXTRACT_ZH, prompts.EXTRACT_EN, content)
@@ -54,7 +53,6 @@ class Extractor:
             return tmpl.format(
                 content=chunk,
                 current_time=current_time,
-                history_context=history_context,
             )
 
         llm_content = self._prepare_content(content)
@@ -78,7 +76,6 @@ class Extractor:
                 return retry_tmpl.format(
                     content=chunk,
                     current_time=current_time,
-                    history_context=history_context,
                 )
 
             parsed = await self.llm.chat_json_for_content(
@@ -99,7 +96,6 @@ class Extractor:
         identity = parsed.get("identity") or []
         facts = parsed.get("facts") or []
         intentions = parsed.get("intentions") or []
-        emotion = parsed.get("emotion") or {}
         is_ephemeral = bool(parsed.get("is_ephemeral", False))
         basic_info = parsed.get("basic_info")
         if not isinstance(basic_info, dict):
@@ -118,7 +114,6 @@ class Extractor:
             "identity": identity if isinstance(identity, list) else [],
             "facts": facts if isinstance(facts, list) else [],
             "intentions": intentions if isinstance(intentions, list) else [],
-            "emotion": emotion if isinstance(emotion, dict) else {},
             "is_ephemeral": is_ephemeral,
             "basic_info": basic_info,
         }

@@ -50,7 +50,6 @@ async def test_skip_llm_heuristic_chain_links_same_tag_nodes(tmp_storage, fake_e
         settings=Settings(
             mode="dual",
             storage_dir=tmp_storage,
-            system2_trigger_mode="manual",
             reconcile_sync=False,
             reconcile_skip_llm=True,
             reconcile_link_chains_heuristic=True,
@@ -86,7 +85,6 @@ async def test_skip_llm_heuristic_chain_surfaces_in_search(tmp_storage, fake_emb
         settings=Settings(
             mode="dual",
             storage_dir=tmp_storage,
-            system2_trigger_mode="manual",
             reconcile_sync=False,
             reconcile_skip_llm=True,
             reconcile_link_chains_heuristic=True,
@@ -123,7 +121,6 @@ async def test_heuristic_disabled_leaves_nodes_unlinked(tmp_storage, fake_embed)
         settings=Settings(
             mode="dual",
             storage_dir=tmp_storage,
-            system2_trigger_mode="manual",
             reconcile_sync=False,
             reconcile_skip_llm=True,
             reconcile_link_chains_heuristic=False,
@@ -154,7 +151,6 @@ async def test_heuristic_does_not_link_across_layers_or_blank_tags(
         settings=Settings(
             mode="dual",
             storage_dir=tmp_storage,
-            system2_trigger_mode="manual",
         ),
         embed=fake_embed,
         llm=FakeLLMClient(),

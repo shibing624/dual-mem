@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: Retrieval subpackage: three-route recall, evolution-chain expansion, intent
-classification and hybrid (vector + BM25) reranking utilities.
+@description: Retrieval subpackage: explicit three-route hybrid recall, evolution-chain
+expansion, and vector plus in-pool BM25 reranking utilities.
 """

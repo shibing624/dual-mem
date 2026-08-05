@@ -40,6 +40,7 @@ class SearchRequest(BaseModel):
     profile_limit: int = -1
     profile_min_score: float = 0.3
     intention_limit: int = 0
+    include_derived: bool = True
     created_after: int | None = None
     debug: bool = False
 
@@ -82,11 +83,10 @@ class UpdateResponse(BaseModel):
 
 
 class DigestResponse(BaseModel):
-    """Response for System2 digest."""
+    """Response for explicit System2 digestion; processed counts completed scopes."""
 
     success: bool
     processed: int = 0
-    cores_created: int = 0
 
 
 class ScopeSummary(BaseModel):

@@ -10,15 +10,14 @@ from dual_mem.types import (
 )
 
 
-def test_layer_has_eight_members():
-    assert len(Layer) == 8
+def test_layer_has_seven_members():
+    assert len(Layer) == 7
     expected = {
         "L0_BASIC_INFO",
         "L1_RAW",
         "L2_FACT",
         "L3_SUMMARY",
         "L4_IDENTITY",
-        "L5_KNOWLEDGE",
         "L6_SCHEMA",
         "L7_INTENTION",
     }
@@ -46,7 +45,6 @@ def test_layer_to_category_map():
     assert LAYER_TO_CATEGORY[Layer.L2_FACT] == Category.fact
     assert LAYER_TO_CATEGORY[Layer.L3_SUMMARY] == Category.summary
     assert LAYER_TO_CATEGORY[Layer.L4_IDENTITY] == Category.profile
-    assert LAYER_TO_CATEGORY[Layer.L5_KNOWLEDGE] == Category.knowledge
     assert LAYER_TO_CATEGORY[Layer.L6_SCHEMA] == Category.schema
     assert LAYER_TO_CATEGORY[Layer.L7_INTENTION] == Category.intention
 
