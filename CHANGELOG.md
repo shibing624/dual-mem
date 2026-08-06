@@ -1,0 +1,123 @@
+# Changelog
+
+本文件记录 **dual-mem SDK** 中会影响 **延迟、LLM 调用次数、召回/写入效果** 的变更。  
+Benchmark 对比或线上行为异常时，优先查此表 + 对应 `Settings` / `config.default.yaml` 开关。
+
+格式说明：
+
+- **效果**：对准确率 / 召回 / 写入完整性的影响
+- **速度**：对 ingest / search 耗时的影响
+- **Trade-off**：刻意取舍
+- **回退**：关闭或改回旧行为的配置
+
+Benchmark 专用覆盖见 `exp/dual_mem_exp/benchmarks/backends/dual_mem.py`（与 SDK 默认值可能不同）。
+
+---
+
+## [Unreleased]
+
+> 当前 `__version__` 仍为 `0.1.2`；下列变更已在 `main`，尚未发版。
+
+### 写入路径（ingest）— LLM 次数与并发
+
+| 变更 | 配置 | 速度 | 效果 | Trade-off / 回退 |
+|------|------|------|------|------------------|
+| **Gate + Extract 合并为一次 LLM** | `combined_gate_extract: true`（默认） | PASS turn 每 turn **少 1 次** gate LLM（约 1 RTT） | gate 分数来自 extract JSON 的 `gate_decision`，再经规则融合 | **REJECT turn 仍付 1 次 extract LLM**（旧方案 REJECT 只付 gate）。回退：`combined_gate_extract: false` |
+| **Gate 启发式 short-circuit（PASS）** | `gate_heuristic_shortcircuit: true`，`gate_shortcircuit_novelty: 0.8`，`gate_shortcircuit_relevance: 0.5` | 高 novelty turn **跳过 gate LLM 字段**（prompt 不含 gate 段） | 边界样本可能不如全 LLM gate 稳 | combined 下不跳 extract。回退：`gate_heuristic_shortcircuit: false` |
+| **Gate 启发式 short-circuit（REJECT）** | `gate_shortcircuit_reject_novelty: 0.12`（0=关） | 近重复 + 无传记相关 turn：**整段跳过 gate+extract LLM**（combined 下省 1 次 extract） | 仅当向量 novelty 极低且 `relevance<阈值` 且 `arousal<0.5` 才丢；传记/情绪内容仍走 LLM | 误判风险低（阈值很严）。回退：`gate_shortcircuit_reject_novelty: 0` |
+| **Extract ∥ Summary 投机并发** | `summarizer_enabled: true` 且 `len(content) ≥ summarizer_min_content_length` | PASS turn：`summary` 与 `extract` **并行**（≈ `max(T_extract, T_summary)`） | REJECT / ephemeral turn 可能 **白跑 1 次 summary LLM**（~5% REJECT × 长文本） | Summary 失败 **不阻断** L0/L2/L4（`try/except` 后 `summary=None`）。cancel 打 `summary cancelled after …` 日志。Benchmark 已 `summarizer_enabled: false`。回退：关 summary |
+| **Summary 仅在 gate PASS 后落库** | （逻辑，无单独开关） | 避免 REJECT turn 写 L3 | — | 与上条配合；REJECT 时 `_cancel_summarize_task` |
+| **Summarizer 阈值提高** | `summarizer_min_content_length: 1500`（原 500 → 800 → 1500） | 更少 summary LLM | 更短对话无 L3 | Benchmark：`summarizer_enabled: false` |
+| **Extract 长输入：中间截断** | `extract_max_content_chars: 0`（SDK 默认不截断）；benchmark `10000` | 20k+ 字符 **避免 50–80s outlier** | **丢失中间段落信息**（head+tail 保留） | 旧行为：靠 `llm_context_window` **分块多次 LLM + merge**（见下「LLM 分块合并」）。截断 vs 分块：**截断 = 1 次 LLM 更快但丢中间；分块 = N 次 LLM 更慢但更全**。回退：`extract_max_content_chars: 0` 且依赖 chunk merge |
+| **Extract JSON 失败 retry** | `extract_retry_on_failure: true` | 解析失败时 **+1 次 LLM**（~20s） | 降低「整 turn 22 条 fact 全丢」 | retry 用 `temperature=0.0` + **JSON-only 强化 prompt**（不强制 `json_object`，兼容 vLLM）。回退：`extract_retry_on_failure: false` |
+| **多轮 messages 输入整形** | `extract_history_context_ratio: 0.7`，`extract_assistant_max_tokens: 200` | 仅当整段对话占用 > `0.7 × llm_context_window`（token 粒度）才截 assistant，长会话 prompt token 下降 | **不丢任何轮**（40 轮提交得 40 轮全在）；**user 全保留**；超阈值时 assistant（AI 的话）截到 200 token；短对话原样透传 | 仅作用于 `messages=`；`content=` 不受影响。回退：ratio 或 tokens 设 `0` |
+| **配置单位统一为 token** | `summarizer_min_content_tokens: 600`、`extract_max_content_tokens: 0`、`extract_assistant_max_tokens: 200`、`extract_history_context_ratio: 0.7` | — | 全部阈值统一 token 粒度，内部 `× chars_per_token` 转字符比较。`extract_max_content_tokens`（原 `_chars`）= 最终输入硬上限，与历史整形**分层叠加不冲突** | 改名（删除旧 `_chars`/`_length`/`shape_threshold_ratio`，不兼容旧名）。benchmark：`extract_max_content_tokens: 4000` |
+| **Content-hash 写路径去重** | `content_hash_dedup: true`，`content_hash_scope: session\|user` | 相同 content **跳过 extract/reconcile** | session scope：跨 session 不误命中；user scope：跨 session 命中率更高 | `session`（默认）按 `app/user/agent/session`；`user` 按 `app/user`。回退：`content_hash_dedup: false` |
+| **L1 + Gate turn embed 合并** | `embed_merge_l1_gate: true`（默认 yaml）；代码默认 `false` | 多 turn `messages=` 写入 **少 ~1 次 embed RTT** | — | 绕过 `embed_queued` 攒批，**高并发 write 吞吐下降**。回退：`embed_merge_l1_gate: false` |
+| **Reconciler embed 批量化** | （内部） | reconcile 候选 embedding **batch + 并发 query** | — | — |
+| **L0/L2/L4 + L3/L7 embed 合并** | （内部 `embed_batch`） | summary + intention 一次 embed | — | — |
+| **演化链 supersede 原子化** | （内部 `VectorStore.mark_superseded`） | — | 锁内 `get→改 superseded_by/is_latest/status→update payload` 一次完成，**不重写 embedding**；并发 supersede 不丢更新 | 替换原 `get→改→upsert`（mem_agent / reconciler_worker / basic_profile 三处统一）。无配置开关 |
+
+### 读取路径（search）— 延迟与排序
+
+| 变更 | 配置 | 速度 | 效果 | Trade-off / 回退 |
+|------|------|------|------|------------------|
+| **Hybrid 五路 anchor `to_thread`** | `reader_mode: hybrid` | 阻塞 store IO 不卡 event loop | — | 回退：`reader_mode: legacy` |
+| **Entity 路径：子串扫描 → BM25** | hybrid 内置 | 200 条候选池内 BM25，替代全表 substring | 关键词命中更准 | 仍限 `entity_pool_limit` 候选池大小 |
+| **Entity BM25 分数映射** | （内部） | — | fusion 中 entity 不再 **全部 ~0.9** 压过 vector 0.4–0.7 | `score = 0.25 + 0.45 * bm25_norm`（`bm25_norm` 已 max-normalize）。旧：`min(0.9, 0.3+0.6*raw)` |
+| **Fusion access 批量读** | （内部 `get_access_batch`） | 少 N 次 SQLite  round-trip | — | — |
+| **Query understanding 只算一次** | （内部） | 避免 hybrid 路径重复 `understand()` | — | — |
+| **Reconsolidation 限频** | `reconsolidation_min_interval_sec: 0`（SDK）；benchmark `60` | 同 user 搜索 **减少 hook 开销** | dual 模式 S2 reconsolidation 任务更稀疏 | 回退：`reconsolidation_enabled: false` 或 `min_interval_sec: 0` |
+| **Reconsolidation 零-LLM 蒸馏** | （内部 `_run_reconsolidation`） | 无额外 LLM | dual：召回后用 gate 启发式比对情绪，唤醒度差异大 → 置 `custom.reactivation` + 刷新 `last_reactivated_at`（旧文档误标 no-op） | 非 ReAct，按设计轻量 |
+| **Hybrid 按 `target_layers` 路由** | （内部，`reader_mode: hybrid`） | — | QU 建议层 ∪ 常驻 profile 层下传 anchor（旧文档误标"写死层列表"） | 回退：`reader_mode: legacy` |
+| **Evolution chain 批量 `get_by_ids`** | （内部） | 链展开少 N 次 `vector.get` | — | — |
+
+### Embed / LLM 基础设施（v0.1.2 后持续）
+
+| 变更 | 配置 | 速度 | 效果 | Trade-off / 回退 |
+|------|------|------|------|------------------|
+| **LLM 超长 prompt：分块 + merge** | `llm_context_window`，`llm_completion_reserve`，`chars_per_token` | 超预算时 **N 次 LLM** 再 merge | 比硬截断 **更全** 但更慢 | Extract **额外** 可用 `extract_max_content_chars` **强制截断**（优先速度）。Gate / Reconcile 等仍走 chunk merge |
+| **Embed 超长文本：分块 mean-pool** | `embed_max_tokens`，`chars_per_token` | 长文本 embed 正确性 | — | — |
+| **Embed 内存 cache 扩大** | `embed_cache_size: 10000`（SDK）；benchmark `200000` | 重复文本 embed **命中缓存** | 内存占用 ↑ | 回退：减小 `embed_cache_size` |
+| **Embed 写入侧攒批** | `embed_queue_batch_size: 32`，`embed_queue_window_ms: 200` | 并发 write 合并 embed 请求 | search 侧仍直接 `embed` | — |
+
+### Benchmark backend 与 SDK 默认值差异
+
+`exp/dual_mem_exp/benchmarks/backends/dual_mem.py` 相对 SDK 的典型覆盖（**刷榜时务必对齐**）：
+
+```yaml
+summarizer_enabled: false
+extract_max_content_chars: 10000
+combined_gate_extract: true
+embed_merge_l1_gate: true
+gate_heuristic_shortcircuit: true
+content_hash_dedup: true          # session 级，PM/LME 命中率≈0
+embed_cache_size: 200000
+reconsolidation_min_interval_sec: 60
+system2_trigger_mode: manual
+persist_history: false
+llm_json_mode: false              # vLLM Qwen 兼容
+```
+
+---
+
+## 行为演进时间线（便于 git bisect）
+
+| 时期 | 主题 | 代表 commit / 说明 |
+|------|------|-------------------|
+| v0.1.1 | Gate LLM 主路径、hybrid 读 | 基线：gate 与 extract **各 1 次 LLM** |
+| fd63908 | 写侧 perf 第一批 | JSON mode、去 reconcile search-query、System2 多轮 |
+| 07f6b4c | LLM/embed **分块 merge** | `chat_json_for_content` / `chat_text_for_content` chunk+merge |
+| dcc8ae7 | P0/P1 ingest 优化包 | combined gate+extract、short-circuit、extract 截断/retry、summarizer 阈值、content_hash、读路径 BM25/to_thread |
+| dc09d76 | P0 修复 | gate PASS 后再 summary（曾引入 extract∥summary 串行回归）、content_hash 加 session、BM25 entity 分数 |
+| 47650c6 | 并发回收 | extract 前 **投机启动 summary**，REJECT/ephemeral **cancel** |
+| 本批 | P0/P1/P2 收尾 + 历史整形 | messages 整形（assistant 截 500/最近 20 轮）、`content_hash_scope`、supersede 原子化、extract retry `temperature=0`+JSON-only、REJECT short-circuit、Kuzu `close()` 接入 `aclose()`；订正 target_layers / reconsolidation 过时文档 |
+
+---
+
+## 快速回退清单（benchmark 异常时）
+
+| 现象 | 优先尝试 |
+|------|----------|
+| ingest 变慢、LLM 调用变多 | 查 `combined_gate_extract`、`summarizer_enabled`、`extract_max_content_chars` |
+| 长对话 fact 变少 / 丢中间信息 | `extract_max_content_chars: 0`（恢复 chunk merge）或增大截断上限 |
+| REJECT 仍很慢 | combined 模式 REJECT 必跑 extract；可试 `combined_gate_extract: false` + 纯 gate 先拒 |
+| LME session 召回掉点 | 确认 `content_hash_dedup` 未跨 session 误命中；已含 `session_id` |
+| search 排序异常 | `reader_mode: legacy`；或查 entity BM25 分数映射 |
+| JSON 解析失败翻倍耗时 | `extract_retry_on_failure: false` |
+| vLLM 400 on json_mode | `llm_json_mode: false`（benchmark 已设） |
+
+---
+
+## [0.1.2] — 2026-06
+
+- 初始对外版本号；含 dual/system1 模式、hybrid 读路径、Gate LLM、System2 ReAct。
+- 详见 git tag `v0.1.2` 与 `docs/architecture.md`。
+
+## [0.1.1] — 2026-06
+
+- 首个 dual-system memory SDK 发布（Gate + Extract + 快写 + 异步 reconcile）。
+
+---
+
+维护约定：任何 **默认配置变更**、**LLM 调用次数变更**、**截断/merge 策略变更**、**并发/scheduling 变更**，合并 PR 时请更新 `[Unreleased]` 一节。
