@@ -18,22 +18,29 @@ Benchmark 专用覆盖见 `exp/dual_mem_exp/benchmarks/backends/dual_mem.py`（�
 
 > 当前 `__version__` 仍为 `0.1.2`；下列变更已在 `main`，尚未发版。
 
+### Gate 子系统已整体移除（本批 · commit 484f221）
+
+- `dual_mem/agent/gate.py` 与 `tests/test_gate.py` 删除；提交决策完全由 **Extractor 单次 LLM 输出**（`is_ephemeral` + 结构化记忆）驱动，不再有独立的 Gate LLM 调用。
+- **LLM 调用次数**：每个 `add` 现在**固定 1 次 extract LLM**。旧 combined 模式下 PASS 也是 1 次；但旧 REJECT short-circuit 可 0 次，新模型 REJECT/ephemeral 仍付 1 次 extract。
+- **已删除配置**：`combined_gate_extract`、`gate_heuristic_shortcircuit`、`gate_shortcircuit_novelty`、`gate_shortcircuit_relevance`、`gate_shortcircuit_reject_novelty`、`embed_merge_l1_gate`（含 `config.default.yaml` 对应段）。
+- **公开 API 兼容**：`WriteResult.gate_passed` 字段保留；内部 `GateResult` 重命名为 `CommitResult`（`GateResult = CommitResult` 别名兼容）。
+- **Reconsolidation**：不再做情绪/arousal 推断，仅刷新 `last_reactivated_at`（零 LLM）。
+- **不可回退**：Gate 已删，无配置可切回旧行为；如需低价值内容跳过 extract LLM，需另加本地启发式预筛（TODO）。
+
 ### 写入路径（ingest）— LLM 次数与并发
 
 | 变更 | 配置 | 速度 | 效果 | Trade-off / 回退 |
 |------|------|------|------|------------------|
-| **Gate + Extract 合并为一次 LLM** | `combined_gate_extract: true`（默认） | PASS turn 每 turn **少 1 次** gate LLM（约 1 RTT） | gate 分数来自 extract JSON 的 `gate_decision`，再经规则融合 | **REJECT turn 仍付 1 次 extract LLM**（旧方案 REJECT 只付 gate）。回退：`combined_gate_extract: false` |
-| **Gate 启发式 short-circuit（PASS）** | `gate_heuristic_shortcircuit: true`，`gate_shortcircuit_novelty: 0.8`，`gate_shortcircuit_relevance: 0.5` | 高 novelty turn **跳过 gate LLM 字段**（prompt 不含 gate 段） | 边界样本可能不如全 LLM gate 稳 | combined 下不跳 extract。回退：`gate_heuristic_shortcircuit: false` |
-| **Gate 启发式 short-circuit（REJECT）** | `gate_shortcircuit_reject_novelty: 0.12`（0=关） | 近重复 + 无传记相关 turn：**整段跳过 gate+extract LLM**（combined 下省 1 次 extract） | 仅当向量 novelty 极低且 `relevance<阈值` 且 `arousal<0.5` 才丢；传记/情绪内容仍走 LLM | 误判风险低（阈值很严）。回退：`gate_shortcircuit_reject_novelty: 0` |
+| **Gate 子系统整体移除** | 无（配置已删） | 每 `add` **固定 1 次 extract LLM**（无独立 gate LLM；旧 REJECT short-circuit 可 0 次，现 REJECT/ephemeral 仍付 1 次 extract） | 提交决策由 Extractor 输出（`is_ephemeral` + 结构化记忆）驱动 | 不可回退（Gate 已删）；低价值内容省 extract 需另加本地预筛（TODO） |
 | **Extract ∥ Summary 投机并发** | `summarizer_enabled: true` 且 `len(content) ≥ summarizer_min_content_length` | PASS turn：`summary` 与 `extract` **并行**（≈ `max(T_extract, T_summary)`） | REJECT / ephemeral turn 可能 **白跑 1 次 summary LLM**（~5% REJECT × 长文本） | Summary 失败 **不阻断** L0/L2/L4（`try/except` 后 `summary=None`）。cancel 打 `summary cancelled after …` 日志。Benchmark 已 `summarizer_enabled: false`。回退：关 summary |
-| **Summary 仅在 gate PASS 后落库** | （逻辑，无单独开关） | 避免 REJECT turn 写 L3 | — | 与上条配合；REJECT 时 `_cancel_summarize_task` |
+| **Summary 仅在 extract 产出持久化记忆后落库** | （逻辑，无单独开关） | 避免 ephemeral / 无结构化记忆 turn 写 L3 | — | 与上条配合；REJECT/ephemeral 时 `_cancel_summarize_task` |
 | **Summarizer 阈值提高** | `summarizer_min_content_length: 1500`（原 500 → 800 → 1500） | 更少 summary LLM | 更短对话无 L3 | Benchmark：`summarizer_enabled: false` |
 | **Extract 长输入：中间截断** | `extract_max_content_chars: 0`（SDK 默认不截断）；benchmark `10000` | 20k+ 字符 **避免 50–80s outlier** | **丢失中间段落信息**（head+tail 保留） | 旧行为：靠 `llm_context_window` **分块多次 LLM + merge**（见下「LLM 分块合并」）。截断 vs 分块：**截断 = 1 次 LLM 更快但丢中间；分块 = N 次 LLM 更慢但更全**。回退：`extract_max_content_chars: 0` 且依赖 chunk merge |
 | **Extract JSON 失败 retry** | `extract_retry_on_failure: true` | 解析失败时 **+1 次 LLM**（~20s） | 降低「整 turn 22 条 fact 全丢」 | retry 用 `temperature=0.0` + **JSON-only 强化 prompt**（不强制 `json_object`，兼容 vLLM）。回退：`extract_retry_on_failure: false` |
 | **多轮 messages 输入整形** | `extract_history_context_ratio: 0.7`，`extract_assistant_max_tokens: 200` | 仅当整段对话占用 > `0.7 × llm_context_window`（token 粒度）才截 assistant，长会话 prompt token 下降 | **不丢任何轮**（40 轮提交得 40 轮全在）；**user 全保留**；超阈值时 assistant（AI 的话）截到 200 token；短对话原样透传 | 仅作用于 `messages=`；`content=` 不受影响。回退：ratio 或 tokens 设 `0` |
 | **配置单位统一为 token** | `summarizer_min_content_tokens: 600`、`extract_max_content_tokens: 0`、`extract_assistant_max_tokens: 200`、`extract_history_context_ratio: 0.7` | — | 全部阈值统一 token 粒度，内部 `× chars_per_token` 转字符比较。`extract_max_content_tokens`（原 `_chars`）= 最终输入硬上限，与历史整形**分层叠加不冲突** | 改名（删除旧 `_chars`/`_length`/`shape_threshold_ratio`，不兼容旧名）。benchmark：`extract_max_content_tokens: 4000` |
 | **Content-hash 写路径去重** | `content_hash_dedup: true`，`content_hash_scope: session\|user` | 相同 content **跳过 extract/reconcile** | session scope：跨 session 不误命中；user scope：跨 session 命中率更高 | `session`（默认）按 `app/user/agent/session`；`user` 按 `app/user`。回退：`content_hash_dedup: false` |
-| **L1 + Gate turn embed 合并** | `embed_merge_l1_gate: true`（默认 yaml）；代码默认 `false` | 多 turn `messages=` 写入 **少 ~1 次 embed RTT** | — | 绕过 `embed_queued` 攒批，**高并发 write 吞吐下降**。回退：`embed_merge_l1_gate: false` |
+| **L1 embedding 合并 gate 开关已移除** | 无（配置已删） | L1 节点 embedding 现由 `memory_writer` 统一 `embed_queued` | — | 旧 `embed_merge_l1_gate` 已移除，无此开关 |
 | **Reconciler embed 批量化** | （内部） | reconcile 候选 embedding **batch + 并发 query** | — | — |
 | **L0/L2/L4 + L3/L7 embed 合并** | （内部 `embed_batch`） | summary + intention 一次 embed | — | — |
 | **演化链 supersede 原子化** | （内部 `VectorStore.mark_superseded`） | — | 锁内 `get→改 superseded_by/is_latest/status→update payload` 一次完成，**不重写 embedding**；并发 supersede 不丢更新 | 替换原 `get→改→upsert`（mem_agent / reconciler_worker / basic_profile 三处统一）。无配置开关 |
@@ -48,7 +55,7 @@ Benchmark 专用覆盖见 `exp/dual_mem_exp/benchmarks/backends/dual_mem.py`（�
 | **Fusion access 批量读** | （内部 `get_access_batch`） | 少 N 次 SQLite  round-trip | — | — |
 | **Query understanding 只算一次** | （内部） | 避免 hybrid 路径重复 `understand()` | — | — |
 | **Reconsolidation 限频** | `reconsolidation_min_interval_sec: 0`（SDK）；benchmark `60` | 同 user 搜索 **减少 hook 开销** | dual 模式 S2 reconsolidation 任务更稀疏 | 回退：`reconsolidation_enabled: false` 或 `min_interval_sec: 0` |
-| **Reconsolidation 零-LLM 蒸馏** | （内部 `_run_reconsolidation`） | 无额外 LLM | dual：召回后用 gate 启发式比对情绪，唤醒度差异大 → 置 `custom.reactivation` + 刷新 `last_reactivated_at`（旧文档误标 no-op） | 非 ReAct，按设计轻量 |
+| **Reconsolidation 仅刷新时间戳（零 LLM）** | （内部 `_run_reconsolidation`） | 无额外 LLM | dual：召回后仅刷新 `last_reactivated_at`，**不再做情绪/arousal 推断、不再置 `custom.reactivation`**（Gate 移除后去此逻辑） | 非 ReAct，按设计轻量 |
 | **Hybrid 按 `target_layers` 路由** | （内部，`reader_mode: hybrid`） | — | QU 建议层 ∪ 常驻 profile 层下传 anchor（旧文档误标"写死层列表"） | 回退：`reader_mode: legacy` |
 | **Evolution chain 批量 `get_by_ids`** | （内部） | 链展开少 N 次 `vector.get` | — | — |
 
@@ -68,9 +75,6 @@ Benchmark 专用覆盖见 `exp/dual_mem_exp/benchmarks/backends/dual_mem.py`（�
 ```yaml
 summarizer_enabled: false
 extract_max_content_chars: 10000
-combined_gate_extract: true
-embed_merge_l1_gate: true
-gate_heuristic_shortcircuit: true
 content_hash_dedup: true          # session 级，PM/LME 命中率≈0
 embed_cache_size: 200000
 reconsolidation_min_interval_sec: 60
@@ -92,6 +96,7 @@ llm_json_mode: false              # vLLM Qwen 兼容
 | dc09d76 | P0 修复 | gate PASS 后再 summary（曾引入 extract∥summary 串行回归）、content_hash 加 session、BM25 entity 分数 |
 | 47650c6 | 并发回收 | extract 前 **投机启动 summary**，REJECT/ephemeral **cancel** |
 | 本批 | P0/P1/P2 收尾 + 历史整形 | messages 整形（assistant 截 500/最近 20 轮）、`content_hash_scope`、supersede 原子化、extract retry `temperature=0`+JSON-only、REJECT short-circuit、Kuzu `close()` 接入 `aclose()`；订正 target_layers / reconsolidation 过时文档 |
+| 484f221 | Gate 子系统移除 | 删除 `gate.py`/`test_gate.py`；提交决策改由 Extractor 驱动；移除 `combined_gate_extract`/`gate_*`/`embed_merge_l1_gate` 配置；Reconsolidation 去情绪推断；`GateResult`→`CommitResult` |
 
 ---
 
@@ -99,9 +104,9 @@ llm_json_mode: false              # vLLM Qwen 兼容
 
 | 现象 | 优先尝试 |
 |------|----------|
-| ingest 变慢、LLM 调用变多 | 查 `combined_gate_extract`、`summarizer_enabled`、`extract_max_content_chars` |
+| ingest LLM 调用数异常 | 当前每 `add` 固定 1 次 extract LLM（Gate 已移除，无 gate 次数）；如需低价值内容跳过 extract 见本地预筛 TODO。其他查 `summarizer_enabled`、`extract_max_content_chars` |
 | 长对话 fact 变少 / 丢中间信息 | `extract_max_content_chars: 0`（恢复 chunk merge）或增大截断上限 |
-| REJECT 仍很慢 | combined 模式 REJECT 必跑 extract；可试 `combined_gate_extract: false` + 纯 gate 先拒 |
+| REJECT/ephemeral 仍付 1 次 extract LLM | 设计如此（Gate 已删，无 short-circuit 可省）；如需省，加本地启发式预筛 |
 | LME session 召回掉点 | 确认 `content_hash_dedup` 未跨 session 误命中；已含 `session_id` |
 | search 排序异常 | `reader_mode: legacy`；或查 entity BM25 分数映射 |
 | JSON 解析失败翻倍耗时 | `extract_retry_on_failure: false` |
