@@ -75,7 +75,7 @@ def build_mcp(
         limit: int = 10,
         min_score: float = 0.4,
         intention_limit: int = 0,
-        include_derived: bool = True,
+        include_derived: bool | None = None,
     ) -> dict:
         return await ops.memory_search(
             query=query,

@@ -274,6 +274,7 @@ class Settings(BaseSettings):
     # boost). Sum of the two weights need not be 1; evidence boost saturates at the given count.
     hybrid_w_sem: float = 0.6
     hybrid_w_bm25: float = 0.4
+    normal_candidate_multiplier: float = 3.0
     hybrid_evidence_boost_max: float = 0.3
     hybrid_evidence_saturate: int = 5
     # Coding/tool-use memory subsystem — separate write/store path for engineering

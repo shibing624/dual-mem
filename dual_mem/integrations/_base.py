@@ -189,10 +189,10 @@ class MemoryBackend:
         session_ids: Optional[list[str]] = None,
         limit: int = 10,
         min_score: float = 0.4,
-        profile_limit: int = -1,
+        profile_limit: Optional[int] = None,
         profile_min_score: float = 0.3,
         intention_limit: int = 0,
-        include_derived: bool = True,
+        include_derived: Optional[bool] = None,
         created_after: Optional[int] = None,
     ) -> Any:
         return await self.client.search(

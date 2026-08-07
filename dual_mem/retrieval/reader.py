@@ -37,7 +37,9 @@ class Reader:
         """Recall memories using explicit filters; no query-intent guessing is performed."""
         start = time.perf_counter()
         rid = request_id or "search"
-        query_embedding = await self.factory.embed.embed_queued(query)
+        # Search has one query vector, so the write-side batching window only
+        # adds latency here.
+        query_embedding = await self.factory.embed.embed(query)
         memories = await search_hybrid(
             factory=self.factory,
             query=query,

@@ -331,10 +331,10 @@ class MemoryClient:
         session_ids: list[str] | None = None,
         limit: int = 10,
         min_score: float = 0.4,
-        profile_limit: int = -1,
+        profile_limit: int | None = None,
         profile_min_score: float = 0.3,
         intention_limit: int = 0,
-        include_derived: bool = True,
+        include_derived: bool | None = None,
         created_after: int | None = None,
         request_id: str | None = None,
         debug: bool = False,
@@ -355,8 +355,9 @@ class MemoryClient:
             limit: normal 路（L2/L3/L4）返回上限 /
                 cap on the normal route (L2/L3/L4 memories).
             min_score: normal 路最低融合分，低于此分丢弃 / min fused score for the normal route.
-            profile_limit: profile 路（L0/L4/L6 画像类）上限，``-1`` = 不限 /
-                cap on the profile route (identity/schema), ``-1`` = unlimited.
+            profile_limit: profile 路（L0/L4/L6 画像类）上限；省略时 System1
+                关闭、dual 不限，显式 ``-1`` = 不限 / cap on the profile route;
+                defaults to disabled for System1 and unlimited for dual, explicit ``-1`` = unlimited.
             profile_min_score: profile 路最低分 / min score for the profile route.
             intention_limit: proactive 路（L7 意图）返回条数，``0`` = 关闭。意图是“用户接下来
                 想做什么”的主动提醒，仅在需要主动推荐时才开；事实问答场景保持 0，以免意图噪声
@@ -364,8 +365,8 @@ class MemoryClient:
                 are forward-looking "what the user plans to do" nudges — only enable for
                 proactive recommendation; keep 0 for factual QA so intention noise does not
                 crowd out facts.
-            include_derived: 是否返回 System2 派生的 L6/L7；事实型评测应显式设为
-                ``False``，偏好与泛化任务保持 ``True``。
+            include_derived: 是否返回派生画像/evolution chain；省略时 System1
+                为 ``False``、dual 为 ``True``。可显式覆盖。
             created_after: 只返回该 Unix 秒之后创建的记忆（时间窗过滤）/
                 only memories created after this Unix-second cutoff.
             request_id: 日志/链路追踪 id，省略自动生成 / trace id for logs; auto-generated.
@@ -379,6 +380,14 @@ class MemoryClient:
             "search app=%s user=%s query=%r limit=%d debug=%s",
             (resolved_app_ids[0] if resolved_app_ids else ""), user_id, query, limit, debug,
         )
+        resolved_profile_limit = (
+            (-1 if self.settings.enable_graph else 0)
+            if profile_limit is None
+            else profile_limit
+        )
+        resolved_include_derived = (
+            self.settings.enable_graph if include_derived is None else include_derived
+        )
         memories, trace = await self.reader.search(
             query=query,
             app_ids=resolved_app_ids,
@@ -387,10 +396,10 @@ class MemoryClient:
             session_ids=session_ids,
             limit=limit,
             min_score=min_score,
-            profile_limit=profile_limit,
+            profile_limit=resolved_profile_limit,
             profile_min_score=profile_min_score,
             intention_limit=intention_limit,
-            include_derived=include_derived,
+            include_derived=resolved_include_derived,
             created_after=created_after,
             request_id=request_id,
             collect_trace=debug,

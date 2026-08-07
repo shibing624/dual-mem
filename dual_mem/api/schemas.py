@@ -37,10 +37,10 @@ class SearchRequest(BaseModel):
     session_ids: list[str] | None = None
     limit: int = 10
     min_score: float = 0.0
-    profile_limit: int = -1
+    profile_limit: int | None = None
     profile_min_score: float = 0.3
     intention_limit: int = 0
-    include_derived: bool = True
+    include_derived: bool | None = None
     created_after: int | None = None
     debug: bool = False
 

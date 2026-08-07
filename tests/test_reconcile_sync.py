@@ -97,6 +97,7 @@ async def test_reconcile_sync_inline_evolution_without_digest(tmp_storage, fake_
         user_id="u",
         min_score=0.0,
         profile_limit=5,
+        include_derived=True,
     )
     items = res.memories.profile + res.memories.normal
     evolved = [m for m in items if m.evolution_chain]

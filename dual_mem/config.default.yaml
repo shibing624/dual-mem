@@ -97,6 +97,7 @@ preset: default
 # --- 读路径 ---
 # hybrid_w_sem: 0.6                    # hybrid 融合权重：语义
 # hybrid_w_bm25: 0.4                   # hybrid 融合权重：池内 BM25 重排
+# normal_candidate_multiplier: 3.0     # normal 候选池倍率；top-50 默认取 150 条再做 BM25+
 # hybrid_evidence_boost_max: 0.3       # 图 L6 证据加成上限
 # hybrid_evidence_saturate: 5          # 证据加成饱和计数
 

@@ -202,9 +202,16 @@ class SearchMemories:
         """Merge profile/proactive/normal and sort by score descending."""
         items = [*self.profile, *self.proactive, *self.normal]
         items.sort(key=lambda x: x.score, reverse=True)
+        unique: list[MemoryItem] = []
+        seen: set[str] = set()
+        for item in items:
+            if item.memory_id in seen:
+                continue
+            seen.add(item.memory_id)
+            unique.append(item)
         if limit is not None and limit >= 0:
-            return items[:limit]
-        return items
+            return unique[:limit]
+        return unique
 
     def to_search_results(self, *, limit: int | None = None) -> list[dict[str, Any]]:
         """Current-state search hits for QA pipelines (see ``MemoryItem.to_search_result``)."""

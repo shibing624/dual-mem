@@ -37,7 +37,13 @@ async def test_three_key_structure_and_profile_full(factory):
     f2 = _seed(factory, "用户住在北京", Layer.L2_FACT)
 
     reader = Reader(factory=factory)
-    res, _ = await reader.search(query="用户喜欢喝咖啡", app_ids=["app"], user_id="u", limit=5)
+    res, _ = await reader.search(
+        query="用户喜欢喝咖啡",
+        app_ids=["app"],
+        user_id="u",
+        limit=5,
+        profile_limit=-1,
+    )
 
     assert {"profile", "proactive", "normal"} == {"profile", "proactive", "normal"}
     assert res.proactive == []
@@ -92,6 +98,7 @@ async def test_evolution_chain_returned(factory):
         user_id="u",
         limit=5,
         min_score=0.0,
+        include_derived=True,
     )
     evolved = [m for m in res.normal if m.evolution_chain]
     assert len(evolved) == 1

@@ -10,6 +10,7 @@ routes to normal; L7 to proactive when intention_limit > 0.
 """
 import asyncio
 import logging
+import math
 
 from dual_mem.isolation import build_filter
 from dual_mem.registry import ComponentFactory
@@ -117,10 +118,16 @@ async def search_hybrid(
     min_score_gate = min_score if min_score > 0 else 0.0
 
     final_limit = limit if limit > 0 else 10
-    vdb_sem_limit = max(final_limit * 3, 30)
+    candidate_multiplier = max(1.0, float(settings.normal_candidate_multiplier))
+    vdb_sem_limit = max(int(math.ceil(final_limit * candidate_multiplier)), 30)
     graph_limit = max(final_limit * 2, 20)
 
-    recall_statuses = [MemoryStatus.ACTIVE, MemoryStatus.SUPERSEDED]
+    use_derived = include_derived
+    recall_statuses = (
+        [MemoryStatus.ACTIVE, MemoryStatus.SUPERSEDED]
+        if use_derived
+        else [MemoryStatus.ACTIVE]
+    )
 
     normal_where = build_filter(
         app_ids=app_ids,
@@ -151,6 +158,8 @@ async def search_hybrid(
         return [{"node_id": n.node_id, "score": n.score, "node": n} for n in nodes]
 
     async def _profile_vdb() -> list[dict]:
+        if profile_limit == 0:
+            return []
         nodes = await asyncio.to_thread(
             vector.query,
             embedding=query_embedding,
@@ -205,7 +214,7 @@ async def search_hybrid(
         logger.warning("[hybrid] graph schema failed: %s", results[2])
 
     intention_hits: list[dict] = []
-    if include_derived and intention_limit > 0:
+    if use_derived and intention_limit > 0:
         intention_hits = await recall_intentions(
             vector,
             query_embedding,
@@ -290,7 +299,7 @@ async def search_hybrid(
     # Forward L6: batch the evidence-count lookup into a single graph round-trip instead of
     # one evidence_of() call per schema (the previous serial loop dominated read latency).
     forward_l6: list[dict] = []
-    if include_derived and graph is not None and graph_schema_hits:
+    if use_derived and graph is not None and graph_schema_hits:
         schema_ids = [row["node_id"] for row in graph_schema_hits]
         try:
             ev_counts = await asyncio.to_thread(graph.evidence_counts, schema_ids)
@@ -317,7 +326,7 @@ async def search_hybrid(
         forward_l6.sort(key=lambda x: x["_internal"], reverse=True)
 
     reverse_l6: list[dict] = []
-    if include_derived and graph is not None and vdb_scored:
+    if use_derived and graph is not None and vdb_scored:
         reverse_l6 = await reverse_lookup_l6(
             graph,
             [v["node_id"] for v in vdb_scored],
@@ -346,7 +355,7 @@ async def search_hybrid(
 
     expandable = vdb_scored + list(profile_hits)
     meta_by_nid: dict[str, dict] = {it["node_id"]: it for it in expandable if it.get("node_id")}
-    if expandable:
+    if use_derived and expandable:
         for item in expandable:
             if item.get("node") is not None:
                 item["node"].score = item.get("score", 0.0)
@@ -368,7 +377,7 @@ async def search_hybrid(
                 merged["is_evolved"] = True
             expanded.append(merged)
     else:
-        expanded = []
+        expanded = expandable
 
     normal_results = [it for it in expanded if _layer_of(it) not in _PROFILE_LAYER_VALS]
     if min_score_gate > 0:
@@ -383,7 +392,7 @@ async def search_hybrid(
 
     l0_results = [it for it in expanded if _layer_of(it) in _PROFILE_LAYER_VALS]
     l0_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    profile_results = l0_results + (fused_l6 if include_derived else [])
+    profile_results = l0_results + (fused_l6 if use_derived else [])
     if profile_limit == 0:
         profile_results = []
     elif profile_limit > 0:

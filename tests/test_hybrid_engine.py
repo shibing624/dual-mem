@@ -32,14 +32,18 @@ class _ScriptedEmbed:
 
     def __init__(self, query_text: str):
         self._query_text = query_text
+        self.direct_calls = 0
+        self.queued_calls = 0
 
     async def embed(self, text: str) -> list[float]:
+        self.direct_calls += 1
         return self.embed_sync(text)
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [self.embed_sync(t) for t in texts]
 
     async def embed_queued(self, text: str) -> list[float]:
+        self.queued_calls += 1
         return self.embed_sync(text)
 
     def embed_sync(self, text: str) -> list[float]:
@@ -61,7 +65,9 @@ def _seed_fact(client, *, node_id: str, content: str, cosine: float) -> None:
     client.factory.vector.upsert([node])
 
 
-async def test_bm25_rerank_surfaces_exact_term_over_higher_semantic(tmp_storage):
+async def test_bm25_rerank_surfaces_exact_term_over_higher_semantic(
+    tmp_storage, monkeypatch
+):
     """A keyword-matching fact outranks a *more* semantically similar distractor.
 
     Pure semantic would rank the distractor (cos 0.7) above the keyword hit (cos 0.5); the
@@ -69,18 +75,39 @@ async def test_bm25_rerank_surfaces_exact_term_over_higher_semantic(tmp_storage)
     """
     query = "vault access code 70355"
     settings = Settings(mode="system1", storage_dir=tmp_storage)
-    client = MemoryClient(settings=settings, embed=_ScriptedEmbed(query),
-                          llm=FakeLLMClient())
+    embed = _ScriptedEmbed(query)
+    client = MemoryClient(settings=settings, embed=embed, llm=FakeLLMClient())
 
     _seed_fact(client, node_id="kw", content="the vault access code is 70355 as requested",
                cosine=0.5)
     _seed_fact(client, node_id="distractor",
                content="general notes about safety and storage habits", cosine=0.7)
 
+    query_calls = []
+    get_calls = []
+    original_query = client.factory.vector.query
+    original_get_by_ids = client.factory.vector.get_by_ids
+
+    def _counted_query(*args, **kwargs):
+        query_calls.append((args, kwargs))
+        return original_query(*args, **kwargs)
+
+    def _counted_get_by_ids(*args, **kwargs):
+        get_calls.append((args, kwargs))
+        return original_get_by_ids(*args, **kwargs)
+
+    monkeypatch.setattr(client.factory.vector, "query", _counted_query)
+    monkeypatch.setattr(client.factory.vector, "get_by_ids", _counted_get_by_ids)
+
     result = await client.search(query=query, app_ids=["app"], user_id="u", min_score=0.0)
     normal_ids = [m.memory_id for m in result.memories.normal]
     assert "kw" in normal_ids and "distractor" in normal_ids
     assert normal_ids.index("kw") < normal_ids.index("distractor")
+    assert embed.direct_calls == 1
+    assert embed.queued_calls == 0
+    assert len(query_calls) == 1
+    assert query_calls[0][1]["top_k"] == 30
+    assert get_calls == []
 
     await client.aclose()
 
