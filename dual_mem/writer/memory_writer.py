@@ -6,13 +6,14 @@ System1 cognition pipeline (extract -> commit decision -> fast-write). In dual m
 writes queue reconcile work for explicit digest(). L7 intentions and optional L3 summaries
 are written inline. dual-mem requires both LLM and embedding providers.
 """
+import asyncio
 import hashlib
 import logging
-import asyncio
 from dataclasses import dataclass, field
 
 from dual_mem.agent.mem_agent import MemAgent
 from dual_mem.registry import ComponentFactory
+from dual_mem.sdk_models import ChatMessage
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
 logger = logging.getLogger("dual_mem.writer")
@@ -60,9 +61,11 @@ class MemoryWriter:
         session_id: str,
         request_id: str,
         memory_at: int | None = None,
+        messages: list[ChatMessage] | None = None,
     ) -> WriterOutcome:
-        """Persist content as a raw node, then derive and link extra memories via System1."""
+        """Persist content according to the configured memory mode."""
         settings = self.factory.settings
+        is_system1 = settings.mode == "system1"
         iso_key = _content_iso_key(
             app_id=app_id,
             user_id=user_id,
@@ -71,7 +74,7 @@ class MemoryWriter:
             scope=settings.content_hash_scope,
         )
         content_hash: str | None = None
-        if settings.content_hash_dedup:
+        if settings.content_hash_dedup and not is_system1:
             content_hash = hashlib.md5(content.encode()).hexdigest()
             cached = self.factory.cache.get_content_hash_outcome(iso_key, content_hash)
             if cached is not None:
@@ -100,8 +103,9 @@ class MemoryWriter:
             memory_at=memory_at,
         )
 
-        node.embedding = await self.factory.embed.embed_queued(content)
-        await asyncio.to_thread(self.factory.vector.upsert, [node])
+        if is_system1 or not settings.skip_l1_vector_when_derived:
+            node.embedding = await self.factory.embed.embed_queued(content)
+            await asyncio.to_thread(self.factory.vector.upsert, [node])
         self.factory.history.append(
             event="ADD",
             node_id=node.node_id,
@@ -114,6 +118,28 @@ class MemoryWriter:
             user_id, node.node_id, len(content),
         )
 
+        # reconcile_sync is a dual-pipeline feature: honor it even in system1
+        # mode by delegating to the full dual agent pipeline.
+        if is_system1 and not settings.reconcile_sync:
+            agent = MemAgent(factory=self.factory)
+            extra_node_ids, commit_result, is_ephemeral = await agent.run_system1(
+                content=content,
+                raw_node=node,
+                messages=messages,
+                request_id=request_id,
+            )
+            if extra_node_ids:
+                # Derived memories carry their own embeddings now, so the raw
+                # chunk leaves the recall pool (shadow), matching dual mode.
+                node.status = MemoryStatus.SHADOW
+                await asyncio.to_thread(self.factory.vector.upsert, [node])
+            return WriterOutcome(
+                memory_id=node.node_id,
+                extra_node_ids=extra_node_ids,
+                commit_passed=commit_result.passed,
+                is_ephemeral=is_ephemeral,
+            )
+
         agent = MemAgent(factory=self.factory)
         extra_node_ids, commit_result, is_ephemeral = await agent.run(
             content=content,
@@ -123,10 +149,15 @@ class MemoryWriter:
             session_id=session_id,
             request_id=request_id,
             memory_at=memory_at,
+            messages=messages,
         )
 
         if extra_node_ids:
             node.status = MemoryStatus.SHADOW
+            if not settings.skip_l1_vector_when_derived:
+                await asyncio.to_thread(self.factory.vector.upsert, [node])
+        elif settings.skip_l1_vector_when_derived:
+            node.embedding = await self.factory.embed.embed_queued(content)
             await asyncio.to_thread(self.factory.vector.upsert, [node])
 
         outcome = WriterOutcome(

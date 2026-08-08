@@ -85,6 +85,8 @@ class Reconciler:
         policy: str = "balanced",
         weak_candidate_score: float = 0.5,
         non_destructive: bool = False,
+        prompt_pair: tuple[str, str] | None = None,
+        use_hy_contract: bool = False,
     ):
         self.llm = llm
         self.embed = embed
@@ -92,10 +94,15 @@ class Reconciler:
         self.enable_search_query = enable_search_query
         self.policy = policy
         self.weak_candidate_score = weak_candidate_score
+        # Optional (zh, en) prompt override, e.g. the System1 hy-style contract.
+        self.prompt_pair = prompt_pair
         # non_destructive: reconcile 只做增量 ADD，永不 supersede/DELETE
         # 原始 fact。开启后 _apply_non_destructive 在 _parse_ops 输出上硬剥离 supersedes
         # 和 DELETE，保证记忆库只增不减，计数/聚合类问题零丢事实风险。
         self.non_destructive = non_destructive
+        # use_hy_contract: 使用 hy_memory 的 reconcile 契约 — bare JSON 数组，
+        # ADD/DELETE op，无 reason 分组。当 True 时会覆盖 prompt_pair。
+        self.use_hy_contract = use_hy_contract
 
     async def reconcile(
         self,
@@ -227,13 +234,23 @@ class Reconciler:
         existing_tags_line = ", ".join(sorted(existing_tags)) if existing_tags else "(none yet)"
 
         joined = "\n".join(new_memories)
-        system = prompts.pick(prompts.RECONCILE_ZH, prompts.RECONCILE_EN, joined).format(
-            current_time=current_time,
-            existing_memories=existing_lines,
-            new_memories=new_mem_lines,
-            existing_tags=existing_tags_line,
-        )
-        if self.policy == "conservative":
+        if self.use_hy_contract:
+            # hy contract: EN-only, bare JSON array, ADD/DELETE ops
+            system = prompts.RECONCILE_HY_EN.format(
+                current_time=current_time,
+                existing_memories=existing_lines,
+                new_memories=new_mem_lines,
+            )
+            logger.info("[reconciler] hy_contract prompt (EN only, %d chars)", len(system))
+        else:
+            prompt_zh, prompt_en = self.prompt_pair or (prompts.RECONCILE_ZH, prompts.RECONCILE_EN)
+            system = prompts.pick(prompt_zh, prompt_en, joined).format(
+                current_time=current_time,
+                existing_memories=existing_lines,
+                new_memories=new_mem_lines,
+                existing_tags=existing_tags_line,
+            )
+        if self.policy == "conservative" and not self.use_hy_contract:
             system += prompts.pick(
                 prompts.RECONCILE_POLICY_CONSERVATIVE_ZH,
                 prompts.RECONCILE_POLICY_CONSERVATIVE_EN,
@@ -242,7 +259,12 @@ class Reconciler:
 
         for _ in range(3):
             try:
-                data = await self.llm.chat_json(system=system, user=new_mem_lines)
+                data = await self.llm.chat_json(
+                    system=system,
+                    user=new_mem_lines,
+                    max_tokens=8192,
+                    json_array=self.use_hy_contract,
+                )
             except json.JSONDecodeError as exc:
                 logger.warning("reconcile JSON parse failed, retrying: %s", exc)
                 continue
@@ -255,6 +277,11 @@ class Reconciler:
                     len(candidate_map), len(ops),
                     sum(1 for op in ops if op.op == "ADD" and op.supersedes),
                 )
+                if not ops:
+                    logger.warning(
+                        "reconcile returned 0 ops (data keys=%s); caller falls back to plain ADD",
+                        list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+                    )
                 return ops
         logger.warning("reconcile produced no parseable ops after 3 retries")
         return []

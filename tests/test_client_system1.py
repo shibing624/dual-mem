@@ -50,8 +50,13 @@ def client(tmp_storage, fake_embed, fake_llm):
     )
 
 
-async def test_add_drops_system_role_from_extract_dialogue(client, fake_llm):
-    await client.add(
+async def test_dual_add_drops_system_role_from_extract_dialogue(
+    tmp_storage, fake_embed, fake_llm
+):
+    dual_client = MemoryClient(
+        storage_dir=tmp_storage, mode="dual", embed=fake_embed, llm=fake_llm
+    )
+    await dual_client.add(
         messages=[
             {"role": "system", "content": "You are a helpful assistant with secret rules."},
             {"role": "user", "content": "用户喜欢咖啡"},

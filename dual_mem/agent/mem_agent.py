@@ -8,16 +8,21 @@ L0 basic profiles, and optional L3 summaries.
 """
 import asyncio
 import logging
+import math
+import re
 import time
+import unicodedata
 import uuid
 from datetime import datetime
+from typing import Any
 
+from dual_mem.agent import prompts
 from dual_mem.agent.basic_profile import BasicProfileTool, normalize_basic_info
 from dual_mem.agent.extractor import Extractor
 from dual_mem.agent.reconciler import ReconcileOp, Reconciler
 from dual_mem.agent.summarizer import Summarizer
 from dual_mem.registry import ComponentFactory
-from dual_mem.sdk_models import CommitResult
+from dual_mem.sdk_models import ChatMessage, CommitResult
 from dual_mem.storage.graph_store import GraphNode
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
@@ -56,7 +61,205 @@ class MemAgent:
             policy=self.settings.reconcile_policy,
             weak_candidate_score=self.settings.reconcile_weak_candidate_score,
             non_destructive=self.settings.reconcile_non_destructive,
+            use_hy_contract=self.settings.reconcile_use_hy_contract,
         )
+
+    async def run_system1(
+        self,
+        *,
+        content: str,
+        raw_node: MemoryNode,
+        messages: list[ChatMessage] | None = None,
+        request_id: str = "",
+    ) -> tuple[list[str], CommitResult, bool]:
+        """Extract searchable memories, each embedded on its own content."""
+        current_time = (
+            datetime.fromtimestamp(raw_node.memory_at).isoformat(timespec="seconds")
+            if raw_node.memory_at
+            else ""
+        )
+        extracted = await self.extractor.extract_system1(
+            content=content,
+            current_time=current_time,
+            current_messages=messages,
+        )
+        for key in ("identity", "facts", "intentions"):
+            extracted[key] = self._normalize_memory_items(extracted.get(key))
+
+        new_memories, new_meta = self._collect_new_memories(extracted)
+        # System1 keeps intentions as first-class retrievable memories (same
+        # pool as facts, tagged memory_type="intention"), mirroring the
+        # reference reader where intention nodes rank alongside facts.
+        seen_contents = {text.strip() for text in new_memories}
+        for item in extracted.get("intentions") or []:
+            if not isinstance(item, dict):
+                continue
+            intention_content = item.get("content")
+            if not isinstance(intention_content, str) or not intention_content.strip():
+                continue
+            normalized = intention_content.strip()
+            if normalized in seen_contents:
+                continue
+            seen_contents.add(normalized)
+            new_memories.append(normalized)
+            new_meta.append(
+                {
+                    "content": normalized,
+                    "layer": "L2_FACT",
+                    "memory_type": "intention",
+                    "tags": item.get("tags") or [],
+                    "speculate": item.get("speculate"),
+                    "owner": item.get("owner", ""),
+                }
+            )
+        is_ephemeral = bool(extracted.get("is_ephemeral", False))
+        if is_ephemeral:
+            commit_result = CommitResult(False, "extractor marked content ephemeral")
+        elif not new_memories and not normalize_basic_info(extracted.get("basic_info")):
+            commit_result = CommitResult(False, "extractor produced no persistable memory")
+        else:
+            commit_result = CommitResult(True, "extractor produced persistable memory")
+        try:
+            self.cache.log_pipeline(
+                request_id=request_id,
+                stage="EXTRACT",
+                payload={
+                    "n_identity": len(extracted.get("identity", [])),
+                    "n_facts": len(extracted.get("facts", [])),
+                    "n_intentions": len(extracted.get("intentions", [])),
+                    "has_basic_info": bool(normalize_basic_info(extracted.get("basic_info"))),
+                    "is_ephemeral": is_ephemeral,
+                    "commit_passed": commit_result.passed,
+                    "commit_reason": commit_result.reason,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("log_pipeline(EXTRACT) failed (system1): %s", exc)
+        if not commit_result.passed:
+            return [], commit_result, is_ephemeral
+
+        settings = self.factory.settings
+        if settings.system1_reconcile_enabled and not settings.reconcile_skip_llm:
+            # Merge the chunk's new memories against the user's existing ACTIVE
+            # memories (hy-style): candidate recall reuses freshly embedded new
+            # contents; the reconcile LLM is skipped when no real conflict
+            # candidate exists (fast path = plain ADD of every new memory).
+            reconciler = Reconciler(
+                llm=self.factory.llm,
+                embed=self.embed,
+                vector=self.vector,
+                enable_search_query=False,
+                policy=settings.reconcile_policy,
+                weak_candidate_score=settings.reconcile_weak_candidate_score,
+                non_destructive=False,
+                prompt_pair=(prompts.RECONCILE_SYSTEM1_ZH, prompts.RECONCILE_SYSTEM1_EN),
+            )
+            ops = await reconciler.reconcile(
+                new_memories=new_memories,
+                new_memories_meta=new_meta,
+                app_id=raw_node.app_id,
+                user_id=raw_node.user_id,
+                agent_id=raw_node.agent_id,
+                current_time=current_time,
+                exclude_ids=[raw_node.node_id],
+            )
+            if not ops:
+                # "No evolution" verdict: the new memories still carry new
+                # information, so they must be written as plain ADDs.
+                ops = [
+                    ReconcileOp(
+                        op="ADD",
+                        content=memory,
+                        layer=meta.get("layer") or "L2_FACT",
+                        tags=meta.get("tags") or [],
+                        update_type="SUPPLEMENT",
+                    )
+                    for memory, meta in zip(new_memories, new_meta, strict=True)
+                ]
+            try:
+                self.cache.log_pipeline(
+                    request_id=request_id,
+                    stage="RECONCILE",
+                    payload={
+                        "n_ops": len(ops),
+                        "n_add": sum(1 for op in ops if op.op == "ADD"),
+                        "n_delete": sum(1 for op in ops if op.op == "DELETE"),
+                        "n_supersede_links": sum(len(op.supersedes) for op in ops),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("log_pipeline(RECONCILE) failed (system1): %s", exc)
+        else:
+            ops = [
+                ReconcileOp(
+                    op="ADD",
+                    content=memory,
+                    layer=meta.get("layer") or "L2_FACT",
+                    tags=meta.get("tags") or [],
+                    update_type="SUPPLEMENT",
+                )
+                for memory, meta in zip(new_memories, new_meta, strict=True)
+            ]
+        written_ids = await self._apply_system1_ops(ops=ops, raw_node=raw_node, new_meta=new_meta)
+        return written_ids, commit_result, is_ephemeral
+
+    async def _apply_system1_ops(
+        self,
+        *,
+        ops: list[ReconcileOp],
+        raw_node: MemoryNode,
+        new_meta: list[dict[str, Any]],
+    ) -> list[str]:
+        """Apply reconcile ops for one System1 chunk with batched embedding/upsert."""
+        meta_by_content = {str(meta.get("content", "")).strip(): meta for meta in new_meta}
+        add_ops = [op for op in ops if op.op == "ADD" and op.content.strip()]
+        nodes: list[MemoryNode] = []
+        if add_ops:
+            embeddings = await self.embed.embed_batch([op.content for op in add_ops])
+            for op, embedding in zip(add_ops, embeddings, strict=True):
+                layer_name = (op.layer or "L2_FACT").upper()
+                try:
+                    layer = Layer(layer_name)
+                except ValueError:
+                    layer = Layer.L2_FACT
+                src_meta = meta_by_content.get(op.content.strip(), {})
+                nodes.append(
+                    MemoryNode(
+                        content=op.content,
+                        layer=layer,
+                        app_id=raw_node.app_id,
+                        user_id=raw_node.user_id,
+                        agent_id=raw_node.agent_id,
+                        session_id=raw_node.session_id,
+                        status=MemoryStatus.ACTIVE,
+                        is_latest=True,
+                        supersedes=list(op.supersedes),
+                        memory_at=raw_node.memory_at,
+                        tags=op.tags or [],
+                        custom={
+                            "source_node_id": raw_node.node_id,
+                            "memory_type": src_meta.get("memory_type", "fact"),
+                            "update_type": op.update_type,
+                        },
+                        embedding=embedding,
+                    )
+                )
+        if nodes:
+            await asyncio.to_thread(self.vector.upsert, nodes)
+        for op, new_node in zip(add_ops, nodes, strict=True):
+            for old_id in op.supersedes:
+                if old_id != new_node.node_id:
+                    await asyncio.to_thread(
+                        self.vector.mark_superseded, old_id, superseded_by_id=new_node.node_id
+                    )
+        # DELETE ops are intentionally not applied in System1: supersede keeps
+        # history reachable through evolution chains, but DELETE would drop
+        # information irrecoverably — the reference system never deletes either.
+        n_delete_skipped = sum(1 for op in ops if op.op == "DELETE")
+        if n_delete_skipped:
+            logger.info("system1 reconcile: skipped %d DELETE op(s)", n_delete_skipped)
+        return [node.node_id for node in nodes]
+
     async def run(
         self,
         *,
@@ -67,6 +270,7 @@ class MemAgent:
         session_id: str,
         request_id: str,
         memory_at: int | None,
+        messages: list[ChatMessage] | None = None,
     ) -> tuple[list[str], CommitResult, bool]:
         """Run the System1 pipeline for one raw memory.
 
@@ -88,10 +292,14 @@ class MemAgent:
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
+            current_messages=messages,
+            history_messages=None,
         )
 
         for key in ("identity", "facts", "intentions"):
             extracted[key] = self._normalize_memory_items(extracted.get(key))
+            if self.settings.canonical_dedup_enabled:
+                extracted[key] = self._dedup_memory_items(extracted[key])
         is_ephemeral = bool(extracted.get("is_ephemeral"))
         basic_info = normalize_basic_info(extracted.get("basic_info"))
         extracted["basic_info"] = basic_info
@@ -330,6 +538,33 @@ class MemAgent:
         return normalized
 
     @staticmethod
+    def _canonical_content(content: str) -> str:
+        text = unicodedata.normalize("NFKC", content).casefold()
+        text = re.sub(r"[^\w]+", " ", text, flags=re.UNICODE)
+        return " ".join(text.split())
+
+    @classmethod
+    def _dedup_memory_items(cls, items: list[dict]) -> list[dict]:
+        seen: set[str] = set()
+        unique: list[dict] = []
+        for item in items:
+            key = cls._canonical_content(str(item.get("content", "")))
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return unique
+
+    @staticmethod
+    def _cosine_similarity(left: list[float], right: list[float]) -> float:
+        dot = sum(a * b for a, b in zip(left, right, strict=False))
+        left_norm = math.sqrt(sum(value * value for value in left))
+        right_norm = math.sqrt(sum(value * value for value in right))
+        if not left_norm or not right_norm:
+            return 0.0
+        return dot / (left_norm * right_norm)
+
+    @staticmethod
     def _collect_new_memories(extracted: dict) -> tuple[list[str], list[dict]]:
         """Flatten extracted identity/fact items into parallel content and metadata lists."""
         texts: list[str] = []
@@ -442,9 +677,25 @@ class MemAgent:
             )
             idx += 1
 
+        kept_nodes: list[MemoryNode] = []
+        kept_embeddings: list[list[float]] = []
         for node in l2l4_nodes:
-            node.embedding = embeddings[idx]
+            embedding = embeddings[idx]
             idx += 1
+            if self.settings.vector_dedup_enabled and any(
+                node.layer == previous.layer
+                and self._cosine_similarity(embedding, previous_embedding)
+                >= self.settings.vector_dedup_threshold
+                for previous, previous_embedding in zip(
+                    kept_nodes, kept_embeddings, strict=True
+                )
+            ):
+                continue
+            node.embedding = embedding
+            kept_nodes.append(node)
+            kept_embeddings.append(embedding)
+
+        for node in kept_nodes:
             await asyncio.to_thread(self.vector.upsert, [node])
             l2l4_ids.append(node.node_id)
             self.history.append(

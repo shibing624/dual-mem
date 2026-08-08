@@ -11,6 +11,127 @@ from dual_mem.providers.llm import is_chinese
 # Lightweight Extractor — facts + identity + basic_info + intentions + ephemeral
 # =====================================================================
 
+SYSTEM1_EXTRACT_EN = """You are a memory analyst maintaining a durable, long-term memory base about the user.
+Analyze the conversation and extract memories useful for answering future
+questions about the user. Resolve references using the surrounding dialogue, but
+never invent details.
+
+Absolute rules:
+1. Output JSON only, no explanations or markdown.
+2. Never invent information not supported by the conversation.
+3. Ignore system messages.
+
+What to extract:
+- preferences, opinions, values, attitudes, feelings
+- events, experiences, actions the user took or participated in
+- relationships, people, names, occupations, roles
+- habits, recurring activities, routines
+- goals, future plans, intentions, decisions
+- constraints, requirements, limitations the user mentions
+- skills, abilities, expertise
+- recommendations the user accepted or rejected
+- factual statements the user makes about themselves or their life
+
+Do NOT extract:
+- small talk, greetings, pleasantries
+- acknowledgements ("ok", "thanks", "got it")
+- generic emotions without context
+- temporary conversational context without durable value
+- assistant reminders of old information
+- information already implied by prior context
+- vague personality judgments without concrete evidence
+
+Implicit preference rule:
+When the user's behavior strongly suggests a preference or trait (e.g. repeatedly
+engaging in an activity → positive interest; avoiding something → negative
+preference; sustained voluntary effort → commitment), you MUST infer and record
+it as an identity memory with the supporting evidence.
+
+Style rules (critical for retrieval):
+4. Write every memory in third person ("The user ...", "The user's partner ..."),
+   as one complete, self-contained statement that stays fully understandable
+   without the original dialogue.
+5. Make every memory information-dense (about 20-60 words): fold the concrete
+   specifics (names, numbers, dates, places, brands) together with the context,
+   reason, or feeling the user attached to them.
+6. identity (stable traits, preferences, aversions, opinions, values, feelings,
+   habits, skills, roles): state the intensity or attitude and attach the
+   supporting evidence or backstory from the conversation (e.g. "The user has a
+   strong preference for X, as evidenced by Y, which they found Z.").
+7. facts (objective events, experiences, relationships, recommendations,
+   details): state what happened or is planned with its concrete details and
+   why it matters to the user.
+8. intentions: concrete future actions or plans, including stated conditions
+   and whether the user has decided or is still considering.
+9. One atomic statement per memory; do not repeat the same information across
+   categories.
+10. basic_info: only explicit name, age, gender, occupation, education, location.
+11. Attach 3-6 short lowercase topical tags to each memory.
+12. Set is_ephemeral=true only for pure small talk with no durable user
+    information; facts and future plans are never ephemeral.
+
+Return one JSON object only:
+{"basic_info": {}, "identity": [{"content": "...", "tags": []}],
+ "facts": [{"content": "...", "tags": []}],
+ "intentions": [{"content": "...", "tags": []}], "is_ephemeral": false}"""
+
+SYSTEM1_EXTRACT_ZH = """你是记忆分析专家，负责维护关于用户的持久长期记忆库。
+分析对话，抽取对将来回答用户相关问题有价值的记忆。可以结合对话上下文
+消解指代，但不得臆造。
+
+绝对规则：
+1. 只输出 JSON，不要输出解释或 markdown。
+2. 严禁编造对话中不存在的信息。
+3. 忽略 system 消息。
+
+应该提取的内容：
+- 偏好、观点、价值观、态度、感受
+- 事件、经历、用户参与的行为
+- 关系、人物、姓名、职业、角色
+- 习惯、重复性活动、日常规律
+- 目标、未来计划、意图、决定
+- 约束、要求、限制
+- 技能、能力、专长
+- 用户接受或拒绝的推荐
+- 用户关于自己或生活的客观陈述
+
+不应提取的内容：
+- 寒暄、问候、客套话
+- 确认性回复（"好的"、"谢谢"、"知道了"）
+- 无上下文支撑的泛泛情绪
+- 无持久价值的临时对话上下文
+- 助手对旧信息的回顾提醒
+- 已被前文隐含的信息
+- 缺乏具体证据的模糊性格判断
+
+隐式偏好规则：
+当用户的行为强烈暗示某种偏好或特质时（如反复从事某项活动→积极兴趣；
+回避某事→负面偏好；持续自愿付出努力→投入承诺），必须推断并记录为一
+条 identity 记忆，并附带对话中的佐证。
+
+风格规则（对检索质量至关重要）：
+4. 每条记忆用第三人称（"用户……"、"用户的伴侣……"）写成完整、自包含的
+   陈述句，脱离原对话也能完全看懂。
+5. 每条记忆信息密度要高（约 40-100 字）：把具体细节（人名、数字、日期、
+   地点、品牌）连同用户赋予它们的背景、原因或感受一起写进去。
+6. identity（稳定属性、偏好、厌恶、观点、价值观、感受、习惯、技能、角色）：
+   写出强度或态度，并附上对话中的佐证或来龙去脉（例如"用户强烈偏好 X，
+   因为曾经 Y，并觉得 Z"）。
+7. facts（客观事件、经历、关系、建议、细节）：写清发生了什么或计划做什么，
+   包含具体细节以及对用户的意义。
+8. intentions：具体的未来行动或计划，包含提到的条件，以及用户已决定还是
+   仍在考虑。
+9. 每条记忆只表达一个原子陈述；不同类别之间不要重复同一信息。
+10. basic_info：仅记录明确的姓名、年龄、性别、职业、教育和所在地。
+11. 每条记忆附 3-6 个简短的小写主题标签（tags）。
+12. 仅对纯粹寒暄、没有持久用户信息的内容设置 is_ephemeral=true；事实和
+    未来计划永远不是 ephemeral。
+
+只返回一个 JSON 对象：
+{"basic_info": {}, "identity": [{"content": "...", "tags": []}],
+ "facts": [{"content": "...", "tags": []}],
+ "intentions": [{"content": "...", "tags": []}], "is_ephemeral": false}"""
+
 EXTRACT_ZH = """你是一位专业的记忆分析专家。请从以下对话中提取关于用户的结构化信息。
 对话内容:
 ---
@@ -674,6 +795,143 @@ No information from any source may be lost after your ops execute.
 4. `supersedes` and `tags` are arrays (use `[]` when empty).
 
 Output JSON now."""
+
+
+# =====================================================================
+# System1 reconcile — hy-style per-memory merge decision
+# =====================================================================
+
+RECONCILE_SYSTEM1_ZH = """你是一个记忆管理系统。请决定如何把一批新记忆整合进已有记忆库。
+
+当前时间: {current_time}
+
+## 已有记忆
+{existing_memories}
+
+每条已有记忆包含字段: memory_id, content, memory_at, layer, tags。
+
+## 待整合的新记忆
+{new_memories}
+
+## 决策规则
+
+对**每一条新记忆**，必须且只能选择一个动作：
+
+1. ADD —— 新记忆包含已有记忆未覆盖的新信息，作为独立记忆写入。
+   {{"op": "ADD", "content": "<新记忆原文，可轻微润色>", "layer": "L2_FACT", "supersedes": [], "tags": [...], "update_type": "SUPPLEMENT"}}
+
+2. UPDATE —— 某条已有记忆仍然成立，但新记忆补充了**同一主题**的细节。把两者合并成一条更丰富、自包含的陈述，保留双方全部有意义的事实（人名、数字、日期、原因、感受）。被合并的已有记忆成为历史。
+   {{"op": "ADD", "content": "<合并后的陈述>", "layer": "L2_FACT", "supersedes": ["<existing_id>"], "tags": [...], "update_type": "OVERRIDE"}}
+
+3. SUPERSEDE —— 新记忆与已有记忆在**同一维度**上冲突或发生了更替（偏好改变、不再喜欢、搬家等）。写出当前真相，并取代过时的 memory_id；若存在链式多个版本，全部取代，并把链中仍然有效的内容折叠进新陈述。
+   {{"op": "ADD", "content": "<当前真相陈述>", "layer": "L2_FACT", "supersedes": ["<existing_id>", ...], "tags": [...], "update_type": "OVERRIDE"}}
+
+规则：
+- **积极合并**：只要已有记忆与新记忆描述同一主题、事件、偏好或关系，就优先 UPDATE，而不是两条都保留。记忆库必须保持小而密；同一主题不允许重复或近重复陈述。
+- 合并涉及"偏好/活动发生变化"的陈述时，必须在一条陈述里写清完整弧线：最初喜欢什么、为什么放弃、现在转向什么。
+- 绝不丢失信息：任何来源中的有意义事实都必须保留在某个输出陈述中。
+- 第三人称（"用户……"），自包含，使用输入语言。
+- tags：1-3 个小写主题关键词。
+- 不要输出 DELETE；不需要变更的记忆就不用出现在输出里之外无需其他操作。
+
+只输出一个 JSON 对象，不要任何解释：
+{{"updates": [{{"reason": "...", "ops": [<上述 op>]}}]}}
+"""
+
+RECONCILE_SYSTEM1_EN = """You are a memory management system. Decide how to integrate a batch of new memories into the existing memory base.
+
+Current time: {current_time}
+
+## Existing memories
+{existing_memories}
+
+Each existing memory has: memory_id, content, memory_at, layer, tags.
+
+## New memories to integrate
+{new_memories}
+
+## Decision rules
+
+For EACH new memory, choose exactly one action:
+
+1. ADD — the new memory carries information not covered by any existing memory; write it as a standalone memory.
+   {{"op": "ADD", "content": "<the new memory text, unchanged or lightly polished>", "layer": "L2_FACT", "supersedes": [], "tags": [...], "update_type": "SUPPLEMENT"}}
+
+2. UPDATE — an existing memory is still true but the new one adds details on the SAME topic. Merge both into ONE richer, self-contained statement that preserves every meaningful fact from both sides (names, numbers, dates, reasons, feelings). The merged existing memory becomes history.
+   {{"op": "ADD", "content": "<merged statement>", "layer": "L2_FACT", "supersedes": ["<existing_id>"], "tags": [...], "update_type": "OVERRIDE"}}
+
+3. SUPERSEDE — the new memory contradicts or replaces an existing one on the SAME dimension (preference change, no longer does X, moved away...). Write the current truth and supersede the outdated memory_id(s); if several chained versions exist, supersede all of them and fold their still-valid content into the new statement.
+   {{"op": "ADD", "content": "<current truth statement>", "layer": "L2_FACT", "supersedes": ["<existing_id>", ...], "tags": [...], "update_type": "OVERRIDE"}}
+
+Rules:
+- Merge AGGRESSIVELY: whenever an existing memory and a new one describe the same topic, event, preference, or relationship, prefer UPDATE over keeping both. The memory base must stay small and dense; duplicate or near-duplicate statements about one topic are not allowed.
+- When merging statements about a preference or activity that CHANGED, always capture the full arc in one statement: what was initially enjoyed, why it was abandoned, and what replaced it.
+- Never lose information: every meaningful fact from any source must survive in some output statement.
+- Third person ("The user ..."), self-contained, English.
+- tags: 1-3 lowercase topical keywords.
+- Never output DELETE.
+
+Output one JSON object only, no explanations:
+{{"updates": [{{"reason": "...", "ops": [<ops as above>]}}]}}
+"""
+
+
+RECONCILE_HY_EN = """You are a memory reconciler maintaining a compact, non-contradictory memory base.
+
+Current time: {current_time}
+
+## Existing memories
+{existing_memories}
+
+Each existing memory has: memory_id, content, memory_at, layer, tags.
+
+## New memories to integrate
+{new_memories}
+
+## Three-way reconcile model
+
+For EACH new memory, choose exactly one archetype:
+
+### 1. NEW — the memory carries information not covered by ANY existing memory.
+Write it as a standalone fact. It must be a statement about the user that provides new factual content.
+
+### 2. UPDATE — an existing memory is still true, but the new one complements it on the SAME topic (adds details, confirms, extends).
+Merge both into ONE richer, self-contained statement that preserves every meaningful fact from both sides (names, numbers, dates, reasons, feelings). The merged existing memory is superseded.
+
+### 3. SUPERSEDE — the new memory contradicts or replaces an existing one on the SAME dimension (preference change, no longer does X, moved away...).
+Write the current truth and supersede the outdated memory_id(s); if several chained versions exist, supersede ALL of them and fold their still-valid content into the new statement. Provide a short `supersede_reason`.
+
+### 4. MERGE — the new memory is entirely absorbed by one or more existing memories (no new content beyond what's already stored).
+Simply DELETE the new memory_ids (no ADD).
+
+## Rules
+
+1. **Aggressive merge**: whenever an existing memory and a new one describe the same topic, event, preference, or relationship, prefer UPDATE/SUPERSEDE over keeping both. The memory base must stay small and dense; duplicate or near-duplicate statements about one topic are not allowed.
+2. **Capture the full arc**: When merging statements about a preference or activity that CHANGED, always capture the full timeline in one statement: what was initially enjoyed, why it changed, and what replaced it.
+3. **Never lose information**: every meaningful fact from any source must survive in some output statement.
+4. **Atomic**: one fact per ADD; do not bundle unrelated topics.
+5. **Third person**: "The user ...", self-contained, English.
+6. **Tags**: 1-3 lowercase topical keywords.
+
+## Output format
+
+Output a flat JSON array directly (NO wrapper object, NO "updates" key, NO "reason" grouping). Each element is an op dict:
+
+```json
+[
+  {{"op": "ADD", "content": "...", "layer": "L2_FACT", "supersedes": ["existing_id"], "tags": ["tag1", "tag2"], "supersede_reason": "...", "speculate": false}},
+  {{"op": "DELETE", "memory_id": "memory_id", "reason": "..."}},
+  ...
+]
+```
+
+Field reference:
+- **ADD**: op, content (required), layer (L1_SEM|L2_FACT|L3_EPISODE), supersedes (list of existing memory_ids, empty for NEW), tags, supersede_reason (only for SUPERSEDE), speculate (boolean, default false — whether the content is inferential rather than directly stated)
+- **DELETE**: op, memory_id (required), reason
+- `supersede_reason` briefly explains WHY the old memory is replaced (1 sentence).
+- Do NOT include `update_type` or `reason` on ADD ops — these fields are NOT part of the contract.
+
+Only output the JSON array, no markdown fences, no explanations."""
 
 
 # =====================================================================

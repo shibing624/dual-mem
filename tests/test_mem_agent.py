@@ -121,6 +121,28 @@ async def test_blank_structured_items_reject_commit(tmp_storage, fake_embed):
     assert is_ephemeral is False
 
 
+async def test_canonical_dedup_drops_equivalent_items(tmp_storage, fake_embed):
+    response = {
+        **EXTRACT_RESPONSE,
+        "identity": [],
+        "facts": [
+            {"content": "User likes coffee!", "tags": ["food"]},
+            {"content": " user LIKES coffee ", "tags": ["duplicate"]},
+        ],
+    }
+    factory = _factory(tmp_storage, fake_embed, {"extract": response})
+
+    stored_ids, commit_result, _ = await _run(
+        MemAgent(factory=factory),
+        "User likes coffee",
+        "req-dedup",
+    )
+
+    assert commit_result.passed is True
+    assert len(stored_ids) == 1
+    assert factory.vector.get(stored_ids[0]).content == "User likes coffee!"
+
+
 async def test_malformed_basic_info_rejects_commit(tmp_storage, fake_embed):
     response = {
         **EXTRACT_RESPONSE,

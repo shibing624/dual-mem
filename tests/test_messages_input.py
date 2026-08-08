@@ -81,6 +81,44 @@ async def test_messages_input_reaches_l1_and_extractor(tmp_storage, fake_embed):
     await client.aclose()
 
 
+async def test_messages_input_preserves_all_messages_as_current(tmp_storage, fake_embed):
+    settings = Settings(
+        mode="system1",
+        storage_dir=tmp_storage,
+    )
+    captured: dict = {}
+
+    def extract_capture(*, system, user):
+        captured["prompt"] = user
+        return _EMPTY_EXTRACT
+
+    client = MemoryClient(
+        settings=settings,
+        embed=fake_embed,
+        llm=FakeLLMClient(responses={"extract": extract_capture, "search_query": []}),
+    )
+
+    await client.add(
+        messages=[
+            {"role": "user", "content": "old context"},
+            {"role": "assistant", "content": "recent answer"},
+            {"role": "user", "content": "new fact"},
+        ],
+        app_id="app",
+        user_id="u_window",
+    )
+
+    prompt = captured["prompt"]
+    history, current = prompt.split("Current messages", maxsplit=1)
+    assert "old context" not in history
+    assert "old context" in current
+    assert "recent answer" in current
+    assert "new fact" in current
+    assert "never extract new facts" in prompt
+
+    await client.aclose()
+
+
 async def test_messages_input_compatible_with_chat_message_objects(tmp_storage, fake_embed):
     """ChatMessage dataclass 直接传也能跑通。"""
     settings = Settings(mode="system1", storage_dir=tmp_storage)

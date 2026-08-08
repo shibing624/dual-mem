@@ -300,16 +300,19 @@ class MemoryClient:
             resolved_app_id, user_id, self.mode, len(content), user_turn_count,
         )
 
+        write_kwargs = {
+            "content": content,
+            "app_id": resolved_app_id,
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "session_id": session_id,
+            "request_id": request_id,
+            "memory_at": memory_at,
+        }
+        if self.settings.mode != "dual":
+            write_kwargs["messages"] = normalized if messages is not None else None
         async with self._user_write_lock_ctx(resolved_app_id, user_id):
-            result = await self.writer.write(
-                content=content,
-                app_id=resolved_app_id,
-                user_id=user_id,
-                agent_id=agent_id,
-                session_id=session_id,
-                request_id=request_id,
-                memory_at=memory_at,
-            )
+            result = await self.writer.write(**write_kwargs)
         return WriteResult(
             success=True,
             memory_id=result.memory_id,

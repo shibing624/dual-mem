@@ -275,9 +275,11 @@ class LLMClient:
         user: str,
         temperature: float,
         json_object: bool | None,
+        json_array: bool = False,
         max_tokens: int,
-    ) -> dict:
-        use_json_mode = self.json_mode if json_object is None else json_object
+    ) -> dict | list:
+        # json_array=True disables json_object mode (which only allows objects)
+        use_json_mode = False if json_array else (self.json_mode if json_object is None else json_object)
         kwargs: dict = {"max_tokens": max_tokens}
         if use_json_mode:
             kwargs["response_format"] = {"type": "json_object"}
@@ -294,6 +296,8 @@ class LLMClient:
         self._after_call("chat_json", resp, start)
         content = resp.choices[0].message.content or ""
         parsed = _parse_json(content)
+        if json_array:
+            return parsed if isinstance(parsed, (dict, list)) else {}
         return parsed if isinstance(parsed, dict) else {}
 
     async def chat_json(
@@ -303,14 +307,16 @@ class LLMClient:
         user: str,
         temperature: float = 0.2,
         json_object: bool | None = None,
+        json_array: bool = False,
         max_tokens: int = DEFAULT_CHAT_JSON_MAX_TOKENS,
-    ) -> dict:
+    ) -> dict | list:
         """Run a chat completion and parse the reply as JSON (single-shot, no chunking)."""
         return await self._chat_json_once(
             system=system,
             user=user,
             temperature=temperature,
             json_object=json_object,
+            json_array=json_array,
             max_tokens=max_tokens,
         )
 

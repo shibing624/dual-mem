@@ -195,6 +195,9 @@ class Settings(BaseSettings):
     # non_destructive 下 reconcile 的 ADD SUPPLEMENT 只是写冗余副本、supersedes/DELETE 被剥离。
     # 开启后直接排空 reconcile 队列不调 LLM → 省 ~47 次 LLM 调用/题（~127s），存储也更干净。
     reconcile_skip_llm: bool = False
+    # 使用 hy_memory 的 reconcile 契约：bare JSON 数组（非 {"updates":[...]}），ADD/DELETE op，
+    # 无 update_type，无 reason 分组。env DUAL_MEM_RECONCILE_HY_CONTRACT=1 启用。
+    reconcile_use_hy_contract: bool = False
     # reconcile 召回的最强候选低于该相似度时，跳过 LLM，直接把新记忆当 SUPPLEMENT 落库。
     # 大量写入其实没有真正的冲突候选（全新事实），这条快路径省掉相应的 reconcile LLM 调用，
     # 零合并风险。设 0 关闭（总是走 LLM）。
@@ -213,6 +216,12 @@ class Settings(BaseSettings):
     # chains; also raises latency to ~2 LLM calls per add). Default off: async reconcile
     # via ReconcilerWorker during explicit digest().
     reconcile_sync: bool = False
+    # System1 inline reconcile: after per-chunk extraction, merge the new memories against
+    # the user's existing ACTIVE memories (candidate recall reuses the new embeddings;
+    # the LLM is skipped when the best candidate is below reconcile_weak_candidate_score).
+    # Produces dense, evolution-aware memories with supersedes chains instead of an
+    # ever-growing pile of narrow static statements.
+    system1_reconcile_enabled: bool = True
     # System2 ReAct loop iteration cap (the agent stops earlier when the LLM emits no more
     # tool_calls). Only the residual ReAct path uses this — single-shot handles the small/
     # single-cluster majority. Each turn is a serial LLM round-trip; the model batches many
@@ -239,9 +248,13 @@ class Settings(BaseSettings):
     # "user" = per app/user (cross-session/agent hits, higher hit rate).
     content_hash_scope: Literal["session", "user"] = "session"
 
-    # L3 summarizer (long content only). Threshold is token-based (× chars_per_token internally).
+    # L3 summarizer is opt-in; facts are the default System1 output.
     summarizer_enabled: bool = False
     summarizer_min_content_tokens: int = 600
+    canonical_dedup_enabled: bool = True
+    # Opt-in until this similarity threshold is calibrated on a larger benchmark.
+    vector_dedup_enabled: bool = False
+    vector_dedup_threshold: float = 0.98
 
     # Extract final-blob hard cap in tokens (0 = disabled → rely on the LLM chunk+merge path).
     # Applies to the final content of BOTH content= and messages= (after history shaping). This
@@ -264,6 +277,8 @@ class Settings(BaseSettings):
     embed_queue_batch_size: int = 32
     embed_queue_window_ms: float = 200.0
     embed_cache_size: int = 10_000
+    # If extraction creates derived memories, remove the redundant L1 raw vector.
+    skip_l1_vector_when_derived: bool = False
     # Append-only history.db audit log (ADD/SUPERSEDE/DELETE snapshots). Off by default —
     # not used on the read path; enable for compliance / debugging.
     persist_history: bool = False

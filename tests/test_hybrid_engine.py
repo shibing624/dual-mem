@@ -106,7 +106,7 @@ async def test_bm25_rerank_surfaces_exact_term_over_higher_semantic(
     assert embed.direct_calls == 1
     assert embed.queued_calls == 0
     assert len(query_calls) == 1
-    assert query_calls[0][1]["top_k"] == 30
+    assert query_calls[0][1]["top_k"] == 75  # v10: vdb_sem_limit = max(ceil(10*3*2.5),60) = 75
     assert get_calls == []
 
     await client.aclose()

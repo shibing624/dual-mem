@@ -29,6 +29,8 @@ logger = logging.getLogger("dual_mem.retrieval.hybrid")
 _PROFILE_LAYERS = [Layer.L0_BASIC_INFO, Layer.L6_SCHEMA]
 _VDB_PROFILE_LAYERS = [Layer.L0_BASIC_INFO]
 _VDB_RECALL_LAYERS = [Layer.L2_FACT, Layer.L3_SUMMARY, Layer.L4_IDENTITY]
+# Note: L1_RAW excluded from VDB semantic recall (align hy_memory: raw fragments
+#   are noisy and dilute top-k ranking; only extracted/curated layers are recalled).
 _PROFILE_RECALL_LIMIT = 10
 _PROFILE_LAYER_VALS = {layer.value for layer in _PROFILE_LAYERS}
 _NORMAL_SOURCES = {"vdb"}
@@ -119,7 +121,9 @@ async def search_hybrid(
 
     final_limit = limit if limit > 0 else 10
     candidate_multiplier = max(1.0, float(settings.normal_candidate_multiplier))
-    vdb_sem_limit = max(int(math.ceil(final_limit * candidate_multiplier)), 30)
+    # v10: enlarge semantic recall to ~hy's combined sem+kw pool (45+60=105),
+    # compensating for ChromaDB's lack of native keyword index. L1_RAW excluded.
+    vdb_sem_limit = max(int(math.ceil(final_limit * candidate_multiplier * 2.5)), 60)
     graph_limit = max(final_limit * 2, 20)
 
     use_derived = include_derived

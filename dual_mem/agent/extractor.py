@@ -9,6 +9,7 @@ import logging
 
 from dual_mem.agent import prompts
 from dual_mem.providers.llm import LLMClient, merge_extract_results, truncate_middle
+from dual_mem.sdk_models import ChatMessage
 
 logger = logging.getLogger("dual_mem.agent.extract")
 
@@ -40,6 +41,8 @@ class Extractor:
         user_id: str,
         agent_id: str,
         session_id: str,
+        current_messages: list[ChatMessage] | None = None,
+        history_messages: list[ChatMessage] | None = None,
     ) -> dict:
         """Return extracted fields; ``basic_info`` is persisted later by MemAgent."""
         tmpl = prompts.pick(prompts.EXTRACT_ZH, prompts.EXTRACT_EN, content)
@@ -55,7 +58,11 @@ class Extractor:
                 current_time=current_time,
             )
 
-        llm_content = self._prepare_content(content)
+        llm_content = self._prepare_content(
+            _message_native_content(current_messages, history_messages)
+            if current_messages is not None
+            else content
+        )
         parsed = await self.llm.chat_json_for_content(
             content=llm_content,
             build_system=_build_system,
@@ -119,6 +126,45 @@ class Extractor:
         }
         return out
 
+    async def extract_system1(
+        self,
+        *,
+        content: str,
+        current_time: str,
+        current_messages: list[ChatMessage] | None = None,
+    ) -> dict:
+        """Extract System1 memories with a stable contract and separate user input."""
+        llm_content = self._prepare_content(
+            _message_native_content(current_messages, None)
+            if current_messages is not None
+            else content
+        )
+        system = prompts.pick(
+            prompts.SYSTEM1_EXTRACT_ZH,
+            prompts.SYSTEM1_EXTRACT_EN,
+            llm_content,
+        )
+        user = f"Current time: {current_time or '(unknown)'}\n\nConversation:\n{llm_content}"
+        parsed = await self.llm.chat_json(
+            system=system,
+            user=user,
+            temperature=0.0,
+            max_tokens=3072,
+        )
+        if not isinstance(parsed, dict):
+            parsed = {}
+        return {
+            "identity": parsed.get("identity") if isinstance(parsed.get("identity"), list) else [],
+            "facts": parsed.get("facts") if isinstance(parsed.get("facts"), list) else [],
+            "intentions": (
+                parsed.get("intentions") if isinstance(parsed.get("intentions"), list) else []
+            ),
+            "is_ephemeral": bool(parsed.get("is_ephemeral", False)),
+            "basic_info": (
+                parsed.get("basic_info") if isinstance(parsed.get("basic_info"), dict) else {}
+            ),
+        }
+
     def _prepare_content(self, content: str) -> str:
         if self.max_content_chars <= 0 or len(content) <= self.max_content_chars:
             return content
@@ -136,3 +182,22 @@ class Extractor:
         if not isinstance(parsed, dict):
             return True
         return not parsed
+
+
+def _message_native_content(
+    current_messages: list[ChatMessage],
+    history_messages: list[ChatMessage] | None,
+) -> str:
+    def _format(messages: list[ChatMessage]) -> str:
+        return "\n".join(
+            f"[{message.role}]: {message.content} (message_id={index})"
+            for index, message in enumerate(messages)
+        )
+
+    history = _format(history_messages or []) or "(none)"
+    return (
+        "Recent context (for reference resolution only; never extract new facts from it):\n"
+        f"{history}\n\n"
+        "Current messages (extract durable memories only from these messages):\n"
+        f"{_format(current_messages)}"
+    )
