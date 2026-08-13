@@ -53,6 +53,7 @@ dual-mem 实现 **七个记忆层（L0–L4、L6、L7）**——借鉴人脑「�
 
 ## 🔥 News
 
+- [2026/08/13] **main（未发版）**：新增原生生态集成层（agentica / Claude Code Hook / Hermes / OpenClaw / MCP），`dual-mem-hook` 脚本与 `agentica` extra；新增 coding 记忆子系统（实验性）。
 - [2026/06/20] **v0.1.2**：MemoryOperations 统一 REST/MCP；SyncMemoryClient；CLI `messages`；post-extract embed 合并；MCP 启动修复与文档。
 - [2026/06/19] **v0.1.1**：依赖拆分为 `[api]` / `[cli]` / `[mcp]` extras；默认 `hybrid` 读路径。
 - [2026/06/18] **v0.1.0**：首版开源 — system1 / dual 两档、演化链、REST `/v1/memories/` 契约、MCP 工具集。
@@ -92,7 +93,8 @@ pip install -e ".[dev]"
 | `api` | fastapi, uvicorn | `dual-mem serve`、REST API |
 | `cli` | typer | `dual-mem add/search/...` |
 | `mcp` | mcp | `dual-mem-mcp`、Cursor MCP |
-| `all` | 以上全部 | 五种入口一次装齐 |
+| `agentica` | agentica | agentica 框架记忆集成 |
+| `all` | api + cli + mcp | REST / CLI / MCP 一次装齐 |
 
 ## 快速开始
 
@@ -167,6 +169,26 @@ dual-mem digest   # dual：触发 System2
 ```
 
 REST 契约：`POST /v1/memories/`、`POST /v1/memories/search`、`GET|DELETE /v1/memories/{id}` 等。MCP 分 **本地 uvx**（已实现）与 **云端 HTTP**（REST 底座已就绪，HTTP MCP 待封装）两条路径，详见 [MCP 接入](docs/mcp_integration.md)。
+
+## 生态集成
+
+`dual_mem.integrations` 把同一个 `MemoryClient` 适配到主流 Agent 框架与协议，共享统一的记忆注入块格式化（`<relevant-memories>`）：
+
+| 后端 | 接入 | 说明 |
+|------|------|------|
+| **agentica** | `dual-mem[agentica]` | `DualMemMemory` / `DualMemWorkspace`，直接 `Agent(workspace=...)` |
+| **Claude Code** | `dual-mem-hook search` / `ingest` | UserPromptSubmit / Stop hook，自动注入与归档 |
+| **Hermes** | `DualMemHermesProvider` | MemoryProvider 插件（prefetch + `sync_turn`） |
+| **OpenClaw** | `DualMemOpenClawProvider` | 与 Hermes 同源契约 |
+| **MCP** | `dual_mem.integrations.mcp` | FastMCP server（`dual-mem-mcp`） |
+
+```bash
+pip install dual-mem[agentica]   # agentica 框架
+dual-mem-hook search              # Claude Code: 搜记忆注入 additionalContext
+dual-mem-hook ingest              # Claude Code: 提取对话写入记忆
+```
+
+> 另有 **coding 记忆子系统**（`dual_mem.coding`）针对含工具调用的工程对话，当前为实验性（无测试、未纳入公共 API）。
 
 ## 示例
 

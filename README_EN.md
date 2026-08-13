@@ -53,6 +53,7 @@ Recall groups results into **profile / proactive / normal**; hybrid semantic + k
 
 ## 🔥 News
 
+- [2026/08/13] **main (unreleased)**: native ecosystem integration layer (agentica / Claude Code Hook / Hermes / OpenClaw / MCP), `dual-mem-hook` script and `agentica` extra; experimental coding memory subsystem.
 - [2026/06/20] **v0.1.2**: MemoryOperations for REST/MCP; SyncMemoryClient; CLI messages; post-extract embed batching; MCP bootstrap fixes and docs.
 - [2026/06/19] **v0.1.1**: Dependencies split into `[api]` / `[cli]` / `[mcp]` extras; hybrid reader V2 became the default.
 - [2026/06/18] **v0.1.0**: Initial release — system1 / dual modes, evolution chains, REST `/v1/memories/` contract, MCP tools.
@@ -92,7 +93,8 @@ pip install -e ".[dev]"
 | `api` | fastapi, uvicorn | `dual-mem serve`, REST API |
 | `cli` | typer | `dual-mem add/search/...` |
 | `mcp` | mcp | `dual-mem-mcp`, Cursor MCP |
-| `all` | all of the above | full stack |
+| `agentica` | agentica | agentica framework memory integration |
+| `all` | api + cli + mcp | REST / CLI / MCP in one shot |
 
 ## Quick Start
 
@@ -167,6 +169,26 @@ dual-mem digest   # dual: trigger System2
 ```
 
 REST contract: `POST /v1/memories/`, `POST /v1/memories/search`, `GET|DELETE /v1/memories/{id}`, etc. See [MCP integration](docs/mcp_integration.md).
+
+## Ecosystem integrations
+
+`dual_mem.integrations` adapts the same `MemoryClient` to popular agent frameworks and protocols, sharing one memory-injection block format (`<relevant-memories>`):
+
+| Backend | Entry point | Notes |
+|---------|-------------|-------|
+| **agentica** | `dual-mem[agentica]` | `DualMemMemory` / `DualMemWorkspace`, use `Agent(workspace=...)` directly |
+| **Claude Code** | `dual-mem-hook search` / `ingest` | UserPromptSubmit / Stop hooks, auto inject + archive |
+| **Hermes** | `DualMemHermesProvider` | MemoryProvider plugin (prefetch + `sync_turn`) |
+| **OpenClaw** | `DualMemOpenClawProvider` | same contract as Hermes |
+| **MCP** | `dual_mem.integrations.mcp` | FastMCP server (`dual-mem-mcp`) |
+
+```bash
+pip install dual-mem[agentica]   # agentica framework
+dual-mem-hook search              # Claude Code: inject memories into additionalContext
+dual-mem-hook ingest              # Claude Code: extract conversation into memory
+```
+
+> A separate **coding memory subsystem** (`dual_mem.coding`) targets tool-using engineering conversations; currently experimental (no tests, not part of the public API).
 
 ## Examples
 

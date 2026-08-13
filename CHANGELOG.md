@@ -18,6 +18,18 @@ Benchmark 专用覆盖见 `exp/dual_mem_exp/benchmarks/backends/dual_mem.py`（�
 
 > 当前 `__version__` 仍为 `0.1.2`；下列变更已在 `main`，尚未发版。
 
+### 新增：原生生态集成层（`dual_mem.integrations`）
+
+- 新增 `dual_mem.integrations` 包，把 `MemoryClient` 适配到 5 个生态后端：`mcp`、`hermes`、`openclaw`、`agentica`、`claude_code`。
+- 统一 `MemoryBackend`（MemoryClient 薄封装）+ `AsyncRunner`（同步 hook 驱动异步 client）+ `<relevant-memories>` 注入块格式化。
+- 新增 `agentica` extra（`dual_mem.integrations.agentica`）与 `dual-mem-hook` 脚本（Claude Code `search` / `ingest` 子命令）。
+- 纯新增对外接口，不改变现有 ingest / search 路径的 LLM 调用次数与延迟。
+
+### 新增：coding 记忆子系统（`dual_mem.coding`，实验性）
+
+- 针对含工具调用的工程对话，独立 extractor / judge / preproc / reconciler / writer / store 路径。
+- 未接入 `dual_mem.__all__` 公共导出、无对应测试，标记实验性；稳定后再纳入 README 主推。
+
 ### Gate 子系统已整体移除（本批 · commit 484f221）
 
 - `dual_mem/agent/gate.py` 与 `tests/test_gate.py` 删除；提交决策完全由 **Extractor 单次 LLM 输出**（`is_ephemeral` + 结构化记忆）驱动，不再有独立的 Gate LLM 调用。
