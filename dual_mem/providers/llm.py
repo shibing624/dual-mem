@@ -165,9 +165,23 @@ def _parse_json(content: str):
         except json.JSONDecodeError:
             text = match.group(1)
 
+    # 数组优先用精确正则（hy-memory 方式）：`[ { ... } ]` —— 贪婪 `\[.*\]` 在长输出
+    # 会跨到尾部 prose 导致 parse 失败（4B 模型 single-shot ops 实测 5996 字符失败）。
+    arr_match = re.search(r"\[\s*\{[\s\S]*\}\s*\]", text, re.DOTALL)
+    if arr_match:
+        try:
+            return json.loads(arr_match.group(0))
+        except json.JSONDecodeError:
+            pass
+
     recovered = _recover_partial_object(text)
     if recovered is not None:
         return recovered
+    # 裸数组截断恢复（max_tokens 截断时没有闭合 ]）：逐个提取完整 {...} 对象，
+    # 丢掉最后半个（取证确认：S2 建图 json_array=True 输出 9-10k 字符被 4096 cap 截断）。
+    recovered_array = _recover_partial_array(text)
+    if recovered_array is not None:
+        return recovered_array
     logger.warning("chat_json output unparseable, returning empty object (len=%d)", len(content))
     return {}
 
@@ -203,6 +217,42 @@ def _recover_partial_object(text: str) -> dict | None:
         if items:
             out[key] = items
     return out or None
+
+
+def _recover_partial_array(text: str) -> list | None:
+    """Recover a truncated bare JSON array of objects (missing closing ``]``).
+
+    Extracts each complete ``{...}`` object via raw_decode and drops the final
+    partial object. Used when max_tokens truncation cuts mid-array.
+    Also tolerant of a leading ``[`` already stripped by the greedy ``\\{.*\\}``
+    branch in _parse_json (fall back to scanning from the first ``{``).
+    """
+    m = re.search(r"\[\s*\{", text, re.DOTALL)
+    if not m:
+        m2 = re.match(r"\s*\{", text, re.DOTALL)
+        if not m2:
+            return None
+        rest = text[m2.start():]
+    else:
+        rest = text[m.start() + 1:]
+    decoder = JSONDecoder()
+    idx = 0
+    items: list[dict] = []
+    while idx < len(rest):
+        while idx < len(rest) and rest[idx] in " \t\n\r,":
+            idx += 1
+        if idx >= len(rest) or rest[idx] == "]":
+            break
+        if rest[idx] != "{":
+            break
+        try:
+            value, end = decoder.raw_decode(rest[idx:])
+        except json.JSONDecodeError:
+            break
+        if isinstance(value, dict):
+            items.append(value)
+        idx += end
+    return items or None
 
 
 class LLMClient:
@@ -283,6 +333,15 @@ class LLMClient:
         kwargs: dict = {"max_tokens": max_tokens}
         if use_json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+        # Deterministic decoding: pin seed so batching/composition is the ONLY remaining
+        # source of cross-batch variance (env DUAL_MEM_LLM_SEED, empty = off).
+        import os as _os
+        _seed = _os.environ.get("DUAL_MEM_LLM_SEED", "").strip()
+        if _seed:
+            try:
+                kwargs["seed"] = int(_seed)
+            except ValueError:
+                pass
         start = time.perf_counter()
         resp = await self.client.chat.completions.create(
             model=self.model,
@@ -309,9 +368,10 @@ class LLMClient:
         json_object: bool | None = None,
         json_array: bool = False,
         max_tokens: int = DEFAULT_CHAT_JSON_MAX_TOKENS,
+        retries: int = 1,
     ) -> dict | list:
         """Run a chat completion and parse the reply as JSON (single-shot, no chunking)."""
-        return await self._chat_json_once(
+        parsed = await self._chat_json_once(
             system=system,
             user=user,
             temperature=temperature,
@@ -319,6 +379,24 @@ class LLMClient:
             json_array=json_array,
             max_tokens=max_tokens,
         )
+        # 解析失败重试：空结果（{}/[]）时，模型输出可能是 markdown 包裹/前言导致
+        # _parse_json 退化（实测 8027 字符 unparseable -> 0 ops）。追加严格指令重试一次。
+        # 注意：模型真吐空（无内容可归纳）也会重试一次，无害（多一次免费调用）。
+        for _ in range(max(0, retries)):
+            is_empty = parsed == {} or parsed == []
+            if not is_empty:
+                break
+            parsed = await self._chat_json_once(
+                system=system,
+                user=user + "\n\nImportant: reply with ONLY a valid JSON "
+                + ("array" if json_array else "object")
+                + ". No markdown fences, no explanation, no extra text.",
+                temperature=temperature,
+                json_object=json_object,
+                json_array=json_array,
+                max_tokens=max_tokens,
+            )
+        return parsed
 
     async def chat_json_for_content(
         self,

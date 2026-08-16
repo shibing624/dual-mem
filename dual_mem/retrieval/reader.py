@@ -30,6 +30,7 @@ class Reader:
         profile_min_score: float = 0.3,
         intention_limit: int = 0,
         include_derived: bool = True,
+        include_l6_fusion: bool = True,
         created_after: int | None = None,
         request_id: str | None = None,
         collect_trace: bool = False,
@@ -54,6 +55,7 @@ class Reader:
             profile_min_score=profile_min_score,
             intention_limit=intention_limit,
             include_derived=include_derived,
+            include_l6_fusion=include_l6_fusion,
             created_after=created_after,
         )
 

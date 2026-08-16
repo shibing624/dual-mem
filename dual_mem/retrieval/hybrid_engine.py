@@ -106,6 +106,7 @@ async def search_hybrid(
     intention_limit: int = 0,
     created_after: int | None = None,
     include_derived: bool = True,
+    include_l6_fusion: bool = True,
 ) -> SearchMemories:
     """Run hybrid recall + fusion; return profile/proactive/normal groups."""
     vector = factory.vector
@@ -127,11 +128,11 @@ async def search_hybrid(
     graph_limit = max(final_limit * 2, 20)
 
     use_derived = include_derived
-    recall_statuses = (
-        [MemoryStatus.ACTIVE, MemoryStatus.SUPERSEDED]
-        if use_derived
-        else [MemoryStatus.ACTIVE]
-    )
+    # NOTE(dual_vs_hy): normal 路只召回 ACTIVE 事实 —— 被 reconcile/S2 shadow 的
+    # SUPERSEDED 旧版本不再注入 QA（否则旧记忆与新记忆同时出现，污染事实证据；
+    # 实测 badcase 里 62% 记忆带 superseded_by 链）。S2 深层证据改由
+    # fused_l6 / profile 路单独承载，不在 normal 事实路混入旧版本。
+    recall_statuses = [MemoryStatus.ACTIVE]
 
     normal_where = build_filter(
         app_ids=app_ids,
@@ -303,7 +304,7 @@ async def search_hybrid(
     # Forward L6: batch the evidence-count lookup into a single graph round-trip instead of
     # one evidence_of() call per schema (the previous serial loop dominated read latency).
     forward_l6: list[dict] = []
-    if use_derived and graph is not None and graph_schema_hits:
+    if use_derived and include_l6_fusion and graph is not None and graph_schema_hits:
         schema_ids = [row["node_id"] for row in graph_schema_hits]
         try:
             ev_counts = await asyncio.to_thread(graph.evidence_counts, schema_ids)
@@ -330,7 +331,7 @@ async def search_hybrid(
         forward_l6.sort(key=lambda x: x["_internal"], reverse=True)
 
     reverse_l6: list[dict] = []
-    if use_derived and graph is not None and vdb_scored:
+    if use_derived and include_l6_fusion and graph is not None and vdb_scored:
         reverse_l6 = await reverse_lookup_l6(
             graph,
             [v["node_id"] for v in vdb_scored],
@@ -359,6 +360,9 @@ async def search_hybrid(
 
     expandable = vdb_scored + list(profile_hits)
     meta_by_nid: dict[str, dict] = {it["node_id"]: it for it in expandable if it.get("node_id")}
+    # NOTE(dual_vs_hy): evolution-chain 展开只作用于 profile/L6 桶 —— normal 路保持
+    # ACTIVE 纯事实（S1 原始记忆保真），S2 深层证据（chain/schema）单独进 profile 桶。
+    # 实测 62-74% 检索结果被 chain 挤占导致事实丢失，分段后事实路与 s1 一致。
     if use_derived and expandable:
         for item in expandable:
             if item.get("node") is not None:
@@ -379,6 +383,12 @@ async def search_hybrid(
             if exp.get("evolution_chain"):
                 merged["evolution_chain"] = exp["evolution_chain"]
                 merged["is_evolved"] = True
+            else:
+                merged["is_evolved"] = False
+            # 只让 L6/L7 或 profile 层的 chain 保持展开，normal fact 不携带 chain 标记
+            if merged["is_evolved"] and _layer_of(merged) in _NORMAL_SOURCES:
+                merged["evolution_chain"] = None
+                merged["is_evolved"] = False
             expanded.append(merged)
     else:
         expanded = expandable

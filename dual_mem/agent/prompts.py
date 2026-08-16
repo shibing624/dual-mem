@@ -22,6 +22,10 @@ Absolute rules:
 3. Ignore system messages.
 
 What to extract:
+- factual content about the user's real-world situation, regardless of who said
+  it — the user's own statements AND assistant statements that report or confirm
+  real user facts (events, decisions, preferences, named entities). Do not drop
+  an assistant-stated fact just because the assistant said it.
 - preferences, opinions, values, attitudes, feelings
 - events, experiences, actions the user took or participated in
 - relationships, people, names, occupations, roles
@@ -40,6 +44,10 @@ Do NOT extract:
 - assistant reminders of old information
 - information already implied by prior context
 - vague personality judgments without concrete evidence
+- hypothetical, fictional, or role-play content regardless of who said it:
+  invented creatures/places/plots, worldbuilding, imaginary scenarios,
+  hypotheticals ("what would you do if..."), story-writing exercises — unless
+  the user explicitly states a real-world preference about them
 
 Implicit preference rule:
 When the user's behavior strongly suggests a preference or trait (e.g. repeatedly
@@ -1054,13 +1062,13 @@ Intention 是用户表达的**具体未来事件或计划**。必须有：
 
 ## 输出格式
 
-只输出一个 JSON 对象，键 `ops` 是操作数组，不要任何解释或代码块外文字。每个 op 是以下四类之一：
-{{"ops": [
+只输出一个原始 JSON 操作数组，不要任何解释、不要代码块、不要 JSON 对象包裹。每个 op 是以下四类之一：
+[
   {{"op": "create_schema", "content": "当...时，用户...——反映...", "tags": ["..."], "evidence": ["fact_id", ...]}},
   {{"op": "create_intention", "content": "...", "tags": ["..."], "evidence": ["fact_id", ...]}},
   {{"op": "add_evidence", "schema_id": "已有schema_id", "evidence": ["fact_id", ...]}},
   {{"op": "add_edge", "from_id": "...", "to_id": "...", "rel": "RELATED_TO"}}
-]}}
+]
 
 ## 原则
 - Schema 内容创建后不可变——绝不重新创建已存在的 Schema
@@ -1071,7 +1079,9 @@ Intention 是用户表达的**具体未来事件或计划**。必须有：
 - 打标签时优先使用已有标签列表中的标签
 
 打标签时优先复用已有标签列表中的标签。证据 fact_id 必须来自聚类中给出的 id。
-若数据不足以得出可靠结论，输出 {{"ops": []}}。"""
+若数据不足以得出可靠结论，输出 []。
+
+只输出 JSON 数组本身，不要包裹成 JSON 对象。"""
 
 SYSTEM2_OPS_EN = """You are a cognitive processing Agent. Evolve higher-order cognitive structures (L6 Schema / L7 Intention) from the user's fact clusters, and output them as a list of operations (ops).
 
@@ -1117,13 +1127,13 @@ For each cluster of facts:
 
 ## Output format
 
-Output ONLY a JSON object whose key `ops` is the operations array. No prose, nothing outside it. Each op is one of four kinds:
-{{"ops": [
+Output ONLY a raw JSON array of operations. No prose, no code fences, nothing outside it. Each op is one of four kinds:
+[
   {{"op": "create_schema", "content": "When ..., the user ... — reflecting ...", "tags": ["..."], "evidence": ["fact_id", ...]}},
   {{"op": "create_intention", "content": "...", "tags": ["..."], "evidence": ["fact_id", ...]}},
   {{"op": "add_evidence", "schema_id": "existing_schema_id", "evidence": ["fact_id", ...]}},
   {{"op": "add_edge", "from_id": "...", "to_id": "...", "rel": "RELATED_TO"}}
-]}}
+]
 
 ## Principles
 - Schema content is IMMUTABLE — never recreate what already exists
@@ -1134,7 +1144,9 @@ Output ONLY a JSON object whose key `ops` is the operations array. No prose, not
 - Reuse tags from the existing tags list when possible
 
 Evidence fact_ids MUST come from the cluster ids provided.
-If the data is insufficient for reliable conclusions, output {{"ops": []}}."""
+If the data is insufficient for reliable conclusions, output [].
+
+Return ONLY the JSON array, nothing else — do not wrap it in a JSON object."""
 
 
 def pick(zh_prompt: str, en_prompt: str, text: str) -> str:

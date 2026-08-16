@@ -341,6 +341,7 @@ class MemoryClient:
         created_after: int | None = None,
         request_id: str | None = None,
         debug: bool = False,
+        include_l6_fusion: bool = True,
     ) -> SearchResult:
         """Semantic search; returns profile / proactive / normal groups.
 
@@ -403,6 +404,7 @@ class MemoryClient:
             profile_min_score=profile_min_score,
             intention_limit=intention_limit,
             include_derived=resolved_include_derived,
+            include_l6_fusion=include_l6_fusion,
             created_after=created_after,
             request_id=request_id,
             collect_trace=debug,

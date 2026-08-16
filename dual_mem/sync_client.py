@@ -162,6 +162,7 @@ class SyncMemoryClient:
         created_after: int | None = None,
         request_id: str | None = None,
         debug: bool = False,
+        include_l6_fusion: bool = True,
     ) -> SearchResult:
         return self._run(
             self._client.search(
@@ -179,6 +180,7 @@ class SyncMemoryClient:
                 created_after=created_after,
                 request_id=request_id,
                 debug=debug,
+                include_l6_fusion=include_l6_fusion,
             )
         )
 

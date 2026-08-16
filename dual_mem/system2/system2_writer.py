@@ -114,13 +114,11 @@ class System2Writer:
                     user_id=user_id,
                     agent_id=agent_id,
                 )
-                if settings.reconcile_link_chains_heuristic:
-                    link_evolution_chains_heuristic(
-                        self.factory,
-                        app_id=app_id,
-                        user_id=user_id,
-                        agent_id=agent_id,
-                    )
+                # NOTE(dual_vs_hy): link_evolution_chains_heuristic 被删除 —— 它按 tag 分组
+                # 批量制造 supersedes/superseded_by 演化链指针（实测 62% 记忆被打链），
+                # 检索时 expand_evolution_chains 把这些链全量注入 QA 上下文，挤占事实证据。
+                # 对标 hy-memory ultra：hy 的 S2 只用 single-shot JSON ops 建 L6 图，不建
+                # heuristic chain。原始 fact 保持 ACTIVE 不隐藏，队列只排空不建链。
                 for task in tasks:
                     self.factory.cache.mark_reconcile_task_done(task["id"])
                 reconcile_tasks = len(tasks)

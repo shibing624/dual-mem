@@ -1,21 +1,23 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: System2 ReAct cognitive-processing agent. Phase 1 prepares clustered fact
-materials (no LLM); phase 2 hands them to the LLM, which drives a true OpenAI
-function-calling tool loop (search_vdb / search_graph / get_node / expand_node +
-create_schema / create_intention / add_evidence / add_edge) until it emits no more
-tool_calls. The legacy single-shot ops-JSON path has been deleted.
+@description: System2 cognitive-processing agent (hy-memory ultra style). Phase 1 prepares
+clustered fact materials (no LLM); phase 2 hands them to the LLM in ONE single-shot
+chat_json call that emits JSON ops (create_schema / add_evidence / add_edge). The ReAct
+8-tool multi-turn loop was removed: on a 4B model its search_graph calls all fail
+(embed_sync unavailable) and it degrades to search_vdb with random facts, building
+schemas from haystack noise (see benchmark badcase 7405e8b1).
 """
 import json
 import logging
+import os
 
 from dual_mem.agent import prompts
 from dual_mem.isolation import build_filter
 from dual_mem.providers.llm import is_chinese
 from dual_mem.registry import ComponentFactory
 from dual_mem.system2.clustering import cluster_facts
-from dual_mem.system2.s2_tools import SYSTEM2_TOOL_DEFINITIONS, System2ToolExecutor
+from dual_mem.system2.s2_tools import System2ToolExecutor
 from dual_mem.types import Layer, MemoryStatus
 
 logger = logging.getLogger("dual_mem.system2.agent")
@@ -78,9 +80,36 @@ async def prepare_materials(
                 tag_set.update(node.tags)
         existing_tags = sorted(tag_set)
 
+    # NOTE(dual_vs_hy): hy ultra 建图增强 —— env 开关默认关，不改变现有行为。
+    # 1) graph_reverse：用聚类事实 id 反向查引用它的已有 L6 schema，帮 LLM 复用/合并已有 schema
+    #    （hy: graph_store.find_referencing_memories(vdb_ids, limit=50)）。
+    # 2) unprocessed_facts：聚类之外（noise）的 fresh 事实加菜进建图材料，给 LLM 更多上下文
+    #    （hy: _S2_MAX_UNCLUSTERED_FACTS=15）。
+    graph_reverse: list[dict] = []
+    unprocessed_facts: list[dict] = []
+    if clusters:
+        if int(os.getenv("DUAL_MEM_EXP_GRAPH_REVERSE", "0")):
+            try:
+                rev_ids = [
+                    f["node_id"] for c in clusters for f in c["facts"]
+                ][:100]
+                graph_reverse = graph.find_referencing_memories(rev_ids, limit=50) if graph is not None else []
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("s2 graph_reverse failed: %s", exc)
+        topk = int(os.getenv("DUAL_MEM_EXP_UNPROCESSED_TOPK", "0"))
+        if topk > 0:
+            clustered_ids = {f["node_id"] for c in clusters for f in c["facts"]}
+            unprocessed = [f for f in fresh if f.node_id not in clustered_ids]
+            unprocessed_facts = [
+                {"node_id": f.node_id, "content": f.content, "layer": f.layer.value}
+                for f in unprocessed[:topk]
+            ]
+
     return {
         "clusters": clusters,
         "graph_forward": graph_forward,
+        "graph_reverse": graph_reverse,
+        "unprocessed_facts": unprocessed_facts,
         "existing_tags": existing_tags,
         "stats": {
             "total_facts": len(all_facts),
@@ -123,6 +152,18 @@ def _build_user_message(materials: dict, *, max_facts: int = 0) -> str:
         parts.append("\n## 已有 Schema / Existing schemas")
         for node in forward:
             parts.append(f"  - {node['content']}  (id={node['node_id']})")
+
+    reverse = materials.get("graph_reverse") or []
+    if reverse:
+        parts.append("\n## 引用这些事实的已有 Schema / Existing schemas referencing these facts")
+        for node in reverse:
+            parts.append(f"  - {node['content']}  (id={node['node_id']})")
+
+    unproc = materials.get("unprocessed_facts") or []
+    if unproc:
+        parts.append("\n## 未聚类补充事实 / Unclustered extra facts")
+        for fact in unproc:
+            parts.append(f"  - [{fact['layer']}] {fact['content']}  (id={fact['node_id']})")
 
     tags = materials["existing_tags"]
     if tags:
@@ -184,20 +225,13 @@ class System2Agent:
         executor = System2ToolExecutor(
             factory=self.factory, app_id=app_id, user_id=user_id, agent_id=agent_id
         )
-        cluster_cap = self.factory.settings.system2_single_shot_max_clusters
-        fact_cap = self.factory.settings.system2_single_shot_max_facts
-        total_facts = sum(len(c["facts"]) for c in materials["clusters"])
-        if (
-            cluster_cap > 0
-            and len(materials["clusters"]) <= cluster_cap
-            and total_facts <= fact_cap
-        ):
-            # Small/single-cluster workload: a serial ReAct tool loop is overkill. Emit all
-            # schema/intention ops in ONE chat_json call (~10 serial LLM calls -> 1). Large
-            # blobs fall through to ReAct so a single JSON does not truncate on a small model.
-            await self._run_single_shot(system=system, user=user, executor=executor)
-        else:
-            await self._run_react_loop(system=system, user=user, executor=executor)
+        # NOTE(dual_vs_hy): 对标 hy-memory ultra —— 只用 single-shot JSON ops（一次 chat_json
+        # 输出 create_schema/add_evidence/add_edge ops）。删除 ReAct 8-tool 多轮循环：
+        # ReAct 在 4B 模型上先 search_graph（embed_sync 不可用全部失败）再退化为
+        # search_vdb 随机取记忆建 schema，实测 7405e8b1 建出的 4 个 schema 全是干扰 session
+        # 内容（living room/microwave/standing waves），且多轮往返放大错误、成本更高。
+        # 大 cluster 用 single-shot 时由 prepare_materials 的 per_cluster 截断保护。
+        await self._run_single_shot(system=system, user=user, executor=executor)
         if executor.stats["created_schemas"] > 0 or executor.stats["evidence_added"] > 0:
             self._mark_clustered_processed(materials["clusters"])
         else:
@@ -218,25 +252,51 @@ class System2Agent:
     async def _run_single_shot(
         self, *, system: str, user: str, executor: System2ToolExecutor
     ) -> None:
-        """One chat_json call → parse {"ops": [...]} → dispatch each op via the executor.
+        """One chat_json call → parse ops array → dispatch each op via the executor.
 
-        The SYSTEM2_OPS prompt already specifies the ops-JSON output shape, and each op's
-        ``op`` field maps 1:1 to a write-tool name, so we reuse the same executor dispatch
-        path as the ReAct loop — just without the multi-turn tool-calling round-trips.
+        NOTE(dual_vs_hy): 对标 hy-memory ultra 的 single-shot JSON ops —— 输出裸 JSON
+        数组（不是 {"ops": [...]} 对象）。4B 模型在 json_object 对象模式下长输出容易
+        截断/漂移导致 parse 失败（实测 5996 字符 unparseable → 0 schemas）；裸数组
+        配精确正则更鲁棒。
         """
         llm = self.factory.llm
         assert llm is not None, "System2Agent requires factory.llm"
         request_id = f"s2::{executor.app_id}::{executor.user_id}"
+        _dump_dir = os.environ.get("DUAL_MEM_S2_DUMP_DIR", "")
+        if _dump_dir:
+            try:
+                os.makedirs(_dump_dir, exist_ok=True)
+                import hashlib
+                _k = hashlib.md5(executor.user_id.encode()).hexdigest()[:10]
+                with open(os.path.join(_dump_dir, f"s2_{_k}.txt"), "w") as _f:
+                    _f.write("=== SYSTEM ===\n" + system + "\n\n=== USER ===\n" + user + "\n")
+            except Exception:
+                pass
         try:
-            data = await llm.chat_json(system=system, user=user)
+            data = await llm.chat_json(system=system, user=user, json_array=True, max_tokens=16384)
         except json.JSONDecodeError as exc:
             logger.warning("[s2-single] llm JSON parse failed: %s", exc)
             self._log_trajectory(request_id, executor, 1, error=str(exc))
             return
+        if _dump_dir:
+            try:
+                import hashlib
+                _k = hashlib.md5(executor.user_id.encode()).hexdigest()[:10]
+                with open(os.path.join(_dump_dir, f"s2_{_k}_out.json"), "w") as _f:
+                    _f.write(str(data))
+            except Exception:
+                pass
 
-        ops = data.get("ops") if isinstance(data, dict) else None
+        if isinstance(data, dict):
+            ops = data.get("ops")
+        else:
+            ops = data
         if not isinstance(ops, list):
             ops = []
+        logger.info(
+            "s2_single user=%s raw_type=%s raw_len=%s ops=%d",
+            executor.user_id, type(data).__name__, len(str(data)), len(ops),
+        )
         for op in ops:
             if not isinstance(op, dict):
                 continue
@@ -247,79 +307,10 @@ class System2Agent:
             await executor.execute(name=name, arguments=arguments)
         self._log_trajectory(request_id, executor, 1)
 
-    async def _run_react_loop(
-        self, *, system: str, user: str, executor: System2ToolExecutor
-    ) -> None:
-        """Drive the OpenAI function-calling loop until the LLM emits no more tool_calls."""
-        llm = self.factory.llm
-        assert llm is not None, "System2Agent requires factory.llm"
-
-        messages: list[dict] = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
-        max_iters = max(1, self.factory.settings.system2_max_iters)
-        request_id = f"s2::{executor.app_id}::{executor.user_id}"
-        iters_run = 0
-        for turn_idx in range(max_iters):
-            iters_run = turn_idx + 1
-            try:
-                turn = await llm.chat_with_tools(
-                    messages=messages,
-                    tools=SYSTEM2_TOOL_DEFINITIONS,
-                    tool_choice="auto",
-                )
-            except Exception as exc:
-                logger.warning("[s2-react] llm call failed: %s", exc)
-                self._log_trajectory(request_id, executor, iters_run, error=str(exc))
-                return
-
-            tool_calls = turn.get("tool_calls") or []
-            assistant_msg: dict = {"role": "assistant", "content": turn.get("content") or ""}
-            if tool_calls:
-                assistant_msg["tool_calls"] = tool_calls
-            messages.append(assistant_msg)
-
-            try:
-                self.factory.cache.log_pipeline(
-                    request_id=request_id,
-                    stage="S2_AGENT_TURN",
-                    payload={
-                        "turn": turn_idx,
-                        "tool_call_count": len(tool_calls),
-                        "tools": [(tc.get("function") or {}).get("name", "") for tc in tool_calls],
-                    },
-                )
-            except Exception:
-                pass
-
-            if not tool_calls:
-                break
-
-            for tc in tool_calls:
-                fn = tc.get("function") or {}
-                name = fn.get("name") or ""
-                try:
-                    args = json.loads(fn.get("arguments") or "{}")
-                    if not isinstance(args, dict):
-                        args = {}
-                except json.JSONDecodeError:
-                    args = {}
-                result_str = await executor.execute(name=name, arguments=args)
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.get("id") or f"call_{name}",
-                        "content": result_str,
-                    }
-                )
-
-        self._log_trajectory(request_id, executor, iters_run)
-
     def _log_trajectory(
         self, request_id: str, executor: System2ToolExecutor, iters: int, *, error: str | None = None
     ) -> None:
-        """Persist the full ReAct tool_call_log + final stats for replay/debug."""
+        """Persist the full single-shot ops log + final stats for replay/debug."""
         payload: dict = {
             "iters": iters,
             "stats": dict(executor.stats),
