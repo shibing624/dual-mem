@@ -9,7 +9,12 @@ avoid racing on the same evolution chain.
 import asyncio
 import logging
 
-from dual_mem.agent.reconciler import ReconcileOp, Reconciler
+from dual_mem.agent.reconciler import (
+    ReconcileOp,
+    Reconciler,
+    build_apply_custom,
+    resolve_skip_targets,
+)
 from dual_mem.registry import ComponentFactory
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
@@ -19,18 +24,6 @@ logger = logging.getLogger("dual_mem.system2.reconcile")
 def _norm_content(text: str | None) -> str:
     """Normalize content for coverage matching: strip + lowercase + collapse whitespace."""
     return " ".join((text or "").split()).lower()
-
-
-def _reflect_custom(op: ReconcileOp) -> dict:
-    """Pack reflector metadata (update_type, temporal_scope, negation) into node.custom."""
-    out: dict = {}
-    if op.update_type:
-        out["update_type"] = op.update_type
-    if op.temporal_scope:
-        out["temporal_scope"] = op.temporal_scope
-    if op.negation:
-        out["negation"] = True
-    return out
 
 
 def _chain_sort_key(node: MemoryNode) -> tuple[int, int]:
@@ -186,6 +179,7 @@ class ReconcilerWorker:
         nodes_to_remove: list[str] = []
         memory_at_by_content: dict[str, int] = {}
         memory_at_candidates: list[int] = []
+        source_node_id = ""
         for nid in node_ids:
             node = self.factory.vector.get(nid)
             if node is None:
@@ -197,9 +191,12 @@ class ReconcilerWorker:
                     "layer": node.layer.value,
                     "tags": list(node.tags),
                     "speculate": node.speculate,
+                    "node_id": nid,
                 }
             )
             nodes_to_remove.append(nid)
+            if not source_node_id:
+                source_node_id = str((node.custom or {}).get("source_node_id") or "")
             if node.memory_at is not None:
                 memory_at_candidates.append(node.memory_at)
                 memory_at_by_content[_norm_content(node.content)] = node.memory_at
@@ -241,6 +238,11 @@ class ReconcilerWorker:
         if not ops:
             return
 
+        skip_ids = resolve_skip_targets(
+            ops,
+            new_node_ids=nodes_to_remove,
+            new_contents=new_memories,
+        )
         await self._apply_ops(
             ops,
             app_id=app_id,
@@ -249,6 +251,7 @@ class ReconcilerWorker:
             session_id="",
             memory_at_by_content=memory_at_by_content,
             fallback_memory_at=fallback_memory_at,
+            source_node_id=source_node_id,
         )
 
         # Shadow ONLY the fast-write originals whose content a reconcile ADD re-emitted
@@ -262,30 +265,25 @@ class ReconcilerWorker:
         # 补 non_destructive+skip_llm=False 的残留路径。
         if self.reconciler.non_destructive:
             logger.debug(
-                "non_destructive: skip _shadow_covered_originals (originals stay ACTIVE)"
+                "non_destructive: skip retract (originals stay ACTIVE)"
             )
             return
 
+        self._shadow_nodes(skip_ids, user_id=user_id)
         added_contents = {
             _norm_content(op.content)
             for op in ops
-            if op.op != "DELETE" and op.content
+            if op.op == "ADD" and op.content
         }
         self._shadow_covered_originals(
             nodes_to_remove, added_contents, user_id=user_id
         )
 
-    def _shadow_covered_originals(
-        self, node_ids: list[str], added_contents: set[str], *, user_id: str
-    ) -> None:
-        """Soft-remove only fast-write originals whose content was re-emitted by a reconcile ADD."""
-        if not added_contents:
-            return
+    def _shadow_nodes(self, node_ids: list[str], *, user_id: str) -> None:
+        """Soft-remove the given fast-write originals (SKIP / no-increment)."""
         for nid in node_ids:
             node = self.factory.vector.get(nid)
             if node is None:
-                continue
-            if _norm_content(node.content) not in added_contents:
                 continue
             old_meta = node.to_metadata()
             node.status = MemoryStatus.SHADOW
@@ -298,6 +296,20 @@ class ReconcilerWorker:
                 old=old_meta,
                 new=node.to_metadata(),
             )
+
+    def _shadow_covered_originals(
+        self, node_ids: list[str], added_contents: set[str], *, user_id: str
+    ) -> None:
+        """Soft-remove only fast-write originals whose content was re-emitted by a reconcile ADD."""
+        if not added_contents:
+            return
+        covered = [
+            nid
+            for nid in node_ids
+            if (node := self.factory.vector.get(nid)) is not None
+            and _norm_content(node.content) in added_contents
+        ]
+        self._shadow_nodes(covered, user_id=user_id)
 
     def _resolve_memory_at(
         self,
@@ -326,6 +338,7 @@ class ReconcilerWorker:
         session_id: str,
         memory_at_by_content: dict[str, int] | None = None,
         fallback_memory_at: int | None = None,
+        source_node_id: str = "",
     ) -> None:
         """Apply reconcile ops (ADD/SUPERSEDE/DELETE) to the vector store + history log.
 
@@ -336,7 +349,7 @@ class ReconcilerWorker:
         batch-of-one RTT — N ops become N serial round-trips. One ``embed_batch`` call
         collapses that to a single round-trip.
         """
-        add_ops = [op for op in ops if op.op != "DELETE"]
+        add_ops = [op for op in ops if op.op == "ADD"]
         embeddings: list[list[float]] = []
         if add_ops:
             embeddings = await self.factory.embed.embed_batch(
@@ -345,21 +358,22 @@ class ReconcilerWorker:
         emb_iter = iter(embeddings)
 
         for op in ops:
-            if op.op == "DELETE":
-                target = self.factory.vector.get(op.memory_id) if op.memory_id else None
-                if target is None:
-                    continue
-                old_meta = target.to_metadata()
-                target.status = MemoryStatus.SHADOW
-                target.is_latest = False
-                self.factory.vector.upsert([target])
-                self.factory.history.append(
-                    event="DELETE",
-                    node_id=target.node_id,
-                    user_id=user_id,
-                    old=old_meta,
-                    new=target.to_metadata(),
-                )
+            if op.op != "ADD":
+                if op.op == "DELETE":
+                    target = self.factory.vector.get(op.memory_id) if op.memory_id else None
+                    if target is None:
+                        continue
+                    old_meta = target.to_metadata()
+                    target.status = MemoryStatus.SHADOW
+                    target.is_latest = False
+                    self.factory.vector.upsert([target])
+                    self.factory.history.append(
+                        event="DELETE",
+                        node_id=target.node_id,
+                        user_id=user_id,
+                        old=old_meta,
+                        new=target.to_metadata(),
+                    )
                 continue
 
             try:
@@ -383,7 +397,13 @@ class ReconcilerWorker:
                 is_latest=True,
                 supersedes=list(op.supersedes),
                 memory_at=memory_at,
-                custom=_reflect_custom(op) or None,
+                custom=build_apply_custom(
+                    op,
+                    vector=self.factory.vector,
+                    new_memory_at=memory_at,
+                    extra=[fallback_memory_at] if fallback_memory_at is not None else None,
+                    source_node_id=source_node_id,
+                ) or None,
             )
             new_node.embedding = next(emb_iter)
             self.factory.vector.upsert([new_node])

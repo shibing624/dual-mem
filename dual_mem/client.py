@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 import uuid
 from typing import Any
@@ -42,6 +43,20 @@ from dual_mem.types import MemoryStatus
 from dual_mem.writer.memory_writer import MemoryWriter
 
 logger = logging.getLogger("dual_mem.client")
+
+_INJECTION_BLOCK_RE = re.compile(
+    r"<(relevant-memories|user-profile|memory-tools-guide|topic-catalog)"
+    r"\b[^>]*>.*?</\1\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def strip_memory_injection(text: str) -> str:
+    """Remove host-injected memory blocks so they are not written back as L1."""
+    if not text:
+        return text
+    cleaned = _INJECTION_BLOCK_RE.sub("", text)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
 class MissingCredentialsError(RuntimeError):
@@ -254,6 +269,8 @@ class MemoryClient:
                     m if isinstance(m, dict) else {"role": m.role, "content": m.content}
                     for m in messages
                 ]
+                for raw in raw_dicts:
+                    raw["content"] = strip_memory_injection(str(raw.get("content") or ""))
                 from dual_mem.coding.preproc import has_any_tool_message, strip_tool_messages
                 if has_any_tool_message(raw_dicts):
                     try:
@@ -279,6 +296,11 @@ class MemoryClient:
             # user memory — drop before L1/extract. Extract LLM's own EXTRACT_* template is
             # separate instruction, not part of this dialogue.
             normalized = [m for m in normalized if m.role != "system"]
+            normalized = [
+                ChatMessage(role=m.role, content=strip_memory_injection(m.content))
+                for m in normalized
+            ]
+            normalized = [m for m in normalized if m.content.strip()]
             cpt = self.settings.chars_per_token
             threshold_chars = int(
                 self.settings.llm_context_window
@@ -294,6 +316,19 @@ class MemoryClient:
                 1 for m in normalized if m.role == "user" and m.content.strip()
             )
             content = _format_dialogue(normalized)
+        else:
+            content = strip_memory_injection(content)
+
+        if not content.strip():
+            return WriteResult(
+                success=True,
+                memory_id="",
+                request_id=request_id,
+                processing_time_ms=round((time.perf_counter() - start) * 1000, 2),
+                commit_passed=False,
+                extracted_count=0,
+                is_ephemeral=True,
+            )
 
         logger.info(
             "add app=%s user=%s mode=%s len=%d turns=%d",
@@ -313,6 +348,105 @@ class MemoryClient:
             write_kwargs["messages"] = normalized if messages is not None else None
         async with self._user_write_lock_ctx(resolved_app_id, user_id):
             result = await self.writer.write(**write_kwargs)
+        return WriteResult(
+            success=True,
+            memory_id=result.memory_id,
+            request_id=request_id,
+            processing_time_ms=round((time.perf_counter() - start) * 1000, 2),
+            commit_passed=result.commit_passed,
+            extracted_count=len(result.extra_node_ids),
+            extra_node_ids=list(result.extra_node_ids),
+            is_ephemeral=result.is_ephemeral,
+        )
+
+    async def add_raw(
+        self,
+        *,
+        content: str = "",
+        messages: list[dict] | list[ChatMessage] | None = None,
+        app_id: str | None = None,
+        user_id: str,
+        agent_id: str = "",
+        session_id: str = "",
+        memory_at: int | None = None,
+    ) -> WriteResult:
+        """Write L1_RAW only (embed + store). Does not run extract."""
+        request_id = str(uuid.uuid4())
+        start = time.perf_counter()
+        resolved_app_id = self._resolve_app_id(app_id)
+        text, _normalized, _turns = _prepare_write_text(
+            content, messages, settings=self.settings,
+        )
+        if not text.strip():
+            return WriteResult(
+                success=True,
+                memory_id="",
+                request_id=request_id,
+                processing_time_ms=round((time.perf_counter() - start) * 1000, 2),
+                commit_passed=False,
+                extracted_count=0,
+                is_ephemeral=True,
+            )
+        async with self._user_write_lock_ctx(resolved_app_id, user_id):
+            result = await self.writer.write_raw(
+                content=text,
+                app_id=resolved_app_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                session_id=session_id,
+                memory_at=memory_at,
+            )
+        return WriteResult(
+            success=True,
+            memory_id=result.memory_id,
+            request_id=request_id,
+            processing_time_ms=round((time.perf_counter() - start) * 1000, 2),
+            commit_passed=False,
+            extracted_count=0,
+            is_ephemeral=True,
+        )
+
+    async def distill(
+        self,
+        *,
+        content: str = "",
+        messages: list[dict] | list[ChatMessage] | None = None,
+        user_id: str,
+        source_node_ids: list[str],
+        app_id: str | None = None,
+        agent_id: str = "",
+        session_id: str = "",
+        memory_at: int | None = None,
+    ) -> WriteResult:
+        """Extract from existing L1 nodes without writing another L1."""
+        request_id = str(uuid.uuid4())
+        start = time.perf_counter()
+        resolved_app_id = self._resolve_app_id(app_id)
+        text, normalized, _turns = _prepare_write_text(
+            content, messages, settings=self.settings,
+        )
+        if not text.strip() or not source_node_ids:
+            return WriteResult(
+                success=True,
+                memory_id=source_node_ids[0] if source_node_ids else "",
+                request_id=request_id,
+                processing_time_ms=round((time.perf_counter() - start) * 1000, 2),
+                commit_passed=False,
+                extracted_count=0,
+                is_ephemeral=True,
+            )
+        async with self._user_write_lock_ctx(resolved_app_id, user_id):
+            result = await self.writer.distill(
+                content=text,
+                app_id=resolved_app_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                session_id=session_id,
+                request_id=request_id,
+                source_node_ids=list(source_node_ids),
+                memory_at=memory_at,
+                messages=normalized,
+            )
         return WriteResult(
             success=True,
             memory_id=result.memory_id,
@@ -416,6 +550,40 @@ class MemoryClient:
             memories=memories,
             processing_time_ms=round((time.perf_counter() - start) * 1000, 2),
             read_result=trace,
+        )
+
+    async def search_conversation(
+        self,
+        *,
+        query: str,
+        app_ids: list[str] | None = None,
+        user_id: str,
+        agent_ids: list[str] | None = None,
+        session_ids: list[str] | None = None,
+        limit: int = 10,
+        min_score: float = 0.0,
+        created_after: int | None = None,
+        request_id: str | None = None,
+    ) -> SearchResult:
+        """Search L1_RAW originals (including SHADOW after extract). Not used by default QA."""
+        request_id = request_id or str(uuid.uuid4())
+        start = time.perf_counter()
+        resolved_app_ids = app_ids if app_ids is not None else [self.settings.default_app_id]
+        memories = await self.reader.search_conversation(
+            query=query,
+            app_ids=resolved_app_ids,
+            user_id=user_id,
+            agent_ids=agent_ids,
+            session_ids=session_ids,
+            limit=limit,
+            min_score=min_score,
+            created_after=created_after,
+        )
+        return SearchResult(
+            success=True,
+            request_id=request_id,
+            memories=memories,
+            processing_time_ms=round((time.perf_counter() - start) * 1000, 2),
         )
 
     async def get(self, memory_id: str) -> MemoryItem | None:
@@ -564,6 +732,39 @@ class MemoryClient:
         if self._coding_writer is not None:
             self._coding_writer.store.close()
         self.factory.close()
+
+
+def _prepare_write_text(
+    content: str,
+    messages: list | None,
+    *,
+    settings: Settings,
+) -> tuple[str, list[ChatMessage] | None, int]:
+    """Strip injection, drop system turns, shape history; return (text, msgs, user turns)."""
+    if not messages:
+        return strip_memory_injection(content), None, 0
+    normalized = _normalize_messages(messages)
+    normalized = [m for m in normalized if m.role != "system"]
+    normalized = [
+        ChatMessage(role=m.role, content=strip_memory_injection(m.content))
+        for m in normalized
+    ]
+    normalized = [m for m in normalized if m.content.strip()]
+    cpt = settings.chars_per_token
+    threshold_chars = int(
+        settings.llm_context_window
+        * settings.extract_dialogue_context_ratio
+        * cpt
+    )
+    normalized = _shape_history(
+        normalized,
+        threshold_chars=threshold_chars,
+        assistant_max_chars=int(settings.extract_assistant_max_tokens * cpt),
+    )
+    user_turn_count = sum(
+        1 for m in normalized if m.role == "user" and m.content.strip()
+    )
+    return _format_dialogue(normalized), normalized, user_turn_count
 
 
 def _normalize_messages(messages: list) -> list[ChatMessage]:

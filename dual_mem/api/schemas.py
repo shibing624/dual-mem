@@ -45,6 +45,19 @@ class SearchRequest(BaseModel):
     debug: bool = False
 
 
+class ConversationSearchRequest(BaseModel):
+    """Request body for L1_RAW evidence search."""
+
+    query: str
+    app_ids: list[str] | None = None
+    user_id: str
+    agent_ids: list[str] | None = None
+    session_ids: list[str] | None = None
+    limit: int = 10
+    min_score: float = 0.0
+    created_after: int | None = None
+
+
 class SearchResponse(BaseModel):
     """Response carrying grouped search results and timing."""
 

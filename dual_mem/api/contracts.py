@@ -20,6 +20,11 @@ MEMORY_TOOL_CONTRACTS: list[dict[str, Any]] = [
         "http": {"method": "POST", "path": "/v1/memories/search"},
     },
     {
+        "name": "conversation_search",
+        "summary": "Search L1_RAW originals (including SHADOW)",
+        "http": {"method": "POST", "path": "/v1/memories/search_conversation"},
+    },
+    {
         "name": "memory_list",
         "summary": "List ACTIVE memories in a scope",
         "http": {"method": "GET", "path": "/v1/memories/"},

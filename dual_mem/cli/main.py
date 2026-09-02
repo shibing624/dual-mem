@@ -140,6 +140,35 @@ def search(
         typer.echo(format_memories(result.memories.to_dict()))
 
 
+@app.command(name="search-conversation")
+def search_conversation(
+    query: str = typer.Argument(...),
+    app_id: str | None = typer.Option(
+        None,
+        "--app-id",
+        help="省略则使用 config 中 default_app_id",
+    ),
+    user_id: str = typer.Option(..., "--user-id"),
+    limit: int = typer.Option(10, "--limit"),
+    json_out: bool = typer.Option(False, "--json", help="输出原始 JSON 而非格式化文本"),
+    mode: str | None = typer.Option(None, "--mode", help="system1 | dual"),
+):
+    """检索 L1 原文（MemoryClient.search_conversation）。"""
+    client = make_client(mode)
+    result = _run(
+        client.search_conversation(
+            query=query,
+            app_ids=[app_id] if app_id is not None else None,
+            user_id=user_id,
+            limit=limit,
+        )
+    )
+    if json_out:
+        _echo_json(result.to_dict())
+    else:
+        typer.echo(format_memories(result.memories.to_dict()))
+
+
 @app.command(name="list")
 def list_memories(
     app_id: str | None = typer.Option(

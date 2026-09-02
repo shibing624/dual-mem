@@ -137,6 +137,12 @@ class MemoryItem:
     gmt_modified: int | None = None
     # 同主题演化历史（新→旧）；无链时为 None
     evolution_chain: list[EvolutionItem] | None = None
+    # 仅 MERGE 链头：新旧 memory_at 并集；OVERRIDE 为空
+    merged_timestamps: list[int] | None = None
+    # 写侧关系：OVERRIDE / MERGE / SUPPLEMENT / …；无则 None
+    update_type: str | None = None
+    # 源 L1_RAW 节点 id（extract / reconcile 写入 custom.source_node_id）
+    source_node_id: str | None = None
 
     def to_dict(self) -> dict:
         """Serialize this memory item with its (optional) evolution chain expanded."""
@@ -156,6 +162,12 @@ class MemoryItem:
             out["gmt_modified"] = self.gmt_modified
         if self.evolution_chain:
             out["evolution_chain"] = [item.to_dict() for item in self.evolution_chain]
+        if self.merged_timestamps:
+            out["merged_timestamps"] = list(self.merged_timestamps)
+        if self.update_type:
+            out["update_type"] = self.update_type
+        if self.source_node_id:
+            out["source_node_id"] = self.source_node_id
         return out
 
     def to_search_result(self) -> dict[str, Any]:

@@ -586,8 +586,9 @@ RECONCILE_ZH = """你是一个记忆管理系统。你的任务是将一批新�
 - `layer`: `"L2_FACT"` 或 `"L4_IDENTITY"`。
 - `supersedes`: 此新节点在争议维度上取代的已有 `memory_id` 列表。默认 `[]`。被引用的节点作为历史版本保留在链上。
 - `tags`: 1-3 个小写主题关键词。**优先从下方已有标签列表中选取，仅在现有标签都不合适时才新增。**
-- `update_type`: 该新节点与已有记忆的关系类型（必填，五选一）：
-  - `"OVERRIDE"`: 同维度状态变化，新节点取代旧节点（必须配合 `supersedes`）。
+- `update_type`: 该新节点与已有记忆的关系类型（必填，六选一）：
+  - `"OVERRIDE"`: 同维度状态变化，新节点取代旧节点（必须配合 `supersedes`）。旧值不再成立。
+  - `"MERGE"`: 与已有记忆描述同一主题且互补不矛盾，合成一条更完整陈述（必须配合 `supersedes`）。旧值仍成立，作为历史保留在链上。不要对这些节点输出 DELETE。
   - `"SUPPLEMENT"`: 与已有记忆兼容、独立累加（`supersedes: []`）。
   - `"TEMPORAL"`: 临时/短期变化（"今天想吃...", "最近在..."），可选 `temporal_scope` 描述有效范围。
   - `"NEGATE"`: 显式否定旧主张（"不再喜欢...", "已经离开..."），必须配合 `supersedes` 指向被否定的节点。
@@ -612,8 +613,8 @@ RECONCILE_ZH = """你是一个记忆管理系统。你的任务是将一批新�
 
 ### 目标 2 — 合并碎片化的记忆
 当记忆描述同一主题但兼容（无矛盾）时，合并它们:
-- 生成一个 ADD，包含合并后的内容（`supersedes: []`）。
-- 对每个被吸收的已有节点生成 DELETE。
+- 生成一个 ADD，`update_type="MERGE"`，`supersedes` 指向被折叠的已有节点（旧值仍成立，作为历史保留在链上）。
+- 不要对这些节点输出 DELETE。
 - 合并后的内容必须保留所有来源的每一条有意义的事实，**尤其是所有数字、百分比、计数和金额**。
 
 ### 目标 3 — 粒度控制
@@ -661,8 +662,9 @@ RECONCILE_ZH = """你是一个记忆管理系统。你的任务是将一批新�
 
 1. 输出必须是一个有效的 JSON 对象，顶层键为 `updates`（一个数组）。
 2. 不要有任何文字、markdown、道歉或思维链。
-3. 如果不需要任何变更，输出 `{{"updates": []}}`。
+3. 如果不需要任何变更（新记忆相对已有记忆没有增量），输出 `{{"updates": []}}`（整批 SKIP）。
 4. 字段类型必须严格匹配: `supersedes` 和 `tags` 是数组（为空时用 `[]`）。
+5. 可用 `{{"op": "SKIP", "memory_id": "<new_node_id>"}}` 或 `new_index`（从 1 起）放弃单条新记忆；不要用 SKIP 删已有记忆。
 
 现在输出 JSON。"""
 
@@ -672,7 +674,7 @@ RECONCILE_POLICY_CONSERVATIVE_ZH = """
 ## 保守策略（强制覆盖以上目标 2）
 
 本次运行为**高召回保守模式**，必须遵守：
-- **禁止合并**：不要把多条记忆合并成一条，不要用 DELETE 去吸收/合并兼容的记忆。
+- **禁止合并**：不要把多条记忆合并成一条，不要输出 `update_type="MERGE"`，不要用 DELETE 去吸收/合并兼容的记忆。
 - **可数事件独立**：不同实体、不同日期、不同对象的事件（如不同人生娃、不同次购买、不同次到访），
   即使主题相同，也必须各自独立保留为 `update_type="SUPPLEMENT"`、`supersedes: []` 的 ADD，绝不合并计数。
 - **仅状态变化才 supersede**：只有同一维度的状态发生真实变化（OVERRIDE / NEGATE）时才用 `supersedes`。
@@ -684,7 +686,7 @@ RECONCILE_POLICY_CONSERVATIVE_EN = """
 ## Conservative policy (OVERRIDES Objective 2 above)
 
 This run is in HIGH-RECALL conservative mode. You MUST:
-- **No merging**: never fuse multiple memories into one; never use DELETE to absorb/merge compatible memories.
+- **No merging**: never fuse multiple memories into one; never emit `update_type="MERGE"`; never use DELETE to absorb/merge compatible memories.
 - **Keep countable events separate**: distinct entities / dates / objects (different people's births, different
   purchases, different visits) MUST each stay as an independent ADD with `update_type="SUPPLEMENT"` and
   `supersedes: []`, even on the same topic — never merge them into a single count.
@@ -738,7 +740,8 @@ Counter-example (NOT a chain):
 - `supersedes`: list of existing `memory_id`s that this new node marks as no-longer-current-truth on the contested dimension. Default `[]`.
 - `tags`: 1-3 lowercase keywords; prefer reusing the existing tags list below.
 - `update_type` (REQUIRED): the relationship between this new node and existing memories. One of:
-  - `"OVERRIDE"`: same-dimension state change; new replaces old (REQUIRES non-empty `supersedes`).
+  - `"OVERRIDE"`: same-dimension state change; new replaces old (REQUIRES non-empty `supersedes`). The old value is no longer true.
+  - `"MERGE"`: same topic, complementary and non-contradictory; fold into one richer statement (REQUIRES non-empty `supersedes`). The old value remains true and stays on the chain. Do NOT DELETE those nodes.
   - `"SUPPLEMENT"`: compatible, independent accumulation (`supersedes: []`).
   - `"TEMPORAL"`: short-lived / temporary change ("today wants ...", "currently into ..."); set `temporal_scope`.
   - `"NEGATE"`: explicit negation of an old claim ("no longer likes ...", "has left ..."); REQUIRES `supersedes`.
@@ -758,7 +761,7 @@ Counter-example (NOT a chain):
 Use `supersedes` only when claims on the SAME dimension cannot both be currently true. NOT for refinement / accumulation. The new head node must contain ONLY the new/changed claim — do NOT copy old node content forward.
 
 ### 2 — Consolidate fragmented memories
-When memories describe the same topic compatibly: emit one merged ADD (`supersedes: []`) plus DELETE per absorbed node. Preserve every meaningful fact from all sources, **especially every number, percentage, count, and dollar amount**.
+When memories describe the same topic compatibly: emit one ADD with `update_type="MERGE"` and `supersedes` pointing at the folded nodes. Do NOT DELETE those nodes. Preserve every meaningful fact from all sources, **especially every number, percentage, count, and dollar amount**.
 
 ### 3 — Granularity control
 One memory = one coherent thought. Avoid both fragmentation and over-bundling (>2000 chars). When in doubt, prefer slightly coarser.
@@ -799,8 +802,9 @@ No information from any source may be lost after your ops execute.
 
 1. Valid JSON with top-level key `updates` (array).
 2. No prose, markdown, apologies, or chain-of-thought.
-3. Empty case: `{{"updates": []}}`.
+3. Empty case: `{{"updates": []}}` (SKIP the whole new batch — no increment).
 4. `supersedes` and `tags` are arrays (use `[]` when empty).
+5. `{{"op": "SKIP", "memory_id": "<new_node_id>"}}` or `new_index` (1-based) drops one new memory. Do not SKIP existing memories.
 
 Output JSON now."""
 
@@ -829,7 +833,7 @@ RECONCILE_SYSTEM1_ZH = """你是一个记忆管理系统。请决定如何把一
    {{"op": "ADD", "content": "<新记忆原文，可轻微润色>", "layer": "L2_FACT", "supersedes": [], "tags": [...], "update_type": "SUPPLEMENT"}}
 
 2. UPDATE —— 某条已有记忆仍然成立，但新记忆补充了**同一主题**的细节。把两者合并成一条更丰富、自包含的陈述，保留双方全部有意义的事实（人名、数字、日期、原因、感受）。被合并的已有记忆成为历史。
-   {{"op": "ADD", "content": "<合并后的陈述>", "layer": "L2_FACT", "supersedes": ["<existing_id>"], "tags": [...], "update_type": "OVERRIDE"}}
+   {{"op": "ADD", "content": "<合并后的陈述>", "layer": "L2_FACT", "supersedes": ["<existing_id>"], "tags": [...], "update_type": "MERGE"}}
 
 3. SUPERSEDE —— 新记忆与已有记忆在**同一维度**上冲突或发生了更替（偏好改变、不再喜欢、搬家等）。写出当前真相，并取代过时的 memory_id；若存在链式多个版本，全部取代，并把链中仍然有效的内容折叠进新陈述。
    {{"op": "ADD", "content": "<当前真相陈述>", "layer": "L2_FACT", "supersedes": ["<existing_id>", ...], "tags": [...], "update_type": "OVERRIDE"}}
@@ -840,7 +844,8 @@ RECONCILE_SYSTEM1_ZH = """你是一个记忆管理系统。请决定如何把一
 - 绝不丢失信息：任何来源中的有意义事实都必须保留在某个输出陈述中。
 - 第三人称（"用户……"），自包含，使用输入语言。
 - tags：1-3 个小写主题关键词。
-- 不要输出 DELETE；不需要变更的记忆就不用出现在输出里之外无需其他操作。
+- 不要输出 DELETE；不需要变更的已有记忆不要出现在输出里。
+- 若某条新记忆相对已有记忆没有增量，输出 `{{"op": "SKIP", "new_index": N}}`（N 从 1 起）；整批都无增量则输出 `{{"updates": []}}`。
 
 只输出一个 JSON 对象，不要任何解释：
 {{"updates": [{{"reason": "...", "ops": [<上述 op>]}}]}}
@@ -866,7 +871,7 @@ For EACH new memory, choose exactly one action:
    {{"op": "ADD", "content": "<the new memory text, unchanged or lightly polished>", "layer": "L2_FACT", "supersedes": [], "tags": [...], "update_type": "SUPPLEMENT"}}
 
 2. UPDATE — an existing memory is still true but the new one adds details on the SAME topic. Merge both into ONE richer, self-contained statement that preserves every meaningful fact from both sides (names, numbers, dates, reasons, feelings). The merged existing memory becomes history.
-   {{"op": "ADD", "content": "<merged statement>", "layer": "L2_FACT", "supersedes": ["<existing_id>"], "tags": [...], "update_type": "OVERRIDE"}}
+   {{"op": "ADD", "content": "<merged statement>", "layer": "L2_FACT", "supersedes": ["<existing_id>"], "tags": [...], "update_type": "MERGE"}}
 
 3. SUPERSEDE — the new memory contradicts or replaces an existing one on the SAME dimension (preference change, no longer does X, moved away...). Write the current truth and supersede the outdated memory_id(s); if several chained versions exist, supersede all of them and fold their still-valid content into the new statement.
    {{"op": "ADD", "content": "<current truth statement>", "layer": "L2_FACT", "supersedes": ["<existing_id>", ...], "tags": [...], "update_type": "OVERRIDE"}}
@@ -878,6 +883,7 @@ Rules:
 - Third person ("The user ..."), self-contained, English.
 - tags: 1-3 lowercase topical keywords.
 - Never output DELETE.
+- If a new memory adds nothing, emit `{{"op": "SKIP", "new_index": N}}` (1-based). If the whole batch is redundant, emit `{{"updates": []}}`.
 
 Output one JSON object only, no explanations:
 {{"updates": [{{"reason": "...", "ops": [<ops as above>]}}]}}

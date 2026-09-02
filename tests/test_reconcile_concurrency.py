@@ -24,7 +24,7 @@ def _make_factory(tmp_storage, fake_embed, concurrency: int):
     # reconcile op: one ADD echoing the new memory content verbatim (no supersede), so the
     # worker's coverage check shadows the fast-write original it re-emitted.
     def _echo(*, system, user):
-        content = user.split(". ", 1)[-1].strip()
+        content = user.split(". ", 1)[-1].split("\n", 1)[0].strip()
         return [{"op": "ADD", "content": content, "layer": "L2_FACT"}]
 
     llm = FakeLLMClient(responses={"reconcile": _echo})

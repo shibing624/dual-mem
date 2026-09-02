@@ -20,9 +20,12 @@ from __future__ import annotations
 from typing import Any
 
 from dual_mem.integrations._base import (
+    MEMORY_TOOLS_GUIDE,
     AsyncRunner,
     MemoryBackend,
+    RenderedMemoryContext,
     format_memories_for_prompt,
+    format_profile_block,
 )
 
 from dual_mem.integrations.agentica import (
@@ -35,7 +38,10 @@ from dual_mem.integrations.agentica import (
 __all__ = [
     "MemoryBackend",
     "AsyncRunner",
+    "RenderedMemoryContext",
+    "MEMORY_TOOLS_GUIDE",
     "format_memories_for_prompt",
+    "format_profile_block",
     "DualMemMemory",
     "DualMemWorkspace",
     "get_agentica_memory_backend",

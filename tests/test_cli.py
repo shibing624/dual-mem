@@ -20,7 +20,7 @@ def test_help():
     result = runner.invoke(cli_main.app, ["--help"])
     assert result.exit_code == 0
     for cmd in (
-        "add", "search", "list", "get", "update", "delete",
+        "add", "search", "search-conversation", "list", "get", "update", "delete",
         "delete-scope", "list-scopes", "digest", "serve", "mcp",
     ):
         assert cmd in result.output

@@ -19,7 +19,7 @@ from typing import Any
 from dual_mem.agent import prompts
 from dual_mem.agent.basic_profile import BasicProfileTool, normalize_basic_info
 from dual_mem.agent.extractor import Extractor
-from dual_mem.agent.reconciler import ReconcileOp, Reconciler
+from dual_mem.agent.reconciler import ReconcileOp, Reconciler, build_apply_custom
 from dual_mem.agent.summarizer import Summarizer
 from dual_mem.registry import ComponentFactory
 from dual_mem.sdk_models import ChatMessage, CommitResult
@@ -237,9 +237,14 @@ class MemAgent:
                         memory_at=raw_node.memory_at,
                         tags=op.tags or [],
                         custom={
-                            "source_node_id": raw_node.node_id,
+                            **build_apply_custom(
+                                op,
+                                vector=self.vector,
+                                new_memory_at=raw_node.memory_at,
+                                extra=[raw_node.memory_at] if raw_node.memory_at is not None else None,
+                                source_node_id=raw_node.node_id,
+                            ),
                             "memory_type": src_meta.get("memory_type", "fact"),
-                            "update_type": op.update_type,
                         },
                         embedding=embedding,
                     )
@@ -271,6 +276,7 @@ class MemAgent:
         request_id: str,
         memory_at: int | None,
         messages: list[ChatMessage] | None = None,
+        source_node_id: str = "",
     ) -> tuple[list[str], CommitResult, bool]:
         """Run the System1 pipeline for one raw memory.
 
@@ -375,6 +381,7 @@ class MemAgent:
                     agent_id=agent_id,
                     session_id=session_id,
                     memory_at=memory_at,
+                    source_node_id=source_node_id,
                 )
                 if new_memories:
                     ops = await self.reconciler.reconcile(
@@ -392,6 +399,7 @@ class MemAgent:
                         agent_id=agent_id,
                         session_id=session_id,
                         memory_at=memory_at,
+                        source_node_id=source_node_id,
                     )
                 else:
                     l2l4_ids = []
@@ -405,6 +413,7 @@ class MemAgent:
                     agent_id=agent_id,
                     session_id=session_id,
                     memory_at=memory_at,
+                    source_node_id=source_node_id,
                 )
                 stored_ids = l0_ids + l2l4_ids
                 if l2l4_ids and self.settings.mode == "dual":
@@ -609,6 +618,7 @@ class MemAgent:
         agent_id: str,
         session_id: str,
         memory_at: int | None,
+        source_node_id: str = "",
     ) -> tuple[list[str], list[str]]:
         """Persist L0 (if any) + extracted L2/L4 in one embed_batch call.
 
@@ -650,6 +660,7 @@ class MemAgent:
                     speculate=meta.get("speculate"),
                     owner=meta.get("owner", ""),
                     memory_at=memory_at,
+                    custom={"source_node_id": source_node_id} if source_node_id else None,
                 )
             )
 
@@ -725,10 +736,13 @@ class MemAgent:
         agent_id: str,
         session_id: str,
         memory_at: int | None,
+        source_node_id: str = "",
     ) -> list[str]:
         """Apply reconcile ops to the stores (soft-delete, add, supersede)."""
         stored_ids: list[str] = []
         for op in ops:
+            if op.op == "SKIP":
+                continue
             if op.op == "DELETE":
                 old = (
                     await asyncio.to_thread(self.vector.get, op.memory_id)
@@ -766,7 +780,13 @@ class MemAgent:
                 is_latest=True,
                 supersedes=list(op.supersedes),
                 memory_at=memory_at,
-                custom=_reflect_custom(op) or None,
+                custom=build_apply_custom(
+                    op,
+                    vector=self.vector,
+                    new_memory_at=memory_at,
+                    extra=[memory_at] if memory_at is not None else None,
+                    source_node_id=source_node_id,
+                ) or None,
             )
             node.embedding = await self.embed.embed_queued(node.content)
             await asyncio.to_thread(self.vector.upsert, [node])
@@ -827,13 +847,3 @@ class MemAgent:
             ids.append(node_id)
         return ids
 
-def _reflect_custom(op: ReconcileOp) -> dict:
-    """Pack reflector metadata (update_type, temporal_scope, negation) into node.custom."""
-    out: dict = {}
-    if op.update_type:
-        out["update_type"] = op.update_type
-    if op.temporal_scope:
-        out["temporal_scope"] = op.temporal_scope
-    if op.negation:
-        out["negation"] = True
-    return out

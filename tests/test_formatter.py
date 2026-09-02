@@ -1,3 +1,4 @@
+from dual_mem.integrations._base import format_memories_for_prompt
 from dual_mem.retrieval.formatter import (
     format_evolution_timeline,
     format_memories,
@@ -98,6 +99,98 @@ def test_search_memories_to_search_results():
     hits = memories.to_search_results(limit=1)
     assert len(hits) == 1
     assert hits[0]["memory"] == "b"
+
+
+def test_format_merge_shows_folded_facts_as_still_valid():
+    result = {
+        "profile": [],
+        "proactive": [],
+        "normal": [
+            {
+                "memory_id": "a",
+                "content": "用户在 A 公司负责支付与风控",
+                "category": "fact",
+                "update_type": "MERGE",
+                "merged_timestamps": [1_600_000_000, 1_700_000_000],
+                "evolution_chain": [
+                    {"node_id": "a", "content": "用户在 A 公司负责支付与风控"},
+                    {"node_id": "b", "content": "用户在 A 公司做支付"},
+                ],
+            }
+        ],
+    }
+    text = format_memories(result)
+    assert "folded, still valid" in text
+    assert "用户在 A 公司做支付" in text
+    assert "not current" not in text
+
+
+def test_format_merge_duration_when_timestamps_span():
+    result = {
+        "profile": [],
+        "proactive": [],
+        "normal": [
+            {
+                "memory_id": "a",
+                "content": "用户在 A 公司负责支付与风控",
+                "category": "fact",
+                "memory_at": 1_700_000_000,
+                "merged_timestamps": [1_600_000_000, 1_700_000_000],
+            }
+        ],
+    }
+    text = format_memories(result)
+    assert "(持续: 2020-09-13 → 2023-11-14)" in text
+
+
+def test_format_override_omits_duration_without_merged_timestamps():
+    result = {
+        "profile": [],
+        "proactive": [],
+        "normal": [
+            {
+                "memory_id": "a",
+                "content": "用户主力语言是 Python",
+                "category": "fact",
+                "memory_at": 1_700_000_000,
+                "evolution_chain": [
+                    {"node_id": "a", "content": "用户主力语言是 Python", "memory_at": 1_700_000_000},
+                    {"node_id": "b", "content": "用户主力语言是 Java", "memory_at": 1_600_000_000},
+                ],
+            }
+        ],
+    }
+    text = format_memories(result)
+    assert "持续" not in text
+
+
+def test_format_memories_shows_source_node_id():
+    result = {
+        "profile": [],
+        "proactive": [],
+        "normal": [
+            {
+                "memory_id": "f1",
+                "content": "用户喜欢咖啡",
+                "category": "fact",
+                "source_node_id": "l1-abcd1234eeee",
+            }
+        ],
+    }
+    text = format_memories(result, date_preamble=False)
+    assert "来源: L1 l1-abcd1" in text
+
+
+def test_format_memories_for_prompt_shows_source_node_id():
+    item = MemoryItem(
+        memory_id="f1",
+        content="用户喜欢咖啡",
+        category="fact",
+        score=0.9,
+        source_node_id="l1-abcd1234eeee",
+    )
+    text = format_memories_for_prompt([item])
+    assert "来源: L1 l1-abcd1" in text
 
 
 def test_format_memory_timestamp():

@@ -26,8 +26,9 @@ Reconciler 负责**召回相关旧记忆 → 让 LLM 判断关系 → 输出 ADD
 
 - ``ADD``：写入整合后的内容；``supersedes`` 指向被取代的旧节点 ID
 - ``DELETE``：软删（下游标 SHADOW / is_latest=False）
-- ``update_type``：OVERRIDE / SUPPLEMENT / TEMPORAL / NEGATE / CONFLICT，
-  供下游写入 ``node.custom``（如 TEMPORAL 的 ``temporal_scope``、NEGATE 的 ``negation``）
+- ``update_type``：OVERRIDE / MERGE / SUPPLEMENT / TEMPORAL / NEGATE / CONFLICT，
+  供下游写入 ``node.custom``（如 TEMPORAL 的 ``temporal_scope``、NEGATE 的 ``negation``、
+  MERGE 的 ``merged_timestamps``）
 
 本模块只做**决策**，不直接写库；向量检索阈值见 ``SEARCH_THRESHOLD`` / ``FINAL_TOPK``。
 """
@@ -41,7 +42,11 @@ from dual_mem.isolation import build_filter
 from dual_mem.providers.embedding import EmbedService
 from dual_mem.providers.llm import LLMClient
 from dual_mem.storage.vector_store import VectorStore
-from dual_mem.types import Layer, MemoryStatus
+from dual_mem.types import Layer, MemoryNode, MemoryStatus
+
+_VALID_UPDATE_TYPES = frozenset({
+    "OVERRIDE", "SUPPLEMENT", "TEMPORAL", "NEGATE", "CONFLICT", "MERGE", "",
+})
 
 logger = logging.getLogger("dual_mem.agent.reconcile")
 
@@ -51,7 +56,7 @@ class ReconcileOp:
     """A single reconciliation operation parsed from the LLM output.
 
     update_type classifies the relationship between the new memory and existing memories
-    (OVERRIDE / SUPPLEMENT / TEMPORAL / NEGATE / CONFLICT), so downstream apply logic can
+    (OVERRIDE / MERGE / SUPPLEMENT / TEMPORAL / NEGATE / CONFLICT), so downstream apply logic can
     persist temporal_scope on TEMPORAL ops and tag NEGATE ops in node.custom for the reader.
     """
 
@@ -63,9 +68,155 @@ class ReconcileOp:
     tags: list[str] = field(default_factory=list)
     memory_id: str | None = None
     reason: str = ""
-    update_type: str = ""           # OVERRIDE | SUPPLEMENT | TEMPORAL | NEGATE | CONFLICT | ""
+    update_type: str = ""           # OVERRIDE | MERGE | SUPPLEMENT | TEMPORAL | NEGATE | CONFLICT | ""
     temporal_scope: str | None = None
     negation: bool = False
+    new_index: int | None = None    # 1-based index into the new-memory batch (SKIP)
+
+
+def fold_absorb_deletes(ops: list[ReconcileOp]) -> list[ReconcileOp]:
+    """Rewrite Objective-2 ADD+DELETE absorb into a MERGE supersedes chain.
+
+    Complementary merge used to SHADOW the old node via DELETE. That is the
+    destructive absorb this function removes: the DELETE ids become ``supersedes``
+    on an ADD, ``update_type`` becomes MERGE when it was empty/SUPPLEMENT, and
+    those DELETE ops are dropped. Orphan DELETE with no ADD is kept (exact dup).
+    """
+    adds = [op for op in ops if op.op == "ADD"]
+    deletes = [op for op in ops if op.op == "DELETE" and op.memory_id]
+    others = [op for op in ops if op.op not in ("ADD", "DELETE")]
+    if not deletes:
+        return list(ops)
+    covered = {sid for add in adds for sid in add.supersedes}
+    orphans = [d for d in deletes if d.memory_id not in covered]
+    kept_deletes: list[ReconcileOp] = []
+    if orphans and adds:
+        target = next((add for add in adds if not add.supersedes), adds[0])
+        for doomed in orphans:
+            if doomed.memory_id not in target.supersedes:
+                target.supersedes.append(doomed.memory_id)
+        if target.update_type in ("", "SUPPLEMENT"):
+            target.update_type = "MERGE"
+    elif orphans:
+        kept_deletes = orphans
+    return adds + others + kept_deletes
+
+
+def _norm_skip_content(text: str | None) -> str:
+    return " ".join((text or "").split()).lower()
+
+
+def _is_empty_verdict(data) -> bool:
+    """True when the LLM parsed cleanly and said there is no increment."""
+    if data in ([], {}):
+        return True
+    if isinstance(data, dict):
+        for key in ("updates", "groups", "results"):
+            if key in data and data[key] == []:
+                return True
+    return False
+
+
+def resolve_skip_targets(
+    ops: list[ReconcileOp],
+    *,
+    new_node_ids: list[str],
+    new_contents: list[str],
+) -> list[str]:
+    """Map SKIP ops onto fast-write node ids. Untargeted SKIP retracts the whole batch."""
+    skips = [op for op in ops if op.op == "SKIP"]
+    if not skips:
+        return []
+    id_by_content = {
+        _norm_skip_content(content): nid
+        for nid, content in zip(new_node_ids, new_contents)
+    }
+    allowed = set(new_node_ids)
+    targets: set[str] = set()
+    for op in skips:
+        if not op.memory_id and op.new_index is None and not op.content:
+            return list(new_node_ids)
+        if op.memory_id and op.memory_id in allowed:
+            targets.add(op.memory_id)
+        if op.new_index is not None:
+            index = op.new_index - 1 if op.new_index >= 1 else op.new_index
+            if 0 <= index < len(new_node_ids):
+                targets.add(new_node_ids[index])
+        if op.content:
+            matched = id_by_content.get(_norm_skip_content(op.content))
+            if matched:
+                targets.add(matched)
+    return list(targets)
+
+
+def collect_merged_timestamps(
+    *,
+    update_type: str,
+    new_memory_at: int | None,
+    old_nodes: list[MemoryNode],
+    extra: list[int] | None = None,
+) -> list[int]:
+    """Union of session/node timestamps for complementary MERGE only."""
+    if update_type != "MERGE":
+        return []
+    stamps: list[int] = []
+    for ts in (new_memory_at, *(extra or [])):
+        if ts is not None:
+            stamps.append(int(ts))
+    for old in old_nodes:
+        if old.memory_at is not None:
+            stamps.append(int(old.memory_at))
+        prev = (old.custom or {}).get("merged_timestamps")
+        if isinstance(prev, list):
+            stamps.extend(int(x) for x in prev if isinstance(x, (int, float)))
+    return sorted(set(stamps))
+
+
+def reflect_custom(
+    op: ReconcileOp,
+    *,
+    merged_timestamps: list[int] | None = None,
+) -> dict:
+    """Pack reflector metadata into node.custom."""
+    out: dict = {}
+    if op.update_type:
+        out["update_type"] = op.update_type
+    if op.temporal_scope:
+        out["temporal_scope"] = op.temporal_scope
+    if op.negation:
+        out["negation"] = True
+    if merged_timestamps:
+        out["merged_timestamps"] = list(merged_timestamps)
+    return out
+
+
+def build_apply_custom(
+    op: ReconcileOp,
+    *,
+    vector,
+    new_memory_at: int | None,
+    extra: list[int] | None = None,
+    source_node_id: str = "",
+) -> dict:
+    """Build node.custom for an applied ADD, including MERGE timestamp union."""
+    old_nodes: list[MemoryNode] = []
+    if op.update_type == "MERGE":
+        for old_id in op.supersedes:
+            old = vector.get(old_id)
+            if old is not None:
+                old_nodes.append(old)
+    custom = reflect_custom(
+        op,
+        merged_timestamps=collect_merged_timestamps(
+            update_type=op.update_type,
+            new_memory_at=new_memory_at,
+            old_nodes=old_nodes,
+            extra=extra,
+        ),
+    )
+    if source_node_id:
+        custom["source_node_id"] = source_node_id
+    return custom
 
 
 class Reconciler:
@@ -269,20 +420,21 @@ class Reconciler:
                 logger.warning("reconcile JSON parse failed, retrying: %s", exc)
                 continue
             ops = self._parse_ops(data)
+            if not self.non_destructive and self.policy != "conservative":
+                ops = fold_absorb_deletes(ops)
             if self.non_destructive:
                 ops = self._apply_non_destructive(ops)
-            if ops or data in ([], {}):
+            if ops:
                 logger.debug(
-                    "reconcile candidates=%d ops=%d supersedes=%d",
+                    "reconcile candidates=%d ops=%d supersedes=%d skip=%d",
                     len(candidate_map), len(ops),
                     sum(1 for op in ops if op.op == "ADD" and op.supersedes),
+                    sum(1 for op in ops if op.op == "SKIP"),
                 )
-                if not ops:
-                    logger.warning(
-                        "reconcile returned 0 ops (data keys=%s); caller falls back to plain ADD",
-                        list(data.keys()) if isinstance(data, dict) else type(data).__name__,
-                    )
                 return ops
+            if _is_empty_verdict(data):
+                logger.info("reconcile empty verdict → SKIP all new memories")
+                return [ReconcileOp(op="SKIP")]
         logger.warning("reconcile produced no parseable ops after 3 retries")
         return []
 
@@ -300,6 +452,9 @@ class Reconciler:
         for op in ops:
             if op.op == "DELETE":
                 dropped += 1
+                continue
+            if op.op == "SKIP":
+                result.append(op)
                 continue
             if op.supersedes:
                 stripped += 1
@@ -356,6 +511,9 @@ class Reconciler:
     def _format_new_memory(index: int, meta: dict) -> str:
         """Format one new memory (with optional tags) as a numbered prompt line."""
         line = f"{index + 1}. {meta.get('content', '')}"
+        node_id = meta.get("node_id")
+        if node_id:
+            line += f"\n   node_id: {node_id}"
         tags = meta.get("tags")
         if tags:
             line += f"\n   tags: {', '.join(str(t) for t in tags)}"
@@ -400,8 +558,11 @@ class Reconciler:
                     raw_tags = [raw_tags]
                 tags = [str(t).strip().lower() for t in raw_tags if t and str(t).strip()][:3]
                 update_type = str(op_dict.get("update_type") or "").strip().upper()
-                if update_type not in ("OVERRIDE", "SUPPLEMENT", "TEMPORAL", "NEGATE", "CONFLICT", ""):
+                if update_type not in _VALID_UPDATE_TYPES:
                     update_type = ""
+                supersedes_ids = [s for s in supersedes if s]
+                if update_type == "MERGE" and not supersedes_ids:
+                    update_type = "SUPPLEMENT"
                 temporal_scope = op_dict.get("temporal_scope")
                 if temporal_scope is not None and not isinstance(temporal_scope, str):
                     temporal_scope = str(temporal_scope)
@@ -410,7 +571,7 @@ class Reconciler:
                         op="ADD",
                         content=op_dict.get("content"),
                         layer=op_dict.get("layer"),
-                        supersedes=[s for s in supersedes if s],
+                        supersedes=supersedes_ids,
                         supersede_reason=str(op_dict.get("supersede_reason") or "").strip(),
                         tags=tags,
                         reason=op_reason,
@@ -424,6 +585,25 @@ class Reconciler:
                 if not mid:
                     continue
                 parsed.append(ReconcileOp(op="DELETE", memory_id=mid, reason=op_reason))
+            elif op_type == "SKIP":
+                mid = str(op_dict.get("memory_id") or op_dict.get("node_id") or "").strip()
+                raw_index = op_dict.get("new_index")
+                new_index = None
+                if raw_index is not None:
+                    try:
+                        new_index = int(raw_index)
+                    except (TypeError, ValueError):
+                        new_index = None
+                content = str(op_dict.get("content") or "").strip()
+                parsed.append(
+                    ReconcileOp(
+                        op="SKIP",
+                        memory_id=mid or None,
+                        content=content or None,
+                        new_index=new_index,
+                        reason=op_reason,
+                    )
+                )
 
         touched: dict = {}
         validated: list[ReconcileOp] = []

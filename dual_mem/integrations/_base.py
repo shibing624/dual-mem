@@ -19,13 +19,42 @@ import datetime
 import logging
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
-from dual_mem.client import MemoryClient
-from dual_mem.config import Settings
+from dual_mem.client import MemoryClient, strip_memory_injection
+from dual_mem.config import Settings, resolve_app_id
+from dual_mem.isolation import build_filter
+from dual_mem.retrieval.reader import Reader
 from dual_mem.sdk_models import MemoryItem
+from dual_mem.types import Layer, MemoryStatus
 
 logger = logging.getLogger("dual_mem.integrations")
+
+MEMORY_TOOLS_GUIDE = (
+    "<memory-tools-guide>\n"
+    "当上方记忆不足以回答时，可调用 memory_search 检索结构化记忆；\n"
+    "需要核对原话、时间或来源时，调用 conversation_search，"
+    "或按注入块里的来源 id 使用 memory 的 get。\n"
+    "每轮对话中，memory_search 与 conversation_search 合计最多调用 3 次。\n"
+    "若 3 次后仍无结果，说明该信息不在记忆中，请直接基于已有信息回复，不要继续搜索。\n"
+    "</memory-tools-guide>"
+)
+
+_SYSTEM_INTRO = (
+    "You have access to dual-mem — a persistent layered memory that "
+    "remembers user preferences, facts, and context across sessions. "
+    "Relevant memories are automatically provided before each response."
+)
+
+
+@dataclass
+class RenderedMemoryContext:
+    """Split injection: query-independent profile vs this-turn facts."""
+
+    stable_block: str
+    dynamic_block: str
+    total_chars: int
 
 
 class AsyncRunner:
@@ -114,6 +143,14 @@ def format_memories_for_prompt(
 
         if len(entry) > 800:
             entry = entry[:800].rstrip() + "..."
+        stamps = mem.merged_timestamps or []
+        if len(stamps) > 1:
+            start = _fmt_time(min(stamps))[:10]
+            end = _fmt_time(max(stamps))[:10]
+            if start and end:
+                entry = f"{entry}\n  (持续: {start} → {end})"
+        if mem.source_node_id:
+            entry = f"{entry}\n  (来源: L1 {mem.source_node_id[:8]})"
         if running + len(entry) > max_chars:
             break
         out.append(entry)
@@ -130,6 +167,71 @@ def format_memories_for_prompt(
         "from oldest to newest:\n"
         f"{body}\n"
         "</relevant-memories>"
+    )
+
+
+def format_profile_block(
+    items: Iterable[MemoryItem],
+    *,
+    max_chars: int = 2000,
+) -> str:
+    """Render query-independent L0 profile items, sorted by id for byte-stable output."""
+    rows = [
+        (mem.memory_id, (mem.content or "").strip())
+        for mem in items
+        if (mem.content or "").strip()
+    ]
+    if not rows:
+        return ""
+    rows.sort(key=lambda row: row[0])
+    out: list[str] = []
+    running = 0
+    for _, content in rows:
+        entry = f"- {content}"
+        if running + len(entry) > max_chars:
+            break
+        out.append(entry)
+        running += len(entry) + 1
+    if not out:
+        return ""
+    return (
+        "<user-profile>\n"
+        "Stable user profile (does not change with the current query):\n"
+        + "\n".join(out)
+        + "\n</user-profile>"
+    )
+
+
+def format_topic_catalog(
+    tags: Iterable[str],
+    schemas: Iterable[str] | None = None,
+    *,
+    max_chars: int = 800,
+) -> str:
+    """Query-independent topic / schema directory for the stable system tail."""
+    items = sorted({
+        str(item).strip()
+        for item in (*tags, *(schemas or ()))
+        if item and str(item).strip()
+    })
+    if not items:
+        return ""
+    out: list[str] = []
+    running = 0
+    for item in items:
+        entry = f"- {item}"
+        if running + len(entry) > max_chars:
+            break
+        out.append(entry)
+        running += len(entry) + 1
+    if not out:
+        return ""
+    return (
+        "<topic-catalog>\n"
+        "Known memory topics (does not change with the current query). "
+        "Use memory_search for facts, conversation_search for original quotes:\n"
+        + "\n".join(out)
+        + "\n</topic-catalog>"
     )
 
 
@@ -179,6 +281,50 @@ class MemoryBackend:
             memory_at=memory_at,
         )
 
+    async def add_raw(
+        self,
+        *,
+        user_id: str,
+        app_id: Optional[str] = None,
+        content: str = "",
+        messages: Optional[list] = None,
+        agent_id: str = "",
+        session_id: str = "",
+        memory_at: Optional[int] = None,
+    ) -> Any:
+        return await self.client.add_raw(
+            content=content,
+            messages=messages,
+            app_id=app_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            memory_at=memory_at,
+        )
+
+    async def distill(
+        self,
+        *,
+        user_id: str,
+        source_node_ids: list[str],
+        app_id: Optional[str] = None,
+        content: str = "",
+        messages: Optional[list] = None,
+        agent_id: str = "",
+        session_id: str = "",
+        memory_at: Optional[int] = None,
+    ) -> Any:
+        return await self.client.distill(
+            content=content,
+            messages=messages,
+            user_id=user_id,
+            source_node_ids=source_node_ids,
+            app_id=app_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            memory_at=memory_at,
+        )
+
     async def search(
         self,
         *,
@@ -207,6 +353,29 @@ class MemoryBackend:
             profile_min_score=profile_min_score,
             intention_limit=intention_limit,
             include_derived=include_derived,
+            created_after=created_after,
+        )
+
+    async def search_conversation(
+        self,
+        *,
+        query: str,
+        user_id: str,
+        app_ids: Optional[list[str]] = None,
+        agent_ids: Optional[list[str]] = None,
+        session_ids: Optional[list[str]] = None,
+        limit: int = 10,
+        min_score: float = 0.0,
+        created_after: Optional[int] = None,
+    ) -> Any:
+        return await self.client.search_conversation(
+            query=query,
+            app_ids=app_ids,
+            user_id=user_id,
+            agent_ids=agent_ids,
+            session_ids=session_ids,
+            limit=limit,
+            min_score=min_score,
             created_after=created_after,
         )
 
@@ -241,6 +410,81 @@ class MemoryBackend:
     async def aclose(self) -> None:
         await self.client.aclose()
 
+    async def load_profile_block(
+        self,
+        *,
+        user_id: str,
+        app_id: Optional[str] = None,
+        limit: int = 50,
+        max_chars: int = 2000,
+    ) -> str:
+        """List ACTIVE L0 profile nodes and a query-independent topic catalog."""
+        resolved = resolve_app_id(self.client.settings, app_id)
+        where = build_filter(
+            app_ids=[resolved],
+            user_id=user_id,
+            layers=[Layer.L0_BASIC_INFO],
+            statuses=[MemoryStatus.ACTIVE],
+        )
+        nodes = await asyncio.to_thread(self.client.factory.vector.get_many, where, limit)
+        fact_where = build_filter(
+            app_ids=[resolved],
+            user_id=user_id,
+            layers=[Layer.L2_FACT, Layer.L4_IDENTITY],
+            statuses=[MemoryStatus.ACTIVE],
+        )
+        fact_nodes = await asyncio.to_thread(
+            self.client.factory.vector.get_many, fact_where, 200,
+        )
+        tags = [tag for node in fact_nodes for tag in node.tags]
+        schemas: list[str] = []
+        graph = self.client.factory.graph
+        if graph is not None:
+            for schema in graph.list_by_layer(
+                layer=Layer.L6_SCHEMA.value,
+                user_id=user_id,
+                app_ids=[resolved],
+                limit=40,
+            ):
+                title = (schema.content or "").strip().splitlines()[0][:40]
+                if title:
+                    schemas.append(title)
+        parts = [
+            format_profile_block(
+                [Reader.memory_node_to_item(node) for node in nodes],
+                max_chars=max_chars,
+            ),
+            format_topic_catalog(tags, schemas),
+        ]
+        return "\n\n".join(part for part in parts if part)
+
+    async def render_split_context(
+        self,
+        *,
+        query: str,
+        user_id: str,
+        app_ids: Optional[list[str]] = None,
+        agent_ids: Optional[list[str]] = None,
+        limit: int = 10,
+        max_chars: int = 2000,
+        **kwargs: Any,
+    ) -> RenderedMemoryContext:
+        """Stable L0 dump + this-turn normal-route facts."""
+        app_id = app_ids[0] if app_ids else None
+        stable = await self.load_profile_block(
+            user_id=user_id, app_id=app_id, max_chars=max_chars,
+        )
+        result = await self.search(
+            query=query, user_id=user_id, app_ids=app_ids,
+            agent_ids=agent_ids, limit=limit, **kwargs,
+        )
+        dynamic = format_memories_for_prompt(result.memories.normal, max_chars=max_chars)
+        return RenderedMemoryContext(
+            stable_block=stable,
+            dynamic_block=dynamic,
+            total_chars=len(stable) + len(dynamic),
+        )
+
     async def render_context(
         self,
         *,
@@ -274,6 +518,10 @@ class _SyncMemoryProvider:
     """
 
     name: str = "dual-mem"
+    _max_prefetch_timeout_ms: int = 3000
+    _max_search_calls_per_turn: int = 3
+    _search_calls_this_turn: int = 0
+    _stable_profile: str = ""
 
     def __init__(
         self,
@@ -282,7 +530,10 @@ class _SyncMemoryProvider:
         storage_dir: Optional[str] = None,
         mode: Optional[str] = None,
         write_turn_window: int = 5,
+        idle_timeout_sec: float = 30.0,
         max_prefetch_chars: int = 2000,
+        max_prefetch_timeout_ms: int = 3000,
+        max_search_calls_per_turn: int = 3,
         agent_id: str = "",
         user_id: str = "",
         **client_kwargs: Any,
@@ -295,7 +546,14 @@ class _SyncMemoryProvider:
         self._agent_id = agent_id or "dual-mem"
         self._session_id = "default_session"
         self._write_turn_window = max(1, int(write_turn_window))
+        self._idle_timeout_sec = float(idle_timeout_sec)
+        self._idle_timers: dict[str, threading.Timer] = {}
+        self._l1_ids: dict[str, list[str]] = {}
         self._max_prefetch_chars = max(200, int(max_prefetch_chars))
+        self._max_prefetch_timeout_ms = max(1, int(max_prefetch_timeout_ms))
+        self._max_search_calls_per_turn = max(1, int(max_search_calls_per_turn))
+        self._search_calls_this_turn = 0
+        self._stable_profile = ""
         self._initialized = False
         self._lock = threading.RLock()
         self._executor: Optional[ThreadPoolExecutor] = None
@@ -325,23 +583,33 @@ class _SyncMemoryProvider:
             self._executor = ThreadPoolExecutor(
                 max_workers=2, thread_name_prefix="dual-mem-sync"
             )
+            if self._user_id:
+                self._stable_profile = self._runner.run(
+                    self._backend.load_profile_block(user_id=self._user_id)
+                )
             self._initialized = True
 
     # ---- 上下文注入（被动） ----------------------------------------------
     def prefetch(self, query: str, **kwargs: Any) -> str:
+        self._search_calls_this_turn = 0
         if not self._backend or not self._runner or not query:
             return ""
         q = query.strip()
         if not q:
             return ""
-        try:
-            result = self._runner.run(
+
+        async def _timed_search():
+            return await asyncio.wait_for(
                 self._backend.search(
                     query=q, user_id=self._user_id,
                     agent_ids=[self._agent_id], limit=10,
-                )
+                ),
+                timeout=self._max_prefetch_timeout_ms / 1000.0,
             )
-            items = result.memories.flatten(limit=10)
+
+        try:
+            result = self._runner.run(_timed_search())
+            items = result.memories.normal
             if not items:
                 return ""
             return format_memories_for_prompt(items, max_chars=self._max_prefetch_chars)
@@ -353,62 +621,86 @@ class _SyncMemoryProvider:
         return
 
     def system_prompt_block(self) -> str:
-        return (
-            "You have access to dual-mem — a persistent layered memory that "
-            "remembers user preferences, facts, and context across sessions. "
-            "Relevant memories are automatically provided before each response."
-        )
+        parts = [_SYSTEM_INTRO, MEMORY_TOOLS_GUIDE]
+        if self._stable_profile:
+            parts.append(self._stable_profile)
+        return "\n\n".join(parts)
 
     # ---- 写入节流（sync_turn） -------------------------------------------
     def sync_turn(self, user_message: str, assistant_response: str, **kwargs: Any) -> None:
-        if not self._backend or not self._executor or not user_message:
+        if not self._backend or not self._runner or not user_message:
+            return
+        cleaned = strip_memory_injection(user_message)
+        if not cleaned:
             return
         session_id = kwargs.get("session_id") or self._session_id or "default_session"
-        with self._buffer_lock:
-            buf = self._turn_buffer.setdefault(session_id, [])
-            buf.append({"role": "user", "content": user_message})
-            buf.append({"role": "assistant", "content": assistant_response or ""})
-            turns = sum(1 for m in buf if m["role"] == "user")
-            if turns < self._write_turn_window:
-                return
-            batch = buf[:]
-            self._turn_buffer[session_id] = []
-        self._submit_write(batch, session_id)
-
-    def _submit_write(self, messages: list[dict], session_id: str) -> None:
-        if not messages or self._executor is None:
-            return
+        turn = [
+            {"role": "user", "content": cleaned},
+            {"role": "assistant", "content": assistant_response or ""},
+        ]
         try:
-            fut = self._executor.submit(self._do_sync_turn, messages, session_id)
-        except RuntimeError:
-            return
-        self._inflight.append(fut)
-        self._inflight = [f for f in self._inflight if not f.done()]
-
-    def _flush_session_buffer(self, session_id: Optional[str] = None) -> None:
-        with self._buffer_lock:
-            if session_id is None:
-                pending = [(sid, msgs[:]) for sid, msgs in self._turn_buffer.items() if msgs]
-                self._turn_buffer.clear()
-            else:
-                msgs = self._turn_buffer.get(session_id) or []
-                pending = [(session_id, msgs[:])] if msgs else []
-                if session_id in self._turn_buffer:
-                    self._turn_buffer[session_id] = []
-        for sid, msgs in pending:
-            self._submit_write(msgs, sid)
-
-    def _do_sync_turn(self, messages: list[dict], session_id: str) -> None:
-        assert self._backend is not None and self._runner is not None
-        try:
-            self._runner.run(
-                self._backend.add(
-                    messages=messages, user_id=self._user_id,
+            raw = self._runner.run(
+                self._backend.add_raw(
+                    messages=turn, user_id=self._user_id,
                     agent_id=self._agent_id, session_id=session_id,
                 )
             )
         except Exception as exc:
-            logger.warning("[%s] sync_turn failed: %s", self.name, exc)
+            logger.warning("[%s] add_raw failed: %s", self.name, exc)
+            return
+        with self._buffer_lock:
+            buf = self._turn_buffer.setdefault(session_id, [])
+            buf.extend(turn)
+            if raw.memory_id:
+                self._l1_ids.setdefault(session_id, []).append(raw.memory_id)
+            turns = sum(1 for m in buf if m["role"] == "user")
+            ready = turns >= self._write_turn_window
+        self._arm_idle(session_id)
+        if ready:
+            self._idle_flush(session_id)
+
+    def _arm_idle(self, session_id: str) -> None:
+        self._cancel_idle(session_id)
+        if self._idle_timeout_sec <= 0:
+            return
+        timer = threading.Timer(self._idle_timeout_sec, self._idle_flush, args=(session_id,))
+        timer.daemon = True
+        timer.start()
+        self._idle_timers[session_id] = timer
+
+    def _cancel_idle(self, session_id: str) -> None:
+        timer = self._idle_timers.pop(session_id, None)
+        if timer is not None:
+            timer.cancel()
+
+    def _idle_flush(self, session_id: str) -> None:
+        self._cancel_idle(session_id)
+        with self._buffer_lock:
+            msgs = self._turn_buffer.get(session_id) or []
+            l1_ids = list(self._l1_ids.get(session_id) or [])
+            self._turn_buffer[session_id] = []
+            self._l1_ids[session_id] = []
+        if not msgs or not self._backend or not self._runner:
+            return
+        try:
+            self._runner.run(
+                self._backend.distill(
+                    messages=msgs, user_id=self._user_id,
+                    source_node_ids=l1_ids,
+                    agent_id=self._agent_id, session_id=session_id,
+                )
+            )
+        except Exception as exc:
+            logger.warning("[%s] distill failed: %s", self.name, exc)
+
+    def _flush_session_buffer(self, session_id: Optional[str] = None) -> None:
+        if session_id is None:
+            with self._buffer_lock:
+                sids = [sid for sid, msgs in self._turn_buffer.items() if msgs]
+        else:
+            sids = [session_id]
+        for sid in sids:
+            self._idle_flush(sid)
 
     # ---- 会话结束 / 压缩前 ----------------------------------------------
     def on_session_end(self, messages: list[dict], **kwargs: Any) -> None:
@@ -441,6 +733,21 @@ class _SyncMemoryProvider:
             {
                 "name": "memory_search",
                 "description": "Search stored memories for relevant context.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "limit": {"type": "integer", "description": "Max results (default 10)"},
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "conversation_search",
+                "description": (
+                    "Search original conversation text (L1_RAW) to verify quotes, "
+                    "time, or source. Do not use for default fact recall."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -492,9 +799,20 @@ class _SyncMemoryProvider:
         if not self._backend or not self._runner:
             return {"error": "Provider not initialized"}
         try:
-            if name == "memory_search":
+            if name in ("memory_search", "conversation_search"):
+                if self._search_calls_this_turn >= self._max_search_calls_per_turn:
+                    return {
+                        "status": "limit_reached",
+                        "hint": "已达本轮检索上限，请基于已有记忆回答",
+                    }
+                self._search_calls_this_turn += 1
+                search = (
+                    self._backend.search_conversation
+                    if name == "conversation_search"
+                    else self._backend.search
+                )
                 result = self._runner.run(
-                    self._backend.search(
+                    search(
                         query=args.get("query", ""), user_id=self._user_id,
                         agent_ids=[self._agent_id], limit=int(args.get("limit") or 10),
                     )
@@ -545,6 +863,8 @@ class _SyncMemoryProvider:
     # ---- 关闭 ------------------------------------------------------------
     def shutdown(self) -> None:
         with self._lock:
+            for sid in list(self._idle_timers):
+                self._cancel_idle(sid)
             self._flush_session_buffer(None)
             self._wait_inflight()
             if self._executor is not None:

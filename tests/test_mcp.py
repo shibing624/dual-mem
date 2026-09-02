@@ -36,6 +36,7 @@ async def test_tools_registered(mcp):
     assert names == {
         "memory_add",
         "memory_search",
+        "conversation_search",
         "memory_list",
         "memory_get",
         "memory_update",

@@ -1,5 +1,6 @@
 import asyncio
 
+from dual_mem import MemoryClient
 from dual_mem.agent.mem_agent import MemAgent
 from dual_mem.config import Settings
 from dual_mem.registry import ComponentFactory
@@ -245,3 +246,32 @@ async def test_fast_write_batches_l0_with_l2_l4(tmp_storage, fake_embed):
     assert len(stored_ids) == 3
     layers = {factory.vector.get(node_id).layer for node_id in stored_ids}
     assert layers == {Layer.L4_IDENTITY, Layer.L2_FACT, Layer.L0_BASIC_INFO}
+
+
+async def test_dual_fast_write_stamps_source_node_id(tmp_storage, fake_embed):
+    client = MemoryClient(
+        settings=Settings(
+            mode="dual",
+            storage_dir=tmp_storage,
+            reconcile_skip_llm=True,
+        ),
+        embed=fake_embed,
+        llm=FakeLLMClient(responses={"extract": EXTRACT_RESPONSE}),
+    )
+    result = await client.add(
+        content="我昨天去了北京，喜欢喝咖啡",
+        app_id="app",
+        user_id="u",
+    )
+    l1 = client.factory.vector.get(result.memory_id)
+    assert l1 is not None
+    assert l1.layer is Layer.L1_RAW
+    derived = [
+        client.factory.vector.get(nid)
+        for nid in result.extra_node_ids
+        if client.factory.vector.get(nid) is not None
+    ]
+    l2l4 = [n for n in derived if n.layer in (Layer.L2_FACT, Layer.L4_IDENTITY)]
+    assert l2l4
+    assert all((n.custom or {}).get("source_node_id") == l1.node_id for n in l2l4)
+    await client.aclose()

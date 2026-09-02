@@ -88,6 +88,24 @@ def build_mcp(
             include_derived=include_derived,
         )
 
+    @mcp.tool(description="检索 L1 原文（含提取后 SHADOW），用于核对原话/时间/来源。")
+    async def conversation_search(
+        query: str,
+        user_id: str,
+        app_ids: list[str] | None = None,
+        agent_ids: list[str] | None = None,
+        limit: int = 10,
+        min_score: float = 0.0,
+    ) -> dict:
+        return await ops.conversation_search(
+            query=query,
+            user_id=user_id,
+            app_ids=app_ids,
+            agent_ids=agent_ids,
+            limit=limit,
+            min_score=min_score,
+        )
+
     @mcp.tool(description="列出某 scope 下 ACTIVE 记忆。")
     async def memory_list(
         user_id: str,

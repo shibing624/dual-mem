@@ -36,7 +36,7 @@ def _make_factory(tmp_storage, fake_embed, *, non_destructive: bool):
     # makes the worker's content-coverage check match the fast-write original, which under
     # the destructive path triggers _shadow_covered_originals.
     def _echo(*, system, user):
-        content = user.split(". ", 1)[-1].strip()
+        content = user.split(". ", 1)[-1].split("\n", 1)[0].strip()
         return [{"op": "ADD", "content": content, "layer": "L2_FACT"}]
 
     llm = FakeLLMClient(responses={"reconcile": _echo})

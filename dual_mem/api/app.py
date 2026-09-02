@@ -17,6 +17,7 @@ from dual_mem.api.schemas import (
     AddRequest,
     AddResponse,
     CapabilitiesResponse,
+    ConversationSearchRequest,
     DeleteBulkResponse,
     DeleteResponse,
     DigestResponse,
@@ -155,6 +156,29 @@ def create_app(
             include_derived=body.include_derived,
             created_after=body.created_after,
             debug=body.debug,
+        )
+
+    @app.post(
+        "/v1/memories/search_conversation",
+        response_model=SearchResponse,
+        dependencies=[Depends(_verify_bearer)],
+    )
+    async def conversation_search(
+        body: ConversationSearchRequest,
+        settings: Settings = Depends(_get_settings),
+        ops: MemoryOperations = Depends(_get_ops),
+    ):
+        resolved_app_ids = resolve_app_ids(settings, body.app_ids)
+        _check_whitelist(settings, resolved_app_ids)
+        return await ops.conversation_search(
+            query=body.query,
+            app_ids=resolved_app_ids,
+            user_id=body.user_id,
+            agent_ids=body.agent_ids,
+            session_ids=body.session_ids,
+            limit=body.limit,
+            min_score=body.min_score,
+            created_after=body.created_after,
         )
 
     # ── memory_list ───────────────────────────────────────────────────────────

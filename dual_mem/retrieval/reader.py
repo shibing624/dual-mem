@@ -3,12 +3,14 @@
 @author:XuMing(xuming624@qq.com)
 @description: Async reader backed by the single hybrid retrieval pipeline.
 """
+import asyncio
 import time
 
+from dual_mem.isolation import build_filter
 from dual_mem.registry import ComponentFactory
 from dual_mem.retrieval.hybrid_engine import search_hybrid
 from dual_mem.sdk_models import MemoryItem, ReadResult, SearchMemories
-from dual_mem.types import MemoryNode
+from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
 class Reader:
     """Embed a query, run hybrid recall, and return grouped memory items."""
@@ -83,9 +85,60 @@ class Reader:
         )
         return memories, trace
 
+    async def search_conversation(
+        self,
+        *,
+        query: str,
+        app_ids: list[str],
+        user_id: str,
+        agent_ids: list[str] | None = None,
+        session_ids: list[str] | None = None,
+        limit: int = 10,
+        min_score: float = 0.0,
+        created_after: int | None = None,
+    ) -> SearchMemories:
+        """Recall L1_RAW (ACTIVE + SHADOW) as evidence. Never mixed into default search."""
+        query_embedding = await self.factory.embed.embed(query)
+        where = build_filter(
+            app_ids=app_ids,
+            user_id=user_id,
+            agent_ids=agent_ids,
+            session_ids=session_ids,
+            layers=[Layer.L1_RAW],
+            statuses=[MemoryStatus.ACTIVE, MemoryStatus.SHADOW],
+            created_after=created_after,
+        )
+        top_k = max(limit, 10)
+        nodes = await asyncio.to_thread(
+            self.factory.vector.query,
+            embedding=query_embedding,
+            where=where,
+            top_k=top_k,
+        )
+        items: list[MemoryItem] = []
+        for node in nodes:
+            if min_score > 0 and node.score < min_score:
+                continue
+            items.append(self.memory_node_to_item(node))
+            if len(items) >= limit:
+                break
+        return SearchMemories(normal=items)
+
     @staticmethod
     def memory_node_to_item(node: MemoryNode) -> MemoryItem:
         """Convert a stored node used by get/list into the public memory model."""
+        raw_ts = (node.custom or {}).get("merged_timestamps")
+        merged_timestamps = (
+            [int(x) for x in raw_ts if isinstance(x, (int, float))]
+            if isinstance(raw_ts, list) and raw_ts
+            else None
+        )
+        update_type = (node.custom or {}).get("update_type") or None
+        if update_type is not None:
+            update_type = str(update_type)
+        source_node_id = (node.custom or {}).get("source_node_id") or None
+        if source_node_id is not None:
+            source_node_id = str(source_node_id)
         return MemoryItem(
             memory_id=node.node_id,
             content=node.content,
@@ -96,4 +149,7 @@ class Reader:
             memory_at=node.memory_at,
             gmt_created=node.gmt_created,
             gmt_modified=node.gmt_modified,
+            merged_timestamps=merged_timestamps,
+            update_type=update_type,
+            source_node_id=source_node_id,
         )

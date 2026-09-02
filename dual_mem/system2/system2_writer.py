@@ -64,6 +64,63 @@ class System2Writer:
             )
         return result
 
+    async def write_raw(
+        self,
+        *,
+        content: str,
+        app_id: str,
+        user_id: str,
+        agent_id: str,
+        session_id: str,
+        memory_at: int | None = None,
+    ) -> WriterOutcome:
+        return await self.inner.write_raw(
+            content=content,
+            app_id=app_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            memory_at=memory_at,
+        )
+
+    async def distill(
+        self,
+        *,
+        content: str,
+        app_id: str,
+        user_id: str,
+        agent_id: str,
+        session_id: str,
+        request_id: str,
+        source_node_ids: list[str],
+        memory_at: int | None = None,
+        messages=None,
+    ) -> WriterOutcome:
+        result = await self.inner.distill(
+            content=content,
+            app_id=app_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            request_id=request_id,
+            source_node_ids=source_node_ids,
+            memory_at=memory_at,
+            messages=messages,
+        )
+        has_new_facts = False
+        for node_id in result.extra_node_ids:
+            node = self.factory.vector.get(node_id)
+            if node is not None and node.layer in (Layer.L2_FACT, Layer.L4_IDENTITY):
+                has_new_facts = True
+                break
+        if has_new_facts:
+            self.factory.cache.enqueue_s2_task(
+                user_id=user_id,
+                app_id=app_id,
+                agent_id=agent_id,
+            )
+        return result
+
     async def digest_pending(self) -> int:
         """Drain pending cognition scopes and return the number of scopes processed."""
         self.last_digest_stats = {

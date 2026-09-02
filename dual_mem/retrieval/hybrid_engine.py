@@ -76,6 +76,18 @@ def _item_to_memory(item: dict) -> MemoryItem:
         if chain
         else None
     )
+    raw_ts = (node.custom or {}).get("merged_timestamps")
+    merged_timestamps = (
+        [int(x) for x in raw_ts if isinstance(x, (int, float))]
+        if isinstance(raw_ts, list) and raw_ts
+        else None
+    )
+    update_type = (node.custom or {}).get("update_type") or None
+    if update_type is not None:
+        update_type = str(update_type)
+    source_node_id = (node.custom or {}).get("source_node_id") or None
+    if source_node_id is not None:
+        source_node_id = str(source_node_id)
     return MemoryItem(
         memory_id=node.node_id,
         content=node.content,
@@ -87,6 +99,9 @@ def _item_to_memory(item: dict) -> MemoryItem:
         gmt_created=node.gmt_created,
         gmt_modified=node.gmt_modified,
         evolution_chain=evolution_chain,
+        merged_timestamps=merged_timestamps,
+        update_type=update_type,
+        source_node_id=source_node_id,
     )
 
 

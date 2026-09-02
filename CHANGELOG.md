@@ -18,6 +18,32 @@ Benchmark 专用覆盖见 `exp/dual_mem_exp/benchmarks/backends/dual_mem.py`（�
 
 > 当前 `__version__` 仍为 `0.1.2`；下列变更已在 `main`，尚未发版。
 
+### 写入：Provider 先落 L1；读侧挂来源 id
+
+- **`add_raw` / `distill`**：`add_raw` 只写 L1（embed，不 extract）。`distill` 对已有 L1 跑 extract，成功后 SHADOW 源 L1，不再写第二条 L1。`add()` 契约不变。
+- **Hermes/OpenClaw `sync_turn`**：每轮先 `add_raw`；满 `write_turn_window`（默认 5）、闲置 `idle_timeout_sec`（默认 30s）、或 `on_session_end` / `shutdown` 再 `distill`。第 1 轮原话即可 `search_conversation`。
+- **`MemoryItem.source_node_id`**：从 `custom` 带出。`format_memories` / `format_memories_for_prompt` 渲染 `(来源: L1 <8 位>)`。`get(L1 id)` 仍可读 SHADOW 原文。
+- **效果**：宿主短会话不会等满 5 轮才有原文；模型能从 fact 跳回 L1。
+- **回退**：`write_turn_window=1` 恢复每轮 extract；`idle_timeout_sec=0` 关闲置。
+
+### 写入：注入隔离、SKIP 收回、原文检索、主题目录
+
+- **回写剥离注入块**：`strip_memory_injection` 在 `client.add` 去掉 `<relevant-memories>` / `<user-profile>` / `<memory-tools-guide>` / `<topic-catalog>`。只剩注入块的 turn 不写 L1。避免 prefetch 被再抽成新记忆。
+- **空 updates = SKIP**：reconcile LLM 明确输出 `{"updates": []}` 或 `[]` 时，整批新记忆视为无增量。dual 路径把对应 fast-write 标 `SHADOW`；解析失败仍 fail-open（空 ops，不收回）。`non_destructive` 不收回。也可显式 `op=SKIP`（`memory_id` / `new_index`）。
+- **`search_conversation`**：只搜 L1_RAW（含提取后 SHADOW），不混进默认 QA `search`。REST `/v1/memories/search_conversation`、MCP/CLI/`conversation_search` 工具。与 `memory_search` 共享每轮 3 次上限。
+- **稳定主题目录**：`load_profile_block` 在 L0 后追加 `<topic-catalog>`（ACTIVE L2/L4 tags + L6 标题，排序、与 query 无关）。
+- **效果**：记忆不再自我增殖；重复 fast-write 可被收回；模型能核原话；system 尾部有可缓存的主题索引。
+- **回退**：无开关。默认 `search` 仍不召回 L1。
+
+### 写入：`update_type=MERGE` + 血缘 / 注入拆分
+
+- **互补合并不再靠 prompt**：`fold_absorb_deletes` 把旧 Objective 2 的 `ADD + DELETE` 收成 `MERGE` + `supersedes` 链（旧节点 `SUPERSEDED`，不是 `SHADOW`）。`conservative` / `non_destructive` 不走这条改写。读侧 MERGE 链默认展开为 `(folded, still valid)`；OVERRIDE 仍隐藏旧值。
+- **仅 MERGE** 写入 `custom.merged_timestamps`（新旧 `memory_at` 并集）。`format_memories` 在长度 > 1 时渲染 `(持续: YYYY-MM-DD → YYYY-MM-DD)`；OVERRIDE 替换链不画「持续」，避免把 Java→Python 说成从 Java 年代开始用 Python。
+- **dual fast-write** 给 L2/L4 打 `custom.source_node_id`（指向源 L1）；System1 reconcile 路径原本已有。
+- **integrations**：`load_profile_block` / `format_profile_block` 按 L0 list（与 query 无关）；`prefetch` 只注入 `memories.normal`。`system_prompt_block` 追加 Provider 内工具指南 + 缓存的 profile。`prefetch` 默认 3000ms 超时；`memory_search` 每轮最多 3 次，超限返回 `limit_reached`。
+- **效果**：互补合并可沿演化链回溯；prefix cache 只在宿主把 `system_prompt_block` 放 system、`prefetch` 放 user 时生效。
+- **回退**：prompt / `update_type` 无开关；`non_destructive` 仍剥离全部 `supersedes`（含 MERGE）。
+
 ### 新增：原生生态集成层（`dual_mem.integrations`）
 
 - 新增 `dual_mem.integrations` 包，把 `MemoryClient` 适配到 5 个生态后端：`mcp`、`hermes`、`openclaw`、`agentica`、`claude_code`。

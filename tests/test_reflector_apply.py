@@ -6,7 +6,7 @@ ContextAssembly / 上层 prompt）依赖这些字段做消歧展示。
 """
 import pytest
 
-from dual_mem.agent.reconciler import ReconcileOp
+from dual_mem.agent.reconciler import ReconcileOp, Reconciler, fold_absorb_deletes
 from dual_mem.config import Settings
 from dual_mem.registry import ComponentFactory
 from dual_mem.system2.reconciler_worker import ReconcilerWorker
@@ -142,6 +142,182 @@ async def test_apply_conflict_keeps_both_no_supersede(worker_factory):
     old = worker_factory.vector.get("claim1")
     assert old.is_latest is True
     assert old.status is MemoryStatus.ACTIVE
+
+
+async def test_apply_folded_objective2_supersedes_instead_of_shadow(worker_factory):
+    """ADD+DELETE 吸收经 fold 后走 SUPERSEDED 链，旧节点不是 SHADOW。"""
+    _seed_existing(worker_factory, "old_pay", "用户在 A 公司做支付", Layer.L2_FACT)
+    old = worker_factory.vector.get("old_pay")
+    old.memory_at = 1_600_000_000
+    worker_factory.vector.upsert([old])
+
+    ops = fold_absorb_deletes([
+        ReconcileOp(
+            op="ADD",
+            content="用户在 A 公司负责支付与风控",
+            layer="L2_FACT",
+            supersedes=[],
+            tags=["工作"],
+            update_type="SUPPLEMENT",
+        ),
+        ReconcileOp(op="DELETE", memory_id="old_pay"),
+    ])
+    worker = ReconcilerWorker(factory=worker_factory)
+    await worker._apply_ops(
+        ops,
+        app_id="app",
+        user_id="u",
+        agent_id="",
+        session_id="s1",
+        fallback_memory_at=1_700_000_000,
+    )
+    old = worker_factory.vector.get("old_pay")
+    assert old.status is MemoryStatus.SUPERSEDED
+    assert old.status is not MemoryStatus.SHADOW
+    assert old.is_latest is False
+    heads = [
+        n for n in worker_factory.vector.get_many(
+            {"$and": [{"app_id": "app"}, {"user_id": "u"}, {"status": "ACTIVE"}]},
+            limit=10,
+        )
+        if "风控" in n.content
+    ]
+    assert heads
+    assert (heads[0].custom or {}).get("update_type") == "MERGE"
+    assert old.node_id in heads[0].supersedes
+
+
+async def test_apply_merge_writes_merged_timestamps(worker_factory):
+    """MERGE 才累积 custom.merged_timestamps；旧节点 SUPERSEDED 可回溯。"""
+    old_ts = 1_600_000_000
+    _seed_existing(worker_factory, "old_pay", "用户在 A 公司做支付", Layer.L2_FACT)
+    old = worker_factory.vector.get("old_pay")
+    old.memory_at = old_ts
+    worker_factory.vector.upsert([old])
+
+    new_ts = 1_700_000_000
+    op = ReconcileOp(
+        op="ADD",
+        content="用户在 A 公司负责支付与风控",
+        layer="L2_FACT",
+        supersedes=["old_pay"],
+        tags=["工作"],
+        update_type="MERGE",
+    )
+    worker = ReconcilerWorker(factory=worker_factory)
+    await worker._apply_ops(
+        [op],
+        app_id="app",
+        user_id="u",
+        agent_id="",
+        session_id="s1",
+        fallback_memory_at=new_ts,
+    )
+    nodes = worker_factory.vector.get_many({"$and": [
+        {"app_id": "app"}, {"user_id": "u"}, {"status": "ACTIVE"}
+    ]}, limit=10)
+    merged = [n for n in nodes if "风控" in n.content]
+    assert merged
+    stamps = (merged[0].custom or {}).get("merged_timestamps")
+    assert stamps == [old_ts, new_ts]
+    assert (merged[0].custom or {}).get("update_type") == "MERGE"
+    old = worker_factory.vector.get("old_pay")
+    assert old.status is MemoryStatus.SUPERSEDED
+    assert old.is_latest is False
+
+
+async def test_apply_merge_inherits_source_node_id(worker_factory):
+    _seed_existing(worker_factory, "old_pay", "用户在 A 公司做支付", Layer.L2_FACT)
+    op = ReconcileOp(
+        op="ADD",
+        content="用户在 A 公司负责支付与风控",
+        layer="L2_FACT",
+        supersedes=["old_pay"],
+        tags=["工作"],
+        update_type="MERGE",
+    )
+    worker = ReconcilerWorker(factory=worker_factory)
+    await worker._apply_ops(
+        [op],
+        app_id="app",
+        user_id="u",
+        agent_id="",
+        session_id="s1",
+        source_node_id="l1-raw",
+    )
+    nodes = worker_factory.vector.get_many({"$and": [
+        {"app_id": "app"}, {"user_id": "u"}, {"status": "ACTIVE"}
+    ]}, limit=10)
+    merged = [n for n in nodes if "风控" in n.content]
+    assert merged
+    assert (merged[0].custom or {}).get("source_node_id") == "l1-raw"
+
+
+async def test_apply_override_does_not_write_merged_timestamps(worker_factory):
+    """OVERRIDE 不得写 merged_timestamps，避免替换链画出虚假『持续』区间。"""
+    _seed_existing(worker_factory, "old_java", "用户主力语言是 Java", Layer.L4_IDENTITY)
+    old = worker_factory.vector.get("old_java")
+    old.memory_at = 1_600_000_000
+    worker_factory.vector.upsert([old])
+
+    op = ReconcileOp(
+        op="ADD",
+        content="用户主力语言是 Python",
+        layer="L4_IDENTITY",
+        supersedes=["old_java"],
+        tags=["lang"],
+        update_type="OVERRIDE",
+    )
+    worker = ReconcilerWorker(factory=worker_factory)
+    await worker._apply_ops(
+        [op],
+        app_id="app",
+        user_id="u",
+        agent_id="",
+        session_id="s1",
+        fallback_memory_at=1_700_000_000,
+    )
+    nodes = worker_factory.vector.get_many({"$and": [
+        {"app_id": "app"}, {"user_id": "u"}, {"status": "ACTIVE"}
+    ]}, limit=10)
+    heads = [n for n in nodes if "Python" in n.content]
+    assert heads
+    assert "merged_timestamps" not in (heads[0].custom or {})
+
+
+async def test_empty_updates_skip_all_retracts_fast_write(worker_factory, fake_embed):
+    """LLM 明确空 updates = 无增量，必须收回 fast-write，不能让重复节点继续 ACTIVE。"""
+    existing = MemoryNode(
+        content="用户喜欢喝美式咖啡",
+        layer=Layer.L2_FACT,
+        app_id="app",
+        user_id="u",
+        status=MemoryStatus.ACTIVE,
+        is_latest=True,
+        node_id="existing",
+    )
+    existing.embedding = fake_embed.embed_sync(existing.content)
+    worker_factory.vector.upsert([existing])
+    _seed_existing(worker_factory, "fw_dup", "用户喜欢喝美式咖啡", Layer.L2_FACT)
+
+    worker_factory.settings.reconcile_weak_candidate_score = 0.0
+    llm = FakeLLMClient(responses={"reconcile": {"updates": []}})
+    worker = ReconcilerWorker(factory=worker_factory)
+    worker.reconciler = Reconciler(
+        llm=llm,
+        embed=fake_embed,
+        vector=worker_factory.vector,
+        weak_candidate_score=0.0,
+    )
+    worker_factory.cache.enqueue_reconcile_task(
+        app_id="app", user_id="u", agent_id="", node_ids=["fw_dup"],
+    )
+    await worker.reconcile_pending(app_id="app", user_id="u", agent_id="")
+    fw = worker_factory.vector.get("fw_dup")
+    assert fw.status is MemoryStatus.SHADOW
+    assert fw.is_latest is False
+    kept = worker_factory.vector.get("existing")
+    assert kept.status is MemoryStatus.ACTIVE
 
 
 async def test_apply_supplement_no_metadata_pollution(worker_factory):

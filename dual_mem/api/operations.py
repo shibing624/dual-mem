@@ -70,6 +70,30 @@ class MemoryOperations:
         )
         return result.to_dict()
 
+    async def conversation_search(
+        self,
+        *,
+        query: str,
+        user_id: str,
+        app_ids: list[str] | None = None,
+        agent_ids: list[str] | None = None,
+        session_ids: list[str] | None = None,
+        limit: int = 10,
+        min_score: float = 0.0,
+        created_after: int | None = None,
+    ) -> dict:
+        result = await self.client.search_conversation(
+            query=query,
+            app_ids=app_ids,
+            user_id=user_id,
+            agent_ids=agent_ids,
+            session_ids=session_ids,
+            limit=limit,
+            min_score=min_score,
+            created_after=created_after,
+        )
+        return result.to_dict()
+
     async def memory_list(
         self,
         *,

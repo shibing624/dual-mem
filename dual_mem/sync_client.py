@@ -145,6 +145,54 @@ class SyncMemoryClient:
             )
         )
 
+    def add_raw(
+        self,
+        *,
+        content: str = "",
+        messages: list[dict] | list[ChatMessage] | None = None,
+        app_id: str | None = None,
+        user_id: str,
+        agent_id: str = "",
+        session_id: str = "",
+        memory_at: int | None = None,
+    ) -> WriteResult:
+        return self._run(
+            self._client.add_raw(
+                content=content,
+                messages=messages,
+                app_id=app_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                session_id=session_id,
+                memory_at=memory_at,
+            )
+        )
+
+    def distill(
+        self,
+        *,
+        content: str = "",
+        messages: list[dict] | list[ChatMessage] | None = None,
+        user_id: str,
+        source_node_ids: list[str],
+        app_id: str | None = None,
+        agent_id: str = "",
+        session_id: str = "",
+        memory_at: int | None = None,
+    ) -> WriteResult:
+        return self._run(
+            self._client.distill(
+                content=content,
+                messages=messages,
+                user_id=user_id,
+                source_node_ids=source_node_ids,
+                app_id=app_id,
+                agent_id=agent_id,
+                session_id=session_id,
+                memory_at=memory_at,
+            )
+        )
+
     def search(
         self,
         *,
@@ -181,6 +229,33 @@ class SyncMemoryClient:
                 request_id=request_id,
                 debug=debug,
                 include_l6_fusion=include_l6_fusion,
+            )
+        )
+
+    def search_conversation(
+        self,
+        *,
+        query: str,
+        app_ids: list[str] | None = None,
+        user_id: str,
+        agent_ids: list[str] | None = None,
+        session_ids: list[str] | None = None,
+        limit: int = 10,
+        min_score: float = 0.0,
+        created_after: int | None = None,
+        request_id: str | None = None,
+    ) -> SearchResult:
+        return self._run(
+            self._client.search_conversation(
+                query=query,
+                app_ids=app_ids,
+                user_id=user_id,
+                agent_ids=agent_ids,
+                session_ids=session_ids,
+                limit=limit,
+                min_score=min_score,
+                created_after=created_after,
+                request_id=request_id,
             )
         )
 

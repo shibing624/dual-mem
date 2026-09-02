@@ -43,10 +43,27 @@ def _format_item(
     mem_date = format_memory_timestamp(item.get("memory_at") or item.get("gmt_created"))
     date_suffix = f" (conversation date: {mem_date})" if mem_date else ""
     lines = [f"- [{item['category']}] {content}{date_suffix}"]
+    merged_ts = item.get("merged_timestamps") or []
+    if isinstance(merged_ts, list) and len(merged_ts) > 1:
+        start = format_memory_timestamp(min(int(x) for x in merged_ts))
+        end = format_memory_timestamp(max(int(x) for x in merged_ts))
+        if start and end:
+            lines.append(f"  (持续: {start} → {end})")
+    source_id = item.get("source_node_id") or ""
+    if source_id:
+        lines.append(f"  (来源: L1 {str(source_id)[:8]})")
 
     chain = item.get("evolution_chain")
-    if chain and include_superseded and len(chain) > 1:
-        lines.append("  (superseded versions — not current):")
+    is_merge = item.get("update_type") == "MERGE" or (
+        isinstance(merged_ts, list) and len(merged_ts) > 1
+    )
+    if chain and len(chain) > 1 and (is_merge or include_superseded):
+        label = (
+            "  (folded, still valid):"
+            if is_merge
+            else "  (superseded versions — not current):"
+        )
+        lines.append(label)
         for ver in chain[1:]:
             ver_date = format_memory_timestamp(ver.get("memory_at") or ver.get("gmt_created"))
             date_part = f", {ver_date}" if ver_date else ""

@@ -150,6 +150,7 @@ class MemoryWriter:
             request_id=request_id,
             memory_at=memory_at,
             messages=messages,
+            source_node_id=node.node_id,
         )
 
         if extra_node_ids:
@@ -178,6 +179,93 @@ class MemoryWriter:
                 },
             )
         return outcome
+
+    async def write_raw(
+        self,
+        *,
+        content: str,
+        app_id: str,
+        user_id: str,
+        agent_id: str,
+        session_id: str,
+        memory_at: int | None = None,
+    ) -> WriterOutcome:
+        """Persist L1_RAW only — no extract / reconcile."""
+        node = MemoryNode(
+            content=content,
+            layer=Layer.L1_RAW,
+            app_id=app_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            status=MemoryStatus.ACTIVE,
+            memory_at=memory_at,
+        )
+        node.embedding = await self.factory.embed.embed_queued(content)
+        await asyncio.to_thread(self.factory.vector.upsert, [node])
+        self.factory.history.append(
+            event="ADD",
+            node_id=node.node_id,
+            user_id=user_id,
+            old=None,
+            new=node.to_metadata(),
+        )
+        return WriterOutcome(memory_id=node.node_id, is_ephemeral=True)
+
+    async def distill(
+        self,
+        *,
+        content: str,
+        app_id: str,
+        user_id: str,
+        agent_id: str,
+        session_id: str,
+        request_id: str,
+        source_node_ids: list[str],
+        memory_at: int | None = None,
+        messages: list[ChatMessage] | None = None,
+    ) -> WriterOutcome:
+        """Extract from existing L1 nodes; do not write another L1."""
+        raw = (
+            self.factory.vector.get(source_node_ids[0]) if source_node_ids else None
+        )
+        if raw is None:
+            return WriterOutcome(memory_id="", commit_passed=False, is_ephemeral=True)
+        settings = self.factory.settings
+        is_system1 = settings.mode == "system1"
+        agent = MemAgent(factory=self.factory)
+        if is_system1 and not settings.reconcile_sync:
+            extra_node_ids, commit_result, is_ephemeral = await agent.run_system1(
+                content=content,
+                raw_node=raw,
+                messages=messages,
+                request_id=request_id,
+            )
+        else:
+            extra_node_ids, commit_result, is_ephemeral = await agent.run(
+                content=content,
+                app_id=app_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                session_id=session_id,
+                request_id=request_id,
+                memory_at=memory_at if memory_at is not None else raw.memory_at,
+                messages=messages,
+                source_node_id=raw.node_id,
+            )
+        if extra_node_ids:
+            for nid in source_node_ids:
+                node = self.factory.vector.get(nid)
+                if node is None:
+                    continue
+                node.status = MemoryStatus.SHADOW
+                await asyncio.to_thread(self.factory.vector.upsert, [node])
+        return WriterOutcome(
+            memory_id=raw.node_id,
+            extra_node_ids=extra_node_ids,
+            commit_passed=commit_result.passed,
+            is_ephemeral=is_ephemeral,
+        )
 
 
 __all__ = ["MemoryWriter", "WriterOutcome"]
