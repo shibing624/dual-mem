@@ -35,6 +35,7 @@ def _format_item(
     *,
     include_superseded: bool = False,
 ) -> str:
+    """docstring placeholder"""
     """Format one memory item; evolution chains default to current head only."""
     content = item["content"]
     if item["category"] == "raw" and len(content) > raw_truncate:
@@ -57,7 +58,7 @@ def _format_item(
     is_merge = item.get("update_type") == "MERGE" or (
         isinstance(merged_ts, list) and len(merged_ts) > 1
     )
-    if chain and len(chain) > 1 and (is_merge or include_superseded):
+    if chain and len(chain) > 1 and include_superseded:
         label = (
             "  (folded, still valid):"
             if is_merge
