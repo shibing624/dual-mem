@@ -277,11 +277,21 @@ class DualMemWorkspace:
         content: str,
         memory_type: str = "project",
         description: str = "",
-        sync_to_global_agent_md: bool = False,
         *,
         source: str = "verified",
         evidence_refs: Optional[List[str]] = None,
     ) -> str:
+        """Persist an entry through dual_mem while keeping the native Workspace signature.
+
+        ``sync_to_global_agent_md`` used to live here as a positional parameter, which both
+        widened the public surface and shifted ``source`` / ``evidence_refs`` for every
+        caller typed against the native protocol. Those two parameters are still accepted
+        and are deliberately not forwarded to :meth:`MemoryClient.add`: the memory index
+        maintained by the composed native workspace keeps its own (path, source, evidence)
+        bookkeeping, and injecting raw evidence text into the stored memory would pollute
+        the fact layer it exists to feed.
+        """
+        del source, evidence_refs
         res = await self._backend.add(
             content=content,
             user_id=self.user_id,
@@ -355,8 +365,14 @@ class DualMemWorkspace:
     def set_user(self, user_id: Optional[str]) -> None:
         self._ws.set_user(user_id)
 
-    def initialize(self, force: bool = False) -> bool:
-        return self._ws.initialize(force=force)
+    def initialize(self) -> bool:
+        """Forward to the native workspace.
+
+        The native ``initialize`` no longer takes a ``force`` flag (the workspace-root
+        AGENTS.md template it governed was removed upstream), so passing one raised
+        ``TypeError`` at call time.
+        """
+        return self._ws.initialize()
 
     def exists(self) -> bool:
         return self._ws.exists()
@@ -397,12 +413,9 @@ class DualMemWorkspace:
     async def promote_memory_candidate(
         self,
         filename: str,
-        sync_to_global_agent_md: bool = False,
     ):
-        return await self._ws.promote_memory_candidate(
-            filename,
-            sync_to_global_agent_md=sync_to_global_agent_md,
-        )
+        """Forward to the native workspace (native takes ``filename`` only)."""
+        return await self._ws.promote_memory_candidate(filename)
 
     def reject_memory_candidate(self, filename: str) -> bool:
         return self._ws.reject_memory_candidate(filename)
@@ -415,6 +428,28 @@ class DualMemWorkspace:
 
     def get_all_memory_files(self) -> list:
         return self._ws.get_all_memory_files()
+
+    # ---- 记忆索引 / AGENTS.md 用户配置：原生 Workspace 已实现，直接转发 ----
+    def list_memory_index_entries(self) -> list:
+        return self._ws.list_memory_index_entries()
+
+    async def get_memory_index_prompt(self) -> str:
+        return await self._ws.get_memory_index_prompt()
+
+    def user_agent_md_path(self):
+        return self._ws.user_agent_md_path()
+
+    def memory_index_path(self):
+        return self._ws.memory_index_path()
+
+    def read_user_agents_md(self) -> str:
+        return self._ws.read_user_agents_md()
+
+    def write_user_agents_md(self, content: str):
+        return self._ws.write_user_agents_md(content)
+
+    def get_frozen_experiences(self) -> Optional[str]:
+        return self._ws.get_frozen_experiences()
 
     def search_memory(self, query: str, limit: int = 5, min_score: float = 0.1) -> list:
         return self._ws.search_memory(query=query, limit=limit, min_score=min_score)

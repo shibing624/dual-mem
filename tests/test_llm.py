@@ -89,6 +89,12 @@ async def test_chat_json_passes_extra_body():
 
 @respx.mock
 async def test_chat_json_usage_callback():
+    """The usage callback must report the parsed call's tokens exactly once.
+
+    The reply must be non-empty: `chat_json` retries once on an empty result (`{}` / `[]`),
+    which would legitimately produce two usage events and makes the assertion below
+    measure the retry policy instead of the callback.
+    """
     events: list[UsageEvent] = []
 
     def _cb(event: UsageEvent) -> None:
@@ -98,7 +104,7 @@ async def test_chat_json_usage_callback():
         return_value=httpx.Response(
             200,
             json={
-                **_completion({"role": "assistant", "content": "{}"}),
+                **_completion({"role": "assistant", "content": '{"facts": []}'}),
                 "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
             },
         )
@@ -111,6 +117,7 @@ async def test_chat_json_usage_callback():
     )
     await client.chat_json(system="s", user="u")
     assert route.called
+    assert route.call_count == 1
     assert len(events) == 1
     assert events[0].kind == "chat_json"
     assert events[0].prompt_tokens == 11

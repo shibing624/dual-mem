@@ -1,5 +1,3 @@
-import json
-
 from conftest import FakeLLMClient
 
 from dual_mem import MemoryClient
@@ -10,20 +8,14 @@ _SCHEMA = "当处理任务时，用户追求确定性与掌控——反映低不
 _INTENTION = "用户正在准备一场数据库技术分享。"
 
 
-def _tc(call_id: str, name: str, args: dict) -> dict:
-    return {"id": call_id, "type": "function",
-            "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}
-
-
-# Scripted ReAct turns: create the schema, create the intention, then stop.
+# Scripted System2 ops: create the schema and the intention in one call.
+# System2 makes a single chat_json call returning an ops array (the ReAct tool loop was
+# removed upstream), so this is the already-parsed list the agent expects.
 _TOOL_TURNS = [
-    {"content": "", "tool_calls": [
-        _tc("c1", "create_schema",
-            {"content": _SCHEMA, "tags": ["工作"], "evidence": ["a1", "a2", "a3"]}),
-        _tc("c2", "create_intention",
-            {"content": _INTENTION, "tags": ["工作"], "evidence": ["a1"]}),
-    ]},
-    {"content": "", "tool_calls": []},
+    {"op": "create_schema", "content": _SCHEMA, "tags": ["工作"],
+     "evidence": ["a1", "a2", "a3"]},
+    {"op": "create_intention", "content": _INTENTION, "tags": ["工作"],
+     "evidence": ["a1"]},
 ]
 
 
@@ -50,8 +42,8 @@ def _seed_fresh_facts(client):
 
 
 async def test_dual_digest_then_recall_schema_and_intention(tmp_storage, fake_embed):
-    # Isolate the L6/L7 plumbing: force the ReAct loop (scripted tool turns) and keep
-    # derived-layer recall on regardless of the (FACTUAL) query intent.
+    # Isolate the L6/L7 plumbing: script the System2 ops response and keep derived-layer
+    # recall on regardless of the (FACTUAL) query intent.
     settings = Settings(
         mode="dual",
         storage_dir=tmp_storage,
@@ -60,7 +52,7 @@ async def test_dual_digest_then_recall_schema_and_intention(tmp_storage, fake_em
     client = MemoryClient(
         settings=settings,
         embed=fake_embed,
-        llm=FakeLLMClient(responses={"tools": _TOOL_TURNS}),
+        llm=FakeLLMClient(responses={"json": _TOOL_TURNS}),
     )
     _seed_fresh_facts(client)
     client.factory.cache.enqueue_s2_task("u", "app")

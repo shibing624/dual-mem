@@ -202,10 +202,12 @@ class Settings(BaseSettings):
     # 大量写入其实没有真正的冲突候选（全新事实），这条快路径省掉相应的 reconcile LLM 调用，
     # 零合并风险。设 0 关闭（总是走 LLM）。
     reconcile_weak_candidate_score: float = 0.5
-    # 在 skip_llm 快路径下，用零 LLM 的启发式为同主题（同 layer + tag 交集）的记忆按时间序补建
-    # supersedes/superseded_by 演化链指针，但旧节点保持 ACTIVE 不隐藏（"建链不隐藏"）。这样偏好
-    # 演化时间线可被 expand_evolution_chains 还原，同时旧事实仍可召回（保住高召回）。仅在
-    # reconcile_skip_llm 时生效；关闭则回到"只排空队列、不建链"的旧行为。
+    # ⚠️ 当前为惰性开关：digest 流程已不再调用 link_evolution_chains_heuristic。
+    # 该启发式（同 layer + tag 交集 + 时间序补建 supersedes/superseded_by，旧节点保持 ACTIVE）
+    # 实测为 62% 的记忆打链，而检索会把整条链展开进 QA 上下文，导致已被取代的中间态被当作
+    # 仍然有效的事实喂给模型（PersonaMem 4/4 受影响题由对转错）。因此 System2Writer._digest_user
+    # 现在只排空 reconcile 队列、不建链。函数本身保留在 reconciler_worker 中，可被显式调用
+    # （例如离线还原偏好演化时间线），并有独立单元测试覆盖。
     reconcile_link_chains_heuristic: bool = True
     # ReconcilerWorker 排空 reconcile 队列时的并发度。每个 reconcile task 的瓶颈是一次大
     # prompt 的 LLM 调用（recall+LLM 只读，apply 写入很快），串行排队时 digest 会被拉长。

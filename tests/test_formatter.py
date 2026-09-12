@@ -101,7 +101,14 @@ def test_search_memories_to_search_results():
     assert hits[0]["memory"] == "b"
 
 
-def test_format_merge_shows_folded_facts_as_still_valid():
+def test_format_merge_default_omits_folded_versions():
+    """A MERGE renders as a duration by default; superseded versions stay out of context.
+
+    Regression: folding the merge chain into context unconditionally fed superseded
+    intermediate states to the QA model as if they were still current, which measurably
+    hurt end-to-end accuracy (PersonaMem 4/4 flipped from correct to wrong). Chain
+    versions must only appear when the caller explicitly opts in.
+    """
     result = {
         "profile": [],
         "proactive": [],
@@ -120,6 +127,33 @@ def test_format_merge_shows_folded_facts_as_still_valid():
         ],
     }
     text = format_memories(result)
+    # The merged statement still carries its time span...
+    assert "(持续: 2020-09-13 → 2023-11-14)" in text
+    # ...but the folded/superseded version is NOT injected unless asked for.
+    assert "folded, still valid" not in text
+    assert "用户在 A 公司做支付" not in text
+
+
+def test_format_merge_shows_folded_facts_when_opted_in():
+    """``include_superseded=True`` is the explicit opt-in that restores chain rendering."""
+    result = {
+        "profile": [],
+        "proactive": [],
+        "normal": [
+            {
+                "memory_id": "a",
+                "content": "用户在 A 公司负责支付与风控",
+                "category": "fact",
+                "update_type": "MERGE",
+                "merged_timestamps": [1_600_000_000, 1_700_000_000],
+                "evolution_chain": [
+                    {"node_id": "a", "content": "用户在 A 公司负责支付与风控"},
+                    {"node_id": "b", "content": "用户在 A 公司做支付"},
+                ],
+            }
+        ],
+    }
+    text = format_memories(result, include_superseded=True)
     assert "folded, still valid" in text
     assert "用户在 A 公司做支付" in text
     assert "not current" not in text

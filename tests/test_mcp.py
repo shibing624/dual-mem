@@ -2,10 +2,18 @@ import json
 
 import pytest
 
-from dual_mem import MemoryClient
-from dual_mem.api.operations import MemoryOperations
-from dual_mem.config import Settings
-from dual_mem.mcp.server import build_mcp
+# The MCP server needs FastMCP from mcp 1.x (`mcp.server.fastmcp`), which the project
+# pins as `mcp>=1.2,<2`. A newer mcp (2.x) in the environment drops that module, so skip
+# with a clear reason instead of erroring at collection time.
+pytest.importorskip(
+    "mcp.server.fastmcp",
+    reason="dual-mem's MCP server requires mcp 1.x (install the 'mcp' extra)",
+)
+
+from dual_mem import MemoryClient  # noqa: E402
+from dual_mem.api.operations import MemoryOperations  # noqa: E402
+from dual_mem.config import Settings  # noqa: E402
+from dual_mem.mcp.server import build_mcp  # noqa: E402
 
 
 @pytest.fixture
