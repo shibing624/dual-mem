@@ -153,7 +153,7 @@ def search_conversation(
     json_out: bool = typer.Option(False, "--json", help="输出原始 JSON 而非格式化文本"),
     mode: str | None = typer.Option(None, "--mode", help="system1 | dual"),
 ):
-    """检索 L1 原文（MemoryClient.search_conversation）。"""
+    """检索 L0_RAW 原文（MemoryClient.search_conversation）。"""
     client = make_client(mode)
     result = _run(
         client.search_conversation(
@@ -179,11 +179,18 @@ def list_memories(
     user_id: str = typer.Option(..., "--user-id"),
     agent_id: str = typer.Option("", "--agent-id"),
     limit: int = typer.Option(100, "--limit"),
+    include_history: bool = typer.Option(False, "--include-history"),
 ):
-    """列出 scope 下 ACTIVE 记忆（MemoryClient.list）。"""
+    """列出 scope 下当前记忆；--include-history 连同已归档版本。"""
     client = make_client()
     items = _run(
-        client.list(app_id=app_id, user_id=user_id, agent_id=agent_id, limit=limit)
+        client.list(
+            app_id=app_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            limit=limit,
+            include_history=include_history,
+        )
     )
     _echo_json([item.to_dict() for item in items])
 
@@ -201,7 +208,7 @@ def update(
     memory_id: str = typer.Argument(...),
     content: str = typer.Option(..., "--content"),
 ):
-    """更新记忆正文（MemoryClient.update）。"""
+    """追加一版更正，返回新 memory_id（旧 id 仍可 get）。"""
     client = make_client()
     result = _run(client.update(memory_id, content))
     _echo_json(result.to_dict())
@@ -209,7 +216,7 @@ def update(
 
 @app.command()
 def delete(memory_id: str = typer.Argument(...)):
-    """删除单条记忆（MemoryClient.delete）。"""
+    """归档一条当前记忆，不物理删除。"""
     client = make_client()
     result = _run(client.delete(memory_id))
     _echo_json(result.to_dict())
@@ -252,7 +259,7 @@ def list_scopes(
 
 @app.command()
 def digest():
-    """触发 System2 深度记忆巩固（MemoryClient.digest，dual 模式）。"""
+    """dual 模式生成 L3_DERIVED；system1 的 processed 为 0。"""
     client = make_client()
     result = _run(client.digest())
     _echo_json(result.to_dict())

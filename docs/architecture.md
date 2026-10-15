@@ -38,12 +38,12 @@ Agent / Cursor  ──MCP──▶  MCP Server（受 Skill 指导）  ──▶ 
 
 | 层 | 模块 | 职责 | 依赖 |
 |---|---|---|---|
-| 核心 SDK | `dual_mem.client.MemoryClient` | 写入/检索/演化/System2 全部逻辑，全 async | 仅依赖存储与 provider |
+| 核心 SDK | `dual_mem.client.MemoryClient` | 写入、JEV 裁决、检索、演化、显式 digest，全 async | 仅依赖存储与 provider |
 | CLI（SDK 前端） | `dual_mem.cli`（`dual-mem`） | SDK 的命令行外壳，`asyncio.run` 包装 | → SDK |
 | REST | `dual_mem.api`（FastAPI） | HTTP 接口，鉴权 + 统一错误，契约见 `docs/architecture.md` | → SDK |
 | MCP（生态） | `dual_mem.mcp`（`dual-mem-mcp`） | 面向 agent 的工具协议；**本地** stdio / streamable-http 已实现；**云端** HTTP MCP 规划走 REST 同一契约 | → SDK（云端经 REST → SDK） |
 | Skill（生态） | `skills/dual-mem/SKILL.md` | 指导 agent 何时/如何调用 MCP/CLI | → MCP/CLI |
-| 存储 | `dual_mem.storage` | Chroma 向量 / Kuzu 图 / SQLite 缓存与历史 | — |
+| 存储 | `dual_mem.storage` | Chroma 向量是当前可读性；Kuzu 只投影 dual digest 的证据关系；SQLite 保存历史与版本日志 | — |
 
 > 关于目录结构：MCP/CLI 代码物理上仍位于 `dual_mem.*` 子包内（便于单包安装与
 > 复用 `MemoryClient`），但**职责上与 SDK 并列**——它们只做协议转换，不含业务逻辑。

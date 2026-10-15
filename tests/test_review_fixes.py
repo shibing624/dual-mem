@@ -1,9 +1,4 @@
-"""Tests for the post-review fixes:
-
-#1 LockRegistry is LRU-bounded and never evicts a held lock.
-#2 _fast_write embeds all extracted nodes in a single batch call.
-#3 Reconciler excludes the just-written fast-write node ids from its candidate set.
-"""
+"""Lock bounds, JEV candidate exclusion, and batched embedding of extracted versions."""
 
 import pytest
 
@@ -15,7 +10,7 @@ from dual_mem.types import Layer, MemoryNode, MemoryStatus
 from conftest import FakeLLMClient, FakeJev
 
 
-# ---- #2 LockRegistry --------------------------------------------------------------
+# ---- LockRegistry -----------------------------------------------------------------
 
 
 def test_lock_registry_returns_stable_lock_per_key():
@@ -50,7 +45,7 @@ async def test_lock_registry_never_evicts_a_held_lock():
     assert len(reg) <= 2
 
 
-# ---- #4 Reconciler exclude_ids ----------------------------------------------------
+# ---- JEV exclude_ids --------------------------------------------------------------
 
 
 async def test_reconcile_excludes_given_node_ids(tmp_storage, fake_embed):
@@ -63,7 +58,7 @@ async def test_reconcile_excludes_given_node_ids(tmp_storage, fake_embed):
     )
     vector = client.factory.vector
 
-    # Seed two identical-content ACTIVE nodes: one is the "fast-write original" we will
+    # Seed two identical-content ACTIVE nodes: one is the version we will
     # exclude, the other a genuine pre-existing memory.
     for nid in ("orig", "existing"):
         n = MemoryNode(
@@ -95,12 +90,11 @@ async def test_reconcile_excludes_given_node_ids(tmp_storage, fake_embed):
     await client.aclose()
 
 
-# ---- #3 batched fast-write embedding ----------------------------------------------
+# ---- batched embedding of extracted versions --------------------------------------
 
 
-async def test_fast_write_embeds_in_single_batch(tmp_storage):
-    """MemAgent._fast_write should call embed_batch once for all extracted nodes,
-    not embed_queued N times."""
+async def test_extracted_versions_embed_in_single_batch(tmp_storage):
+    """Extracted L1/L2 versions share one embed_batch, not one embed_queued each."""
     from conftest import FakeEmbedService
 
     class _CountingEmbed(FakeEmbedService):
@@ -119,7 +113,7 @@ async def test_fast_write_embeds_in_single_batch(tmp_storage):
 
     embed = _CountingEmbed()
     settings = Settings(mode="system1", storage_dir=tmp_storage)
-    # Extractor returns two facts + one identity so fast-write has >1 node.
+    # Extractor returns two facts + one profile so the write has more than one version.
     llm = FakeLLMClient(
         responses={
             "extract": {
@@ -135,10 +129,8 @@ async def test_fast_write_embeds_in_single_batch(tmp_storage):
 
     await client.add(content="自我介绍若干", app_id="app", user_id="u")
 
-    # The three extracted L2/L4 nodes are embedded via a single batch call rather than
-    # one embed_queued per node. (The L0_RAW node still uses embed_queued — that is a
-    # single writer-level call and is expected, so we only assert fast-write didn't add
-    # a per-fact queued call for each of the 3 extracted nodes.)
+    # The extracted L1/L2 nodes share one embed_batch. L0_RAW still uses one
+    # embed_queued at the writer, so queued calls stay at most one.
     assert embed.batch_calls >= 1
     assert embed.queued_calls <= 1
 

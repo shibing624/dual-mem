@@ -136,7 +136,7 @@ def merge_extract_results(parts: list[dict]) -> dict:
 
 
 def merge_text_chunks(parts: list[str]) -> str:
-    """Join chunked text completions (e.g. map-reduce summarizer)."""
+    """Join chunked text completions."""
     return "\n\n".join(p.strip() for p in parts if p and p.strip())
 
 
@@ -359,6 +359,10 @@ class LLMClient:
         kwargs: dict = {"max_tokens": max_tokens}
         if use_json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+            # Some gateways only scan the user/input message, and reject
+            # response_format=json_object unless that text contains "json".
+            if "json" not in user.lower():
+                user = f"{user}\nReply with json."
         # Deterministic decoding: pin seed so batching/composition is the ONLY remaining
         # source of cross-batch variance (env DUAL_MEM_LLM_SEED, empty = off).
         import os as _os

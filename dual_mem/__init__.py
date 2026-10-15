@@ -15,7 +15,7 @@ import logging
 from dual_mem.client import MemoryClient
 from dual_mem.sync_client import SyncMemoryClient
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 # Library convention: install a NullHandler on the package logger so the SDK is silent
 # by default. The host application is responsible for configuring handlers.

@@ -19,7 +19,10 @@ async def test_public_relation_keeps_history_and_only_replacement_retires_old(
     )
     original = await c.add(content="Old", user_id="u")
     old = original.extra_node_ids[0]
-    jev.responses = {"p0:action": "ADD_" + relation, "p0:target": old}
+    jev.responses = {
+        "p0:action": "ADD_" + relation,
+        "p0:target": "NONE" if relation in ("TEMPORAL", "SUPPLEMENT") else old,
+    }
     c.factory.llm.responses = {"extract": {"facts": [{"content": "New"}]}}
     result = await c.add(content="New", user_id="u")
     latest = await c.get(result.extra_node_ids[0])

@@ -1,4 +1,4 @@
-"""Provider writes L1 every turn; extract on window / idle / session end."""
+"""Provider writes L0_RAW every turn; extract on window / idle / session end."""
 
 import asyncio
 
@@ -47,7 +47,7 @@ def _provider(
     return provider
 
 
-async def test_first_turn_is_searchable_as_l1(tmp_storage, fake_embed):
+async def test_first_turn_is_searchable_as_l0(tmp_storage, fake_embed):
     client = MemoryClient(
         settings=Settings(mode="system1", storage_dir=tmp_storage),
         embed=fake_embed,
@@ -74,7 +74,7 @@ async def test_first_turn_is_searchable_as_l1(tmp_storage, fake_embed):
     await client.aclose()
 
 
-async def test_window_flush_extracts_and_shadows_turn_l1(tmp_storage, fake_embed):
+async def test_window_flush_extracts_and_keeps_turn_l0(tmp_storage, fake_embed):
     client = MemoryClient(
         settings=Settings(mode="system1", storage_dir=tmp_storage),
         embed=fake_embed,

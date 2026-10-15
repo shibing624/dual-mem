@@ -8,13 +8,20 @@
 2. 生成模型只抽取明确、原子化候选文本、日期及来源，不裁决是否已知或是否更新。
 3. 读取同 scope 当前 latest 及真实 `history_versions`。材料较多时，用 JEV 分页判断
    INCLUDE/EXCLUDE；每条提议仍进入决策，没有向量相似度写入门，也没有弱相似度 bypass。
-4. 同一 `state` 下批量提出来源 coverage 与每个候选的 action、representation、target 问题。问题彼此
-   独立，不能假设目标问题知道动作问题的答案。协议组合必须通过执行约束。
-5. ADD 联合 choice 是 `ADD_OVERRIDE` / `ADD_MERGE` / `ADD_SUPPLEMENT` /
-   `ADD_TEMPORAL` / `ADD_NEGATE` / `ADD_CONFLICT`；另有 `SKIP`、`DELETE`、
-   `RAW_ONLY`、`INVALID`、`NEED_CONTEXT`。后三项为控制结果，不产生有损写入。
+4. 先问 coverage、representation 和 target。没有 current head、也没有更早的 proposal 时，
+   action 跟这批一起问，仍然是一次 JEV。只要存在可选 target，action 放到第二阶段，
+   并且只提供与 target 是否为空匹配的选项。
+5. 有 target：`ADD_OVERRIDE` / `ADD_MERGE` / `ADD_NEGATE` / `ADD_CONFLICT` / `SKIP` /
+   `DELETE` / `INVALID` / `NEED_CONTEXT`。无 target：`ADD_SUPPLEMENT` / `ADD_TEMPORAL` /
+   `RAW_ONLY` / `INVALID` / `NEED_CONTEXT`。`TEMPORAL` 不链接 baseline。`SUPPLEMENT`
+   可以与其他 latest 共存，但不携带 target。两边的说明文字也分开，无 target 时不再提到 SKIP。
+   `SKIP` 只能为一个 target 建立可引用别名；多目标共同覆盖时应选择 `MERGE`。
+   `DELETE` 只能选择已提交的 current head；若批内关系选择的 earlier proposal 最终没有产生
+   memory，整批按依赖计划冲突重裁决。
 6. 多目标才追加 INCLUDE 问题。MERGE 才用生成模型合成文本，并用 JEV 验证所有数字、
-   独立事件与旧维度不丢失。正常写入为一次生成 + 一次 JEV；不为每项启动客户端。
+   独立事件与旧维度不丢失。动作和 target 不匹配是 provider 契约错误，抛
+   `DecisionContextError`，不把整批拿去重试。注入 provider 也必须精确回答全部问题，
+   且 answer type 与 choice 必须属于对应问题。
 7. 批量 embedding；检查 target revision、scope epoch、作用域、依赖顺序与重复消费；
    durable journal 后追加新节点、更新历史链接。临界区不包含正常模型 I/O；同 scope
    竞争失败时重决策，最后一次重试在 scope 锁内进行。不同 scope 并行。
@@ -85,8 +92,15 @@ Smoke 通过 MemoryClient 验证演化、已知判断、四个并行 scope 和�
 ## Coding 工具来源
 
 实验性 coding 路径同样先保留完整来源（包含 tool arguments/results）再调用语义服务。
-正常请求为一次 scene JEV、一次候选生成、一次共享 state 的 coverage/action/target JEV；
-服务字符预算和候选材料分页仍适用。UPDATE 对外映射为 ADD/OVERRIDE，追加新 ID。
+正常请求为一次 scene JEV、一次候选生成，然后与主路径相同的 target-first 裁决。
+没有 current head 时，coverage 和 action 同批完成；有 current head 时先选 target，再按
+是否选中生成 action 选项。不存在 `:repair` 补问。`MULTIPLE` 展开成逐个 INCLUDE。
+coding 仍是单 target 模型：展开必须唯一确定一个 head，零个或多个 INCLUDE 都失败关闭。
+`OVERRIDE` / `MERGE` / `NEGATE` 追加新 ID 并退役当前 head；`DELETE` 只归档。
+`SUPPLEMENT` / `TEMPORAL` / `RAW_ONLY` 不写 target。对外 `MemoryDecision` 带
+action、update_type、targets、proposal_ids。
+所有 coding target 关系必须处于相同 workspace / branch / strict-session 版本边界。
+target 问题还要加入 `NONE` 和 `MULTIPLE`，因此 `coding candidate_limit` 最大为 253。
 SQLite 以 published/is_latest 决定可见性；所有向量写入确认与 scope CAS 成功后整批发布。
 失败的候选保持不可见，旧 SQL head 保持可读；来源仍在 coding_sources/L0。
 现阶段 coding 不支持相同 pending ID 自动回放，失败请求重新生成新 ID，旧 pending 可见性
@@ -95,8 +109,7 @@ SQLite 以 published/is_latest 决定可见性；所有向量写入确认与 sco
 
 ## 最终本地验证
 
-2026-10-15，main 合并后清理全部旧兼容路径。全量 pytest：390 passed、1 skipped；127 个 Python 文件的 AST 检查、compileall
-和 diff 检查通过（28 条既有 FastAPI 弃用警告）。所有自动化测试 mock 模型与网络，真实接口验证仅由 tmp smoke 执行。
+2026-10-15，main 合并后清理全部旧兼容路径。当时全量 pytest 为 390 passed、1 skipped。随后 coding 裁决、社区入口和文档又对齐了同一套 JEV 动作；以发布前重新跑的 `pytest tests/ -q` 为准。AST 检查通过。所有自动化测试 mock 模型与网络，真实接口验证仅由 tmp smoke 执行。
 
 hy3 当前接口不能通过不传 reasoning_effort 关闭思考。实测只传
 `extra_body={"thinking":{"type":"disabled"}}` 仍产生 314 reasoning tokens。
@@ -109,6 +122,9 @@ extra_body={"reasoning_effort": "no_think", "thinking": {"type": "disabled"}}
 这里的 extra_body 是 OpenAI SDK 合并到请求顶层的扩展参数；全部五次 hy3 返回
 reasoning_content 为空，reasoning token 计数未提供。不能把缺少计数当成服务器已报告 0。
 
+下面这张表是 **target-first 之前** 的旧协议计时：当时每次写入只有一次 JEV。
+现在只要存在 target 候选就会多一次 evaluation，调用数和延迟不能再拿来对比，需要重跑。
+
 | 步骤 | hy3 API ms | JEV API ms | 端到端 ms | 调用数 hy3 / JEV |
 | --- | ---: | ---: | ---: | --- |
 | 我目前住在北京。 | 1234.2 | 494.1 | 1753 | 1 / 1 |
@@ -117,12 +133,13 @@ reasoning_content 为空，reasoning token 计数未提供。不能把缺少计�
 | 我目前住在北京。 | 1093.6 | 461.0 | 1568 | 1 / 1 |
 | 显式 digest | 2819.3 | 1210.1 | 4139.0 | 1 / 3 |
 
-每次写入一次候选生成、一次批量 JEV 裁决。digest 含推导生成、来源校验及关系裁决，
-本次还触发多目标选择，共三次 JEV。API ms 为各实际调用的延迟之和；并行时不等于墙钟
+旧协议下每次写入一次候选生成、一次批量 JEV 裁决。digest 那次含推导生成、来源校验及关系裁决，
+还触发多目标选择，共三次 JEV。API ms 为各实际调用的延迟之和；并行时不等于墙钟
 耗时。JEV 计时覆盖每次 HTTP 尝试，不包含排队和重试等待；端到端时间包含这些开销。
 
-独立 JEV 真实接口 smoke 也通过：四个 scope 并发写入 553.0 ms，5 个 scope digest
+独立 JEV 真实接口 smoke 也是旧协议：四个 scope 并发写入 553.0 ms，5 个 scope digest
 完成，合计 18 次 JEV 请求。生成与向量使用确定性适配器，不能与真实生成时延混算。
+这组次数在 target-first 之后失效。
 
 真实 smoke 六项断言全部通过：无思考内容、返回旧值为 OVERRIDE、重复为 SKIP、
 两个独立搬家事件保持 current、三代画像保留、只有一个 current 画像。

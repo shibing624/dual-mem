@@ -5,12 +5,11 @@
 configured providers/stores together and exposes add/search/get/list/update/delete/digest,
 returning strongly typed dataclass models (sdk_models). Multi-turn messages are formatted
 into natural dialogue text for L0_RAW + extract; embed sees the user-only concatenation.
-A per-user asyncio.Lock serializes concurrent add() for the same (app_id, user_id) so the
-fast-write -> reconcile pipeline can never race on the same evolution chain.
+A per-user asyncio.Lock serializes concurrent add() for the same (app_id, user_id) so
+version appends cannot race on the same evolution chain.
 
-dual-mem requires both an LLM API key and an embedding API key; missing credentials raise
-on construction (no silent embedding-only fallback). When you need to inject your own LLM
-client (tests, custom backends), pass it via the ``llm=`` constructor kwarg.
+dual-mem requires a JEV key, an LLM API key and an embedding API key. Missing credentials
+raise on construction. Tests and custom backends inject ``jev=`` / ``llm=`` / ``embed=``.
 """
 from __future__ import annotations
 
@@ -325,35 +324,15 @@ class MemoryClient:
                             decisions=[
                                 MemoryDecision(
                                     action=(
-                                        "ADD"
-                                        if d["action"] == "UPDATE"
-                                        else (
-                                            "SKIP"
-                                            if d["action"] == "RAW_ONLY"
-                                            else d["action"]
-                                        )
+                                        "SKIP"
+                                        if d["action"] == "RAW_ONLY"
+                                        else d["action"]
                                     ),
-                                    update_type=(
-                                        "OVERRIDE"
-                                        if d["action"] == "UPDATE"
-                                        else (
-                                            "SUPPLEMENT"
-                                            if d["action"] == "ADD"
-                                            else None
-                                        )
-                                    ),
-                                    targets=(
-                                        [d["target_memory_id"]]
-                                        if d.get("target_memory_id")
-                                        else []
-                                    ),
-                                    proposal_ids=(
-                                        [f"p{d['draft_idx']}"]
-                                        if d.get("draft_idx") is not None
-                                        else []
-                                    ),
-                                    source_ids=d["source_ids"],
-                                    reason=d.get("reason", ""),
+                                    update_type=d.get("update_type") or None,
+                                    targets=list(d.get("targets") or []),
+                                    proposal_ids=list(d.get("proposal_ids") or []),
+                                    source_ids=list(d.get("source_ids") or []),
+                                    reason=d.get("reason") or "",
                                 )
                                 for d in coding_result.get("decisions", [])
                             ],

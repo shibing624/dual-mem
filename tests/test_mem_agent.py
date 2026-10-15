@@ -15,7 +15,7 @@ def client(tmp_storage, embed, extract, jev=None, mode="system1", **kw):
     )
 
 
-async def test_one_generation_and_one_jev_batch_for_facts_profiles_intentions(
+async def test_one_generation_and_two_jev_phases_for_facts_profiles_intentions(
     tmp_storage, fake_embed
 ):
     def script(state, questions):
@@ -42,7 +42,7 @@ async def test_one_generation_and_one_jev_batch_for_facts_profiles_intentions(
     nodes = c.factory.vector.get_by_ids(result.extra_node_ids)
     assert {n.layer for n in nodes.values()} == {Layer.L1_FACT, Layer.L2_PROFILE}
     assert {n.kind for n in nodes.values()} == {"fact", "profile", "intention"}
-    assert len(c.factory.llm.calls) == 1 and len(jev.calls) == 1
+    assert len(c.factory.llm.calls) == 1 and len(jev.calls) == 2
     assert all(
         (n.custom or {})["source_ids"] == [result.memory_id] for n in nodes.values()
     )
@@ -106,7 +106,7 @@ async def test_exact_text_distinct_events_are_not_hash_deduplicated(
         first.memory_id != second.memory_id
         and first.extra_node_ids != second.extra_node_ids
     )
-    assert len(c.factory.jev.calls) == 2
+    assert len(c.factory.jev.calls) == 3
 
 
 async def test_batch_skip_predecessor_resolves_to_current_head(tmp_storage, fake_embed):
@@ -224,7 +224,65 @@ async def test_conflicting_batch_targets_replan_with_jev_feedback(
         ]
     )
     r = await c.add(content="Moved Beijing to Shanghai, now Shanghai", user_id="u")
-    assert len(j.calls) == 2 and j.calls[1]["state"]["previous_plan_rejected"]
+    assert len(j.calls) == 4 and j.calls[2]["state"]["previous_plan_rejected"]
     assert len(r.extra_node_ids) == 2 and not c.factory.vector.get("old").is_latest
     assert len(c.factory.llm.calls) == 1
+    await c.aclose()
+
+
+async def test_target_none_constrains_action_then_writes(
+    tmp_storage, fake_embed
+):
+    def script(state, questions):
+        return {"p1:action": "ADD_SUPPLEMENT", "p1:target": "NONE"}
+
+    jev = FakeJev(script)
+    c = client(
+        tmp_storage,
+        fake_embed,
+        {
+            "facts": [
+                {"content": "用户喜欢喝茶"},
+                {"content": "用户住在北京"},
+            ]
+        },
+        jev=jev,
+    )
+    result = await c.add(content="我喜欢喝茶，住在北京", user_id="u")
+    assert result.extracted_count == 2
+    action_options = jev.calls[1]["questions"]["p1:action"]["criteria"]
+    assert "ADD_SUPPLEMENT" in action_options and "SKIP" not in action_options
+    assert all(
+        not any(name.endswith(":repair") for name in call["questions"])
+        for call in jev.calls
+    )
+    await c.aclose()
+
+
+async def test_relation_to_raw_only_proposal_replans_batch(tmp_storage, fake_embed):
+    def script(state, questions):
+        fixed = bool(state.get("previous_plan_rejected"))
+        return {
+            "p0:action": "RAW_ONLY",
+            "p1:target": "NONE" if fixed else "p0",
+            "p1:action": "ADD_SUPPLEMENT" if fixed else "SKIP",
+        }
+
+    jev = FakeJev(script)
+    c = client(
+        tmp_storage,
+        fake_embed,
+        {
+            "facts": [
+                {"content": "非持久化候选"},
+                {"content": "应独立保存的事实"},
+            ]
+        },
+        jev=jev,
+    )
+    result = await c.add(content="包含两个候选", user_id="u")
+    assert result.extracted_count == 1
+    assert len(jev.calls) == 4
+    feedback = jev.calls[2]["state"]["previous_plan_rejected"]
+    assert feedback["decisions"][0]["action"] == "RAW_ONLY"
     await c.aclose()

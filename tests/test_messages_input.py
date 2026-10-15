@@ -1,4 +1,4 @@
-"""Structured messages input is normalized and sent intact to L1 and Extractor."""
+"""Structured messages input is normalized and sent intact to L0_RAW and the extractor."""
 
 from dual_mem.client import MemoryClient, _format_dialogue, _normalize_messages
 from dual_mem.config import Settings
@@ -47,7 +47,7 @@ def test_format_dialogue_uses_role_labels():
     assert text == "[user]: 今天累死了\n[assistant]: 辛苦了\n[user]: 明天还要加班"
 
 
-async def test_messages_input_reaches_l1_and_extractor(tmp_storage, fake_embed):
+async def test_messages_input_reaches_l0_and_extractor(tmp_storage, fake_embed):
     """messages 输入：L1 和 Extractor 都接收保留角色标记的完整对话。"""
     settings = Settings(mode="system1", storage_dir=tmp_storage)
 
@@ -60,7 +60,7 @@ async def test_messages_input_reaches_l1_and_extractor(tmp_storage, fake_embed):
     client = MemoryClient(
         settings=settings,
         embed=fake_embed,
-        llm=FakeLLMClient(responses={"extract": extract_capture, "search_query": []}),
+        llm=FakeLLMClient(responses={"extract": extract_capture}),
     )
 
     result = await client.add(
@@ -102,7 +102,7 @@ async def test_messages_input_preserves_all_messages_as_current(
     client = MemoryClient(
         settings=settings,
         embed=fake_embed,
-        llm=FakeLLMClient(responses={"extract": extract_capture, "search_query": []}),
+        llm=FakeLLMClient(responses={"extract": extract_capture}),
     )
 
     await client.add(
@@ -134,7 +134,7 @@ async def test_messages_input_compatible_with_chat_message_objects(
     client = MemoryClient(
         settings=settings,
         embed=fake_embed,
-        llm=FakeLLMClient(responses={"extract": _EMPTY_EXTRACT, "search_query": []}),
+        llm=FakeLLMClient(responses={"extract": _EMPTY_EXTRACT}),
     )
 
     result = await client.add(

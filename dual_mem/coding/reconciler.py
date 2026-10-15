@@ -14,26 +14,71 @@ from dual_mem.coding.types import (
 from dual_mem.providers.jev import DecisionProvider
 
 _ACTIONS = {
-    "ADD": "Independent compatible learning or a distinct event; append.",
-    "UPDATE": (
-        "Confirmed change to the same task and boundary. Append a complete version "
-        "preserving every unaffected fact of the current target. If any fact would "
-        "be lost, choose NEED_CONTEXT; never retire an independent environment."
-    ),
-    "SKIP": (
-        "A CURRENT head fully covers the supported valuable candidate. Matching "
-        "incoming source, the candidate itself or history NEVER means known."
-    ),
+    "ADD_SUPPLEMENT": "Independent learning or a distinct occurrence; append. Initial solution without a baseline belongs here.",
+    "ADD_OVERRIDE": "Confirmed replacement of the same task and boundary. Append a complete version. Returning to an ancestor solution overrides the current head, never SKIP.",
+    "ADD_MERGE": "Complementary fragments of ONE solution; the new version must preserve every unaffected fact, number and constraint.",
+    "ADD_TEMPORAL": "Explicit limited exception that coexists with the long-term solution. Do not retire the baseline.",
+    "ADD_NEGATE": "Explicit termination of an existing solution.",
+    "ADD_CONFLICT": "Competing simultaneous solutions with no explicit change or authority. Keep both; do not retire either.",
+    "SKIP": "A CURRENT head already fully covers this claim. The incoming source, the draft itself and history NEVER mean known. NONE is not coverage.",
     "RAW_ONLY": "Supported candidate has no durable persistence value; keep source.",
+    "DELETE": "Explicit retraction; archive the current head, do not erase it.",
     "INVALID": "Candidate invents facts or incorrectly attributes source evidence.",
     "NEED_CONTEXT": "Insufficient evidence or a lossless version is unavailable.",
 }
+_WITH_TARGET = (
+    "ADD_OVERRIDE",
+    "ADD_MERGE",
+    "ADD_NEGATE",
+    "ADD_CONFLICT",
+    "SKIP",
+    "DELETE",
+    "INVALID",
+    "NEED_CONTEXT",
+)
+_WITHOUT_TARGET = (
+    "ADD_SUPPLEMENT",
+    "ADD_TEMPORAL",
+    "RAW_ONLY",
+    "INVALID",
+    "NEED_CONTEXT",
+)
+_NEEDS_TARGET = set(_WITH_TARGET) - {"INVALID", "NEED_CONTEXT"}
+
+
+def _action_question(draft_idx: int, *, has_target: bool) -> dict:
+    if has_target:
+        instructions = (
+            f"Draft {draft_idx} already has one selected current head in the same version boundary. "
+            "Its environment constraints must describe the same solution context. "
+            "Choose only a relation to that head: SKIP if it fully covers the draft, "
+            "ADD_OVERRIDE or ADD_MERGE or ADD_NEGATE to replace or end it, "
+            "ADD_CONFLICT to keep both, DELETE to archive it. "
+            "INVALID if the draft invents facts. NEED_CONTEXT if a lossless version is unavailable. "
+            "Do not append an independent solution."
+        )
+        keys = _WITH_TARGET
+    else:
+        instructions = (
+            f"Draft {draft_idx} has no selected current head. "
+            "There is nothing to update, cover, negate, conflict with, or delete. "
+            "ADD_SUPPLEMENT appends an independent solution. "
+            "ADD_TEMPORAL is a limited exception and does not link a baseline. "
+            "RAW_ONLY keeps only the source. INVALID if the draft invents facts. "
+            "NEED_CONTEXT if the evidence is insufficient."
+        )
+        keys = _WITHOUT_TARGET
+    return {
+        "type": "choice",
+        "instructions": instructions,
+        "criteria": {key: _ACTIONS[key] for key in keys},
+    }
 
 
 class CodingMemoryReconciler:
     def __init__(self, *, jev: DecisionProvider, candidate_limit: int = 64) -> None:
-        if not 1 <= candidate_limit <= 254:
-            raise ValueError("coding candidate_limit must be in [1,254]")
+        if not 1 <= candidate_limit <= 253:
+            raise ValueError("coding candidate_limit must be in [1,253]")
         self.jev = jev
         self.candidate_limit = candidate_limit
 
@@ -152,69 +197,115 @@ class CodingMemoryReconciler:
                 ),
             }
         }
-        targets = {m["memory_id"]: m["task"] for m in current}
+        heads = {m["memory_id"]: m["task"] for m in current}
         for i in range(len(drafts)):
-            questions[f"{i}:action"] = {
-                "type": "choice",
-                "instructions": (
-                    f"Decide draft {i} using NEW source for support only. First "
-                    "verify faithfulness, then value, then knownness/change using "
-                    "current heads and history_versions. Returning to an ancestor "
-                    "solution is UPDATE of the current head, never SKIP. Equal "
-                    "task names do not mean equal solutions. Preserve independent "
-                    "workspace/branch/session/environment boundaries. Drafts are "
-                    "proposals, not stored knowledge."
-                ),
-                "criteria": _ACTIONS,
-            }
-            questions[f"{i}:target"] = {
-                "type": "choice",
-                "instructions": (
-                    f"Choose the CURRENT head for UPDATE/SKIP of draft {i}; "
-                    "never an ancestor or another incoming draft. Choose NONE "
-                    "for ADD/RAW_ONLY and MULTIPLE if one target cannot suffice."
-                ),
-                "criteria": {
-                    **targets,
-                    "NONE": "No target",
-                    "MULTIPLE": "Needs expanded context",
-                },
-            }
-        answers = await evaluate_decisions(
-            self.jev,
-            state={"source": source_messages, "drafts": proposals, "current": current},
-            questions=questions,
-        )
+            if heads:
+                questions[f"{i}:target"] = {
+                    "type": "choice",
+                    "instructions": (
+                        f"Select the one CURRENT head for a relation to draft {i}, "
+                        "or NONE when the draft is an independent solution, a limited "
+                        "exception, has no durable value, or belongs to a different "
+                        "workspace/branch/session boundary or independent environment "
+                        "constraints. Never select an ancestor or another incoming draft. "
+                        "Choose MULTIPLE only when the candidates need per-head "
+                        "adjudication; expansion must resolve to exactly one head."
+                    ),
+                    "criteria": {
+                        **heads,
+                        "NONE": "No current head",
+                        "MULTIPLE": "Needs per-head adjudication",
+                    },
+                }
+            else:
+                questions[f"{i}:action"] = _action_question(i, has_target=False)
+        state = {
+            "source": source_messages,
+            "drafts": proposals,
+            "current": current,
+        }
+        answers = await evaluate_decisions(self.jev, state=state, questions=questions)
         if answers["coverage"].choice == "MISSED":
             raise CodingDecisionError("coding extraction missed source coverage")
+        chosen: dict[int, str | None] = {}
+        for i in range(len(drafts)):
+            if not heads:
+                chosen[i] = None
+                continue
+            target = answers[f"{i}:target"].choice
+            if target == "MULTIPLE":
+                include = {
+                    f"{i}:{nid}": {
+                        "type": "choice",
+                        "instructions": (
+                            f"Is current head {nid} required for draft {i}?"
+                        ),
+                        "criteria": {
+                            "INCLUDE": "Required",
+                            "EXCLUDE": "Unrelated",
+                            "UNSURE": "Insufficient evidence",
+                        },
+                    }
+                    for nid in heads
+                }
+                picked = await evaluate_decisions(
+                    self.jev, state=state, questions=include
+                )
+                if any(item.choice == "UNSURE" for item in picked.values()):
+                    raise CodingDecisionError("uncertain coding targets")
+                matched = [
+                    nid
+                    for nid in heads
+                    if picked[f"{i}:{nid}"].choice == "INCLUDE"
+                ]
+                if len(matched) != 1:
+                    raise CodingDecisionError(
+                        "coding relation requires exactly one current head"
+                    )
+                target = matched[0]
+            if target not in heads and target != "NONE":
+                raise CodingDecisionError("unknown coding target")
+            chosen[i] = None if target == "NONE" else target
+        action_questions = {
+            f"{i}:action": _action_question(i, has_target=chosen[i] is not None)
+            for i in range(len(drafts))
+            if f"{i}:action" not in answers
+        }
+        if action_questions:
+            answers.update(
+                await evaluate_decisions(
+                    self.jev,
+                    state={**state, "selected_targets": chosen},
+                    questions=action_questions,
+                )
+            )
         ops = []
         for i, draft in enumerate(drafts):
             action = answers[f"{i}:action"].choice
-            target = answers[f"{i}:target"].choice
-            if action in ("INVALID", "NEED_CONTEXT") or target == "MULTIPLE":
+            target = chosen[i]
+            legal = _WITH_TARGET if target else _WITHOUT_TARGET
+            if action not in legal or action in ("INVALID", "NEED_CONTEXT"):
                 raise CodingDecisionError(
-                    f"coding JEV decision {action}/{target} for draft {i}"
+                    f"coding JEV decision {action} for draft {i}"
                 )
-            if action in ("UPDATE", "SKIP"):
-                if target not in targets:
-                    raise CodingDecisionError(
-                        "coding decision requires a current target"
-                    )
-                if action == "UPDATE" and version_boundary(draft) != version_boundary(
-                    by_id[target]
-                ):
-                    raise CodingDecisionError(
-                        "coding retirement crosses version boundary"
-                    )
-            elif target != "NONE":
+            if (action in _NEEDS_TARGET) != (target is not None):
                 raise CodingDecisionError(
-                    "coding non-retiring decision requires NONE target"
+                    "coding action does not match the selected target"
+                )
+            if action in _NEEDS_TARGET and version_boundary(
+                draft
+            ) != version_boundary(by_id[target]):
+                raise CodingDecisionError(
+                    "coding relation crosses version boundary"
                 )
             ops.append(
                 CodingReconcileOp(
-                    action=action,
+                    action="ADD" if action.startswith("ADD_") else action,
+                    update_type=(
+                        action.removeprefix("ADD_") if action.startswith("ADD_") else ""
+                    ),
                     draft_idx=i,
-                    target_memory_id=None if target == "NONE" else target,
+                    target_memory_id=target if action in _NEEDS_TARGET else None,
                     reason=action,
                 )
             )

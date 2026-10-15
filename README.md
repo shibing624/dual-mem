@@ -39,7 +39,7 @@ JEV 判断 `ADD / DELETE / SKIP` 及 `OVERRIDE / MERGE / SUPPLEMENT / TEMPORAL /
 
 ## 🔥 News
 
-- [2026/08/13] **main（未发版）**：新增原生生态集成层（agentica / Claude Code Hook / Hermes / OpenClaw / MCP），`dual-mem-hook` 脚本与 `agentica` extra；新增 coding 记忆子系统（实验性）。
+- [2026/10/15] **v0.1.3**：JEV 四层记忆与 target-first 裁决；`update` 返回新 id，`delete` 归档。旧数据目录不能打开，需换新的 `storage_dir`。一并纳入生态集成与实验性 coding。
 - [2026/06/20] **v0.1.2**：MemoryOperations 统一 REST/MCP；SyncMemoryClient；CLI `messages`；post-extract embed 合并；MCP 启动修复与文档。
 - [2026/06/19] **v0.1.1**：依赖拆分为 `[api]` / `[cli]` / `[mcp]` extras；默认 `hybrid` 读路径。
 - [2026/06/18] **v0.1.0**：首版开源 — system1 / dual 两档、演化链、REST `/v1/memories/` 契约、MCP 工具集。
@@ -124,7 +124,7 @@ asyncio.run(main())
 
 ## 功能特性
 
-- **四个阶段层 + 演化链** — 从 raw 对话到行为模式、意图，偏好变更可追溯
+- **四个阶段层 + 演化链** — `L0_RAW` 到事实、画像和 `L3_DERIVED`，偏好变更可追溯
 - **System1 短期记忆** — 写入即结构化；由 JEV 决定写入动作与关系
 - **System2 深度记忆**（dual）— 在明确业务边界调用 `digest()` 归纳 L3_DERIVED
 - **混合检索** — 语义 + 关键词；画像 / 主动 / 常规三路召回
@@ -151,7 +151,7 @@ dual-mem-mcp                                          # MCP stdio
 dual-mem-mcp --transport streamable-http --port 8765 # MCP HTTP /mcp
 dual-mem add --content "用户喜欢咖啡" --app-id default --user-id u1
 dual-mem search "饮品偏好" --app-id default --user-id u1
-dual-mem digest   # dual：触发 System2
+dual-mem digest   # dual：生成 L3_DERIVED
 ```
 
 REST 契约：`POST /v1/memories/`、`POST /v1/memories/search`、`GET|DELETE /v1/memories/{id}` 等。MCP 分 **本地 uvx**（已实现）与 **云端 HTTP**（REST 底座已就绪，HTTP MCP 待封装）两条路径，详见 [MCP 接入](docs/mcp_integration.md)。
@@ -174,7 +174,7 @@ dual-mem-hook search              # Claude Code: 搜记忆注入 additionalConte
 dual-mem-hook ingest              # Claude Code: 提取对话写入记忆
 ```
 
-> 另有 **coding 记忆子系统**（`dual_mem.coding`）针对含工具调用的工程对话，当前为实验性（无测试、未纳入公共 API）。
+> 另有 **coding 记忆子系统**（`dual_mem.coding`，`coding_enabled=true`）针对含工具调用的工程对话。它走同一套 JEV 动作，默认关闭。
 
 ## 示例
 
@@ -185,6 +185,7 @@ dual-mem-hook ingest              # Claude Code: 提取对话写入记忆
 | **SDK 基础** | 短期记忆写入、演化链、多轮 `messages` |
 | **深度记忆** | dual 模式、显式 `digest()` 巩固 |
 | **REST** | FastAPI TestClient 走 `/v1/memories/` 全契约 |
+| **生命周期** | `add_raw` / `distill`、原文检索、`update` 新 id、归档删除 |
 | **CLI** | `dual-mem` 子命令 add / search / list / delete |
 
 [→ 查看完整示例目录](https://github.com/shibing624/dual-mem/blob/main/examples/README.md)
@@ -194,9 +195,10 @@ python examples/01_system1.py
 python examples/02_dual.py
 python examples/03_rest_api.py
 python examples/04_cli.py
+python examples/05_lifecycle.py
 ```
 
-> 示例需真实 LLM + Embedding API key，会产生少量费用。
+> 示例需真实 JEV、LLM 与 Embedding，会产生少量费用。
 
 ## 文档
 

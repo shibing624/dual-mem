@@ -106,26 +106,31 @@ def build_mcp(
             min_score=min_score,
         )
 
-    @mcp.tool(description="列出某 scope 下 ACTIVE 记忆。")
+    @mcp.tool(description="列出某 scope 的当前记忆。include_history=true 时连同已归档版本。")
     async def memory_list(
         user_id: str,
         app_id: str | None = None,
         agent_id: str = "",
         limit: int = 100,
+        include_history: bool = False,
     ) -> list[dict]:
         return await ops.memory_list(
-            user_id=user_id, app_id=app_id, agent_id=agent_id, limit=limit
+            user_id=user_id,
+            app_id=app_id,
+            agent_id=agent_id,
+            limit=limit,
+            include_history=include_history,
         )
 
     @mcp.tool(description="按 memory_id 获取单条；不存在返回 null。")
     async def memory_get(memory_id: str) -> dict | None:
         return await ops.memory_get(memory_id)
 
-    @mcp.tool(description="更新记忆正文并重新 embedding。")
+    @mcp.tool(description="追加一版更正并返回新 memory_id；旧 id 仍可 get，is_latest=false。")
     async def memory_update(memory_id: str, content: str) -> dict:
         return await ops.memory_update(memory_id, content)
 
-    @mcp.tool(description="删除单条记忆。")
+    @mcp.tool(description="归档一条当前记忆，不物理删除。删非当前版本返回 409。")
     async def memory_delete(memory_id: str) -> dict:
         return await ops.memory_delete(memory_id)
 
@@ -152,7 +157,7 @@ def build_mcp(
     ) -> list[dict]:
         return await ops.memory_list_scopes(app_id=app_id, limit=limit)
 
-    @mcp.tool(description="触发 System2 深度记忆巩固（dual 模式）。")
+    @mcp.tool(description="dual 模式生成 L3_DERIVED。system1 返回 processed=0，不会自动后台巩固。")
     async def memory_digest() -> dict:
         return await ops.memory_digest()
 

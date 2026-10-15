@@ -1,4 +1,4 @@
-"""Host-injected memory blocks must not be written back as L1 / extract input."""
+"""Host-injected memory blocks must not be written back as L0_RAW / extract input."""
 from dual_mem.client import MemoryClient, strip_memory_injection
 from dual_mem.config import Settings
 
@@ -49,7 +49,7 @@ async def test_add_strips_injection_from_messages(tmp_storage, fake_embed):
     client = MemoryClient(
         settings=Settings(mode="system1", storage_dir=tmp_storage),
         embed=fake_embed,
-        llm=FakeLLMClient(responses={"extract": extract_capture, "search_query": []}),
+        llm=FakeLLMClient(responses={"extract": extract_capture}),
     )
     result = await client.add(
         messages=[{"role": "user", "content": _INJECTED}],

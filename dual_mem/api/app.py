@@ -189,13 +189,18 @@ def create_app(
         app_id: str | None = None,
         agent_id: str = "",
         limit: int = 100,
+        include_history: bool = False,
         settings: Settings = Depends(_get_settings),
         ops: MemoryOperations = Depends(_get_ops),
     ):
         resolved_app_id = resolve_app_id(settings, app_id)
         _check_whitelist(settings, [resolved_app_id])
         return await ops.memory_list(
-            app_id=resolved_app_id, user_id=user_id, agent_id=agent_id, limit=limit
+            app_id=resolved_app_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            limit=limit,
+            include_history=include_history,
         )
 
     # ── memory_get ────────────────────────────────────────────────────────────

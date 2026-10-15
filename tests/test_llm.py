@@ -69,6 +69,7 @@ async def test_chat_json_sends_json_mode_by_default():
     await _make_client().chat_json(system="s", user="u")
     body = _json.loads(route.calls.last.request.content)
     assert body["response_format"] == {"type": "json_object"}
+    assert "json" in body["messages"][1]["content"].lower()
 
 
 @respx.mock

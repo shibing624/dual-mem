@@ -51,7 +51,7 @@ asyncio.run(main())
 | `mode` | 否 | `"system1"`（默认，写 L0/L1/L2）或 `"dual"`（+ 显式 `digest()` 写 L3_DERIVED）。可写在 YAML。 |
 | `storage_dir` | 否 | 本地数据目录（Chroma + Kuzu + SQLite），默认 `./.dual_mem_data`。 |
 | `settings` | 否 | 传入 `Settings` 对象，覆盖 YAML / 环境变量。 |
-| `embed` / `llm` | 否 | 注入自定义客户端（测试 / 自建后端）；注入后跳过对应 `api_key` 校验。 |
+| `embed` / `llm` / `jev` | 否 | 注入自定义客户端（测试 / 自建后端）；注入后跳过对应密钥校验。 |
 
 ### `add(...)` / `search(...)` 归属标识
 
@@ -160,9 +160,10 @@ if __name__ == "__main__":
 
 | 操作 | 建议 |
 |---|---|
-| `search` | 每轮用户输入前 |
-| `add` | 会话结束一次（或每 N 轮 batch）；每次至少 1 次 Extract LLM，长文本可再触发摘要 |
-| `WriteResult` | 读取 `commit_passed`；`False` 表示 JEV 未追加结构化版本（如已知 SKIP 或 RAW_ONLY），L0 原文仍保留；`decisions` 返回动作与关系 |
+| `search` | 每轮用户输入前。默认不返回 `L0_RAW`；核对原话用 `search_conversation` |
+| `add` | 会话结束一次（或每 N 轮 batch）。正常一次是 1 次候选生成 + 1 次 JEV，长文本不会在 `add()` 里自动摘要 |
+| `WriteResult` | `memory_id` 是 `L0_RAW`。`commit_passed=False` 表示没有追加结构化版本（如 `RAW_ONLY`），原文仍保留。`decisions` 带 action、update_type、targets |
+| `update` / `delete` | `update` 返回新 id；`delete` 归档当前版本。列出历史用 `list(..., include_history=True)` |
 
 ## dual 模式与 System2 触发
 

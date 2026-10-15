@@ -1,37 +1,28 @@
-"""Demo 2 — dual 档：显式 System2 认知（Schema / Intention）。
+"""Demo 2 — dual：每次 add 先完成和 system1 相同的 JEV 写入，digest() 再写 L3。
 
-场景：用户在某领域留下多条同质事实，System2 在 `digest()` 时聚类并沉淀出高层认知：
-  - L6 Schema：跨多条证据归纳出的行为模式（"当…时，用户…——反映…"）。
-  - L7 Intention：用户表达的具体未来计划。
+digest 不重跑 reconcile。它只把尚未覆盖的 L1/L2 证据做成 L3_DERIVED
+（跨证据模式、摘要）。意图仍是 L1 的 kind=intention，要 intention_limit>0 才进 proactive。
 
-dual = system1 全部能力 + System2 ReAct（多轮 function-calling，受 `system2_max_iters` 限制）+
-图库（Kuzu）。
-
-环境要求：`llm_*` + `embed_*`；会产生数次真实 LLM 调用（Reader/Writer/System2）。
+环境要求：jev_*、llm_*、embed_*。digest 会再打一次生成模型和 JEV。
 
 运行：python examples/02_dual.py
-期望：digest 后能看到至少一条 L6 schema 出现在 profile 召回。
+期望：digest.processed >= 1，profile 里出现 L3；proactive 里能看到马拉松计划。
 """
 import asyncio
 
-from _common import fresh_storage, section, show_memories
+from _common import example_settings, section, show_memories, show_write
 
 from dual_mem import MemoryClient
-from dual_mem.config import Settings
 
 
 async def main() -> None:
-    settings = Settings(
-        mode="dual",
-        storage_dir=fresh_storage("dual"),
-    )
-    client = MemoryClient(settings=settings)
+    client = MemoryClient(settings=example_settings("dual", "dual"))
     user = "carol"
     try:
-        # 给一组「互不取代但同主题」的离散事实：System2 才能聚类并归纳出行为模式。
-        # 注意：这里刻意串行写入——并发会让 reconcile 把同主题事实合并成一条，
-        # 聚类样本不足，反而出不了 Schema。
-        section("写入同领域多条离散事实（System1 先落 L2/L4）")
+        # 这些事实彼此不是同一维度的状态替换，JEV 应各自 SUPPLEMENT。
+        # 串行写是为了让「整理习惯」和「马拉松计划」按叙述顺序落库；
+        # 同 user 的并发 add 默认不拿写锁，靠版本 CAS 重试。
+        section("写入同领域多条事实（每次 add 已完成 JEV，不是先堆原文再 digest）")
         facts = [
             "我上周把整个衣柜按颜色和季节重新分类整理了一遍。",
             "我出差前一定会列一张详细的清单，逐项打勾确认才安心。",
@@ -41,21 +32,20 @@ async def main() -> None:
             "下个月我要参加一场马拉松比赛，正在按周制定训练计划。",
         ]
         for text in facts:
-            res = await client.add(content=text, user_id=user)
-            print(f"  + {text}\n    -> id={res.memory_id[:8]}")
+            show_write(await client.add(content=text, user_id=user), text)
 
-        section("digest()：显式触发 reconcile + System2 ReAct")
+        section("digest()：只生成 L3，不重新裁决已写入的 L1/L2")
         digest = await client.digest()
         print(f"  processed={digest.processed}")
 
-        section("检索：行为模式（期望 profile 召回 L6 Schema）")
+        section("检索：行为模式进 profile（L3），马拉松计划进 proactive")
         out = await client.search(
-            query="这位用户在做事方式上有什么稳定的行为模式？",
+            query="这位用户在做事方式上有什么稳定的行为模式？接下来有什么计划？",
             user_id=user,
             limit=5,
             min_score=0.0,
             profile_limit=5,
-            intention_limit=3,  # 打开 L7 Intention 召回（默认关闭）
+            intention_limit=3,
         )
         show_memories(out.memories)
     finally:

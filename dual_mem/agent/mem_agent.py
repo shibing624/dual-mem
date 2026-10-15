@@ -143,40 +143,60 @@ class MemAgent:
         scope = (raw_node.app_id, raw_node.user_id, raw_node.agent_id)
         lock = self.factory.commit_locks.get("decision::" + "::".join(scope))
         plan_feedback: dict | None = None
+        last_plan_error: DecisionPlanError | None = None
+
+        def _rejected(exc: DecisionPlanError, ops: list[ReconcileOp]) -> dict:
+            return {
+                "constraint": str(exc),
+                "instructions": (
+                    "Reconsider the entire batch; every retiring current target may be consumed once. "
+                    "Distinct events and current state are separate dimensions. "
+                    "Preserve all candidates; choose corresponding earlier proposals for dependent versions when needed. "
+                    "An earlier proposal can be a relation target only if its action creates a memory or resolves to a current head. "
+                    "Do not guess or change source content. "
+                    "SKIP, OVERRIDE, MERGE, NEGATE and CONFLICT require a selected current head or materialized earlier proposal; DELETE requires a current head; NONE is not coverage."
+                ),
+                "decisions": [
+                    {
+                        "proposals": op.proposal_ids,
+                        "action": op.decision.get("action", {}).get(
+                            "choice", op.op
+                        ),
+                        "update_type": op.update_type,
+                        "targets": op.target_ids,
+                    }
+                    for op in ops
+                ],
+            }
 
         async def plan_and_commit() -> (
             tuple[list[ReconcileOp], list[MemoryNode], list[str], bool]
         ):
-            nonlocal plan_feedback
-            ops = await self.reconciler.reconcile(
-                new_memories=memories,
-                new_memories_meta=meta,
-                app_id=raw_node.app_id,
-                user_id=raw_node.user_id,
-                agent_id=raw_node.agent_id,
-                current_time=current_time,
-                exclude_ids=[raw_node.node_id],
-                source_content=content,
-                plan_feedback=plan_feedback,
-            )
+            nonlocal plan_feedback, last_plan_error
+            last_plan_error = None
+            try:
+                ops = await self.reconciler.reconcile(
+                    new_memories=memories,
+                    new_memories_meta=meta,
+                    app_id=raw_node.app_id,
+                    user_id=raw_node.user_id,
+                    agent_id=raw_node.agent_id,
+                    current_time=current_time,
+                    exclude_ids=[raw_node.node_id],
+                    source_content=content,
+                    plan_feedback=plan_feedback,
+                )
+            except DecisionPlanError as exc:
+                last_plan_error = exc
+                plan_feedback = _rejected(exc, [])
+                return [], [], [], False
             try:
                 nodes, expected, archives = await self._prepare_nodes(
                     ops, raw_node, request_id
                 )
             except DecisionPlanError as exc:
-                plan_feedback = {
-                    "constraint": str(exc),
-                    "instructions": "Reconsider the entire batch; every current target may be consumed once. Distinct events and current state are separate dimensions. Preserve all candidates; choose corresponding earlier proposals for dependent versions when needed. Do not guess or change source content.",
-                    "decisions": [
-                        {
-                            "proposals": op.proposal_ids,
-                            "action": op.op,
-                            "update_type": op.update_type,
-                            "targets": op.target_ids,
-                        }
-                        for op in ops
-                    ],
-                }
+                last_plan_error = exc
+                plan_feedback = _rejected(exc, ops)
                 return ops, [], [], False
             committed = await asyncio.to_thread(
                 self.factory.vector.apply_version_plan,
@@ -202,6 +222,8 @@ class MemAgent:
                 ops, nodes, archives, committed = await plan_and_commit()
             if not committed:
                 if attempt + 1 == self.factory.settings.reconcile_retry_attempts:
+                    if last_plan_error is not None:
+                        raise last_plan_error
                     raise DecisionContextError(
                         "targets changed concurrently; retry write"
                     )
@@ -277,6 +299,7 @@ class MemAgent:
             for op in adds
             for pid in op.proposal_ids
         }
+        proposal_ids = {pid for op in ops for pid in op.proposal_ids}
         expected: dict[str, int] = {}
         archives: list[str] = []
         embeddings = (
@@ -292,6 +315,21 @@ class MemAgent:
                 for pid in op.proposal_ids:
                     resolved[pid] = resolved.get(op.memory_id, op.memory_id)
         for op in ops:
+            unresolved = [
+                target
+                for target in op.target_ids
+                if target in proposal_ids and target not in resolved
+            ]
+            if unresolved:
+                raise DecisionPlanError(
+                    "operation targets an earlier proposal that produced no memory"
+                )
+            if op.op == "DELETE" and any(
+                target in proposal_ids for target in op.target_ids
+            ):
+                raise DecisionContextError(
+                    "DELETE cannot target an uncommitted proposal"
+                )
             targets = [resolved.get(nid, nid) for nid in op.supersedes]
             if touched.intersection(targets):
                 raise DecisionPlanError(

@@ -7,7 +7,16 @@ from typing import Any, Literal
 BOUNDARY_SCOPES = ("strict", "project", "user", "global")
 BoundaryScope = Literal["strict", "project", "user", "global"]
 
-ReconcileAction = Literal["ADD", "UPDATE", "SKIP", "RAW_ONLY"]
+ReconcileAction = Literal["ADD", "SKIP", "DELETE", "RAW_ONLY"]
+UpdateType = Literal[
+    "",
+    "SUPPLEMENT",
+    "OVERRIDE",
+    "MERGE",
+    "TEMPORAL",
+    "NEGATE",
+    "CONFLICT",
+]
 CodingScope = tuple[str, str, str]
 
 
@@ -117,6 +126,7 @@ class CodingReconcileOp:
     action: ReconcileAction
     draft_idx: int | None = None
     target_memory_id: str | None = None
+    update_type: UpdateType = ""
     reason: str | None = None
 
 

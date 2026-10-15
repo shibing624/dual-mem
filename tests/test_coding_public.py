@@ -21,7 +21,12 @@ def messages():
 
 async def test_public_coding_returns_raw_and_decisions(tmp_storage, fake_embed):
     jev = FakeJev(
-        {"scene": "CODING", "coverage": "VALID", "0:action": "ADD", "0:target": "NONE"}
+        {
+            "scene": "CODING",
+            "coverage": "VALID",
+            "0:action": "ADD_SUPPLEMENT",
+            "0:target": "NONE",
+        }
     )
     llm = FakeLLMClient(
         {
@@ -45,6 +50,7 @@ async def test_public_coding_returns_raw_and_decisions(tmp_storage, fake_embed):
     assert r.success and r.commit_passed and r.extracted_count == 1
     assert r.memory_id and r.memory_id != r.extra_node_ids[0]
     assert r.decisions[0].action == "ADD" and r.decisions[0].update_type == "SUPPLEMENT"
+    assert r.decisions[0].targets == [] and r.decisions[0].proposal_ids == ["p0"]
     assert r.decisions[0].source_ids == [r.memory_id]
     raw = await c.get(r.memory_id)
     assert "BEGIN IMMEDIATE" in raw.content and "Host secret" not in raw.content

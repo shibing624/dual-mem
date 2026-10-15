@@ -52,7 +52,7 @@ def _format_item(
             lines.append(f"  (持续: {start} → {end})")
     source_id = item.get("source_node_id") or ""
     if source_id:
-        lines.append(f"  (来源: L1 {str(source_id)[:8]})")
+        lines.append(f"  (来源: L0 {str(source_id)[:8]})")
 
     chain = item.get("evolution_chain")
     is_merge = item.get("update_type") == "MERGE" or (

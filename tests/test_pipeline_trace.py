@@ -1,4 +1,4 @@
-"""Pipeline trace for Extract commit decisions and hybrid read stages."""
+"""Pipeline trace for JEV decisions and hybrid read stages."""
 
 from dual_mem.client import MemoryClient
 from dual_mem.config import Settings
@@ -23,7 +23,7 @@ async def test_write_logs_extract_commit_decision(tmp_storage, fake_embed):
     client = MemoryClient(
         settings=settings,
         embed=fake_embed,
-        llm=FakeLLMClient(responses={"extract": _EXTRACT, "search_query": []}),
+        llm=FakeLLMClient(responses={"extract": _EXTRACT}),
     )
     result = await client.add(
         content="用户最近开始喝咖啡了，每天都要来一杯", app_id="app", user_id="u"

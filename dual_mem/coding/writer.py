@@ -88,9 +88,11 @@ class CodingWriter:
                 "coding operations must cover every draft exactly"
             )
         memories = []
+        archives: list[str] = []
         decisions = []
+        retires = {"OVERRIDE", "MERGE", "NEGATE"}
         for op in ops:
-            if op.action not in ("ADD", "UPDATE", "SKIP", "RAW_ONLY"):
+            if op.action not in ("ADD", "SKIP", "DELETE", "RAW_ONLY"):
                 raise CodingDecisionError("unsupported coding write action")
             draft = drafts[op.draft_idx]
             if (draft.app_id, draft.user_id, draft.agent_id) != (
@@ -99,8 +101,9 @@ class CodingWriter:
                 agent_id,
             ):
                 raise CodingDecisionError("coding candidate crosses request scope")
-            if op.action in ("ADD", "UPDATE"):
-                if (op.action == "UPDATE") != bool(op.target_memory_id):
+            if op.action == "ADD":
+                needs_target = op.update_type in {"OVERRIDE", "MERGE", "NEGATE", "CONFLICT"}
+                if needs_target != bool(op.target_memory_id):
                     raise CodingDecisionError("coding write action/target mismatch")
                 now = datetime.now(timezone.utc)
                 mem = CodingMemory(
@@ -108,21 +111,33 @@ class CodingWriter:
                     **draft.to_dict(),
                     created_at=now,
                     updated_at=now,
-                    supersedes=[op.target_memory_id] if op.action == "UPDATE" else [],
+                    supersedes=(
+                        [op.target_memory_id] if op.update_type in retires else []
+                    ),
                     source_ids=[raw_id],
                 )
                 memories.append(mem)
+            elif op.action == "DELETE":
+                if not op.target_memory_id:
+                    raise CodingDecisionError("coding DELETE requires a current target")
+                archives.append(op.target_memory_id)
+            elif op.action == "SKIP":
+                if not op.target_memory_id:
+                    raise CodingDecisionError("coding SKIP requires a current target")
             decisions.append(
                 {
                     "action": op.action,
+                    "update_type": op.update_type or None,
                     "targets": [op.target_memory_id] if op.target_memory_id else [],
-                    "proposal_ids": [str(op.draft_idx)],
+                    "proposal_ids": [f"p{op.draft_idx}"],
                     "source_ids": [raw_id],
                     "reason": op.reason,
                 }
             )
-        memory_ids = await self.store.add_many(memories, expected_epoch=epoch)
-        if not memories:
+        memory_ids = await self.store.add_many(
+            memories, expected_epoch=epoch, archive_ids=archives
+        )
+        if not memories and not archives:
             self.store.assert_epoch((app_id, user_id, agent_id), epoch)
         if not drafts:
             decisions.append(
@@ -139,7 +154,9 @@ class CodingWriter:
             "source_ids": [raw_id],
             "memory_ids": memory_ids,
             "extra_node_ids": [f"{mid}_key0" for mid in memory_ids],
-            "commit_passed": any(op.action in ("ADD", "UPDATE", "SKIP") for op in ops),
+            "commit_passed": any(
+                op.action in ("ADD", "SKIP", "DELETE") for op in ops
+            ),
             "decisions": decisions,
             "ops": [asdict(op) for op in ops],
         }

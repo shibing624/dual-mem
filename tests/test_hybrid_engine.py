@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Hybrid engine integration: in-pool BM25 rerank, I3 keyword gate rescue, dual-mode L6.
+"""Hybrid engine integration: in-pool BM25 rerank, keyword gate rescue, dual-mode L3.
 
 These pin the behaviour that the keyword signal is a re-rank over the recalled semantic
 pool (no full-collection scan) and that an exact-term / rare-word match survives the
-min_score floor via fuse-then-gate. The dual case exercises the L6 forward+reverse profile
+min_score floor via fuse-then-gate. The dual case exercises the L3 forward+reverse profile
 fusion path.
 """
 import math
@@ -175,8 +175,8 @@ async def test_ubiquitous_term_does_not_force_weak_hits_through_gate(tmp_storage
     await client.aclose()
 
 
-async def test_dual_l6_schema_recalled_into_profile(tmp_storage, fake_embed):
-    """Dual mode: an L6 schema (graph) with DERIVED_FROM evidence surfaces in the profile route."""
+async def test_dual_l3_derived_recalled_into_profile(tmp_storage, fake_embed):
+    """Dual mode: an L3 derived node with evidence surfaces in the profile route."""
     settings = Settings(mode="dual", storage_dir=tmp_storage)
     client = MemoryClient(settings=settings, embed=fake_embed, llm=FakeLLMClient())
 

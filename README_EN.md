@@ -42,7 +42,7 @@ providers; see [the full design](docs/jev-memory-design.md).
 
 ## 🔥 News
 
-- [2026/08/13] **main (unreleased)**: native ecosystem integration layer (agentica / Claude Code Hook / Hermes / OpenClaw / MCP), `dual-mem-hook` script and `agentica` extra; experimental coding memory subsystem.
+- [2026/10/15] **v0.1.3**: JEV four-layer memory and target-first decisions; `update` returns a new id and `delete` archives. Old data directories are rejected; use a new `storage_dir`. Ecosystem integrations and experimental coding are included.
 - [2026/06/20] **v0.1.2**: MemoryOperations for REST/MCP; SyncMemoryClient; CLI messages; post-extract embed batching; MCP bootstrap fixes and docs.
 - [2026/06/19] **v0.1.1**: Dependencies split into `[api]` / `[cli]` / `[mcp]` extras; hybrid reader V2 became the default.
 - [2026/06/18] **v0.1.0**: Initial release — system1 / dual modes, evolution chains, REST `/v1/memories/` contract, MCP tools.
@@ -154,7 +154,7 @@ dual-mem-mcp                                          # MCP stdio
 dual-mem-mcp --transport streamable-http --port 8765 # MCP HTTP /mcp
 dual-mem add --content "User likes coffee" --app-id default --user-id u1
 dual-mem search "drink preference" --app-id default --user-id u1
-dual-mem digest   # dual: trigger System2
+dual-mem digest   # dual: build L3_DERIVED
 ```
 
 REST contract: `POST /v1/memories/`, `POST /v1/memories/search`, `GET|DELETE /v1/memories/{id}`, etc. See [MCP integration](docs/mcp_integration.md).
@@ -177,7 +177,7 @@ dual-mem-hook search              # Claude Code: inject memories into additional
 dual-mem-hook ingest              # Claude Code: extract conversation into memory
 ```
 
-> A separate **coding memory subsystem** (`dual_mem.coding`) targets tool-using engineering conversations; currently experimental (no tests, not part of the public API).
+> A separate **coding memory subsystem** (`dual_mem.coding`, `coding_enabled=true`) targets tool-using engineering conversations. It uses the same JEV actions and is off by default.
 
 ## Examples
 

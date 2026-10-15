@@ -1,8 +1,7 @@
 """Tests for credential validation in MemoryClient.
 
-dual-mem requires both LLM and embedding API keys; missing credentials raise on construction
-(no silent embedding-only fallback). Injected ``embed=`` / ``llm=`` clients bypass the api_key
-check so tests / custom backends can plug in directly.
+dual-mem requires LLM, embedding, and JEV API keys; missing credentials raise on construction.
+Injected ``embed=`` / ``llm=`` / ``jev=`` clients bypass the api_key check.
 """
 import pytest
 

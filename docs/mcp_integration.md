@@ -25,15 +25,18 @@ Agent (Cursor / Claude / 自研)
 |---|---|---|
 | `memory_add` | `POST /v1/memories/` | `add` |
 | `memory_search` | `POST /v1/memories/search` | `search` |
-| `memory_list` | `GET /v1/memories/` | `list` |
+| `conversation_search` | `POST /v1/memories/search_conversation` | `search_conversation` |
+| `memory_list` | `GET /v1/memories/?include_history=` | `list` |
 | `memory_get` | `GET /v1/memories/{id}` | `get` |
-| `memory_update` | `PUT /v1/memories/{id}` | `update` |
-| `memory_delete` | `DELETE /v1/memories/{id}` | `delete` |
+| `memory_update` | `PUT /v1/memories/{id}` | `update`（返回新版本 id） |
+| `memory_delete` | `DELETE /v1/memories/{id}` | `delete`（归档当前版本） |
 | `memory_delete_scope` | `DELETE /v1/memories/?confirm=true` | `delete_bulk` |
 | `memory_list_scopes` | `GET /v1/scopes/` | `list_scopes` |
 | `memory_digest` | `POST /v1/digest/` | `digest` |
 
-发现端点：`GET /v1/capabilities` — 返回 `tools` 数组（含 method/path），供 HTTP MCP / npm codegen 自动生成工具定义。
+发现端点：`GET /v1/capabilities` — 返回 `tools` 数组（含 method/path）。本仓库没有 npm 包；云端 HTTP MCP 仍是规划，本地用 Python `dual-mem-mcp`。
+
+`memory_list` 默认只列当前版本，`include_history=true` 才连同已归档版本。`memory_update` 追加一版并返回新 id。`memory_delete` 归档，不物理删除。`memory_digest` 只在 dual 生成 `L3_DERIVED`；system1 返回 `processed=0`。
 
 ## 本地 MCP（已实现）
 

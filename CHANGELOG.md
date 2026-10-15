@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased — JEV memory redesign
+## Unreleased
+
+## [0.1.3] — 2026-10-15
 
 - Replace write-side semantic rules and similarity routing with batched JEV decisions.
 - Keep four canonical layers and only system1 / dual modes; retain linked history.
@@ -8,6 +10,11 @@
 - Add per-attempt JEV latency and generation reasoning telemetry; hy3 smoke explicitly uses no_think.
 - JEV target 选项从节点正文改为完整 `_context_node` JSON（layer、kind、revision、有效期、source_ids）。候选一多会先撞上 255 个选项或 `jev_max_question_chars`，抛 `DecisionContextError`，不会静默改成 SUPPLEMENT。action 说明把「另一次搬家」和「当前居住地变化」分开。
 - 打开 `layer_schema_version != 4` 或非 `ACTIVE` 的目录直接报错且不改写。已有 `.dual_mem_data` 必须换新 `storage_dir`；旧 reconcile 队列不再排空。
+- `llm_json_mode=true` 时，若 user 消息里没有单词 `json`，请求前会补上 `Reply with json.`。只写在 system 里不够：部分兼容网关只检查 input，会拒绝 `response_format=json_object`（System2 digest 原先只有 `Return {...}`）。
+- JEV 关系裁决是 target-first，而且 action 集合双向闭合。有 target 只能选 `OVERRIDE` / `MERGE` / `NEGATE` / `CONFLICT` / `SKIP` / `DELETE` / `INVALID` / `NEED_CONTEXT`；无 target 只能选 `SUPPLEMENT` / `TEMPORAL` / `RAW_ONLY` / `INVALID` / `NEED_CONTEXT`。两段 instructions 分开，无 target 时不再提到 SKIP。`TEMPORAL` 和 `SUPPLEMENT` 不写 target，也不把 target 放进 CAS。动作和 target 不匹配抛 `DecisionContextError`，不重试；批内关系若指向最终 `RAW_ONLY` 的 earlier proposal，则作为依赖计划冲突重裁决。`DELETE` 只能指向已提交的 current head，不能归档尚未提交的 earlier proposal。`SKIP` 必须且只能有一个覆盖目标；多目标共同覆盖应生成可引用的 `MERGE`。主路径现在也严格校验注入 provider 的回答完整性、类型和选项。没有可选 target 时仍是一次 JEV；有可选 target 时多一次。coding 使用同一套两阶段，不再有 `:repair` 补问。
+- `add()` 不再对长文本自动摘要。独立 `Summarizer` 已删除；`L3_DERIVED` 只由 dual 的 `digest()` 生成。
+- 实验性 coding 写入与主路径使用同一套 JEV 动作和 target-first 约束。所有 target 关系都必须留在相同 workspace / branch / strict-session 边界，避免跨项目 `SKIP`、`CONFLICT` 或 `DELETE`；target choice 为 `NONE` / `MULTIPLE` 预留两个选项后，`CodingMemoryReconciler(candidate_limit=...)` 最大为 253。coding 的 `MULTIPLE` 表示需要逐 head 裁决，展开后必须唯一选中一个 head。自定义 `DecisionProvider` 只需实现协议声明的 `evaluate()`，请求大小限制由 provider 自己执行。`DELETE` 只归档当前 head，不另写一行。`SKIP` 必须指向当前 head。对外 `MemoryDecision` 带上真实 `targets`、`proposal_ids` 和 `update_type`。
+- `list` / MCP `memory_list` / REST `GET /v1/memories/` / 集成工具增加 `include_history`（CLI 为 `--include-history`），默认仍只列当前版本。`update` 说明改为追加新版本，`delete` 说明改为归档。`digest` 只在 dual 生成 `L3_DERIVED`。来源标注从 `(来源: L1 …)` 改为 `(来源: L0 …)`。
 
 本文件记录 **dual-mem SDK** 中会影响 **延迟、LLM 调用次数、召回/写入效果** 的变更。  
 Benchmark 对比或线上行为异常时，优先查此表 + 对应 `Settings` / `config.default.yaml` 开关。
@@ -185,4 +192,4 @@ llm_json_mode: false              # vLLM Qwen 兼容
 
 ---
 
-维护约定：任何 **默认配置变更**、**LLM / JEV 调用次数变更**、**截断或上下文预算变更**、**并发变更**，合并时写入文首 `Unreleased — JEV memory redesign`。
+维护约定：任何 **默认配置变更**、**LLM / JEV 调用次数变更**、**截断或上下文预算变更**、**并发变更**，合并时写入文首 `Unreleased`。

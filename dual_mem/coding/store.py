@@ -314,10 +314,23 @@ class CodingMemoryStore:
         return mem.memory_id
 
     async def add_many(
-        self, memories: list[CodingMemory], *, expected_epoch: int | None = None
+        self,
+        memories: list[CodingMemory],
+        *,
+        expected_epoch: int | None = None,
+        archive_ids: list[str] | None = None,
     ) -> list[str]:
         """Append an all-or-nothing visible batch; immutable IDs cannot be reused."""
+        archive_ids = list(archive_ids or [])
+        if not memories and not archive_ids:
+            return []
         if not memories:
+            head = self.get(archive_ids[0])
+            if head is None:
+                raise ValueError("coding archive target missing")
+            scope = coding_scope(head)
+            epoch = self._epoch(scope) if expected_epoch is None else expected_epoch
+            await asyncio.to_thread(self._publish, [], scope, epoch, archive_ids)
             return []
         # Freeze the caller's mutable dataclasses before any await.
         memories = [
@@ -370,7 +383,7 @@ class CodingMemoryStore:
                 )
                 offset += 1
         await asyncio.to_thread(self._write_vectors, nodes)
-        await asyncio.to_thread(self._publish, memories, scope, epoch)
+        await asyncio.to_thread(self._publish, memories, scope, epoch, archive_ids)
         return [m.memory_id for m in memories]
 
     def _validate_plan(
@@ -440,13 +453,54 @@ class CodingMemoryStore:
                 retired.add(old_id)
 
     def _publish(
-        self, memories: list[CodingMemory], scope: CodingScope, epoch: int
+        self,
+        memories: list[CodingMemory],
+        scope: CodingScope,
+        epoch: int,
+        archive_ids: list[str] | None = None,
     ) -> None:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                self._validate_plan(memories, scope, epoch, reserved=True)
+                if memories:
+                    self._validate_plan(memories, scope, epoch, reserved=True)
+                elif self._epoch(scope) != epoch:
+                    raise CodingConcurrentWriteError(
+                        "coding scope changed after reconciliation"
+                    )
                 patches = {}
+                retired = {old_id for mem in memories for old_id in mem.supersedes}
+                for old_id in archive_ids or []:
+                    if old_id in retired:
+                        raise CodingConcurrentWriteError(
+                            "coding archive target is also replaced in this batch"
+                        )
+                    old = self.get(old_id)
+                    if (
+                        old is None
+                        or not old.is_latest
+                        or coding_scope(old) != scope
+                    ):
+                        raise ValueError(
+                            "coding archive target missing or not current"
+                        )
+                    retired.add(old_id)
+                    for i in range(1 + len(old.search_keys)):
+                        nid = f"{old_id}_key{i}"
+                        vector = self.vector.get(nid)
+                        if vector is None or (
+                            vector.app_id,
+                            vector.user_id,
+                            vector.agent_id,
+                        ) != (self._vdb_app_id(scope[0]), scope[1], scope[2]):
+                            raise CodingDecisionError(
+                                "missing or foreign coding history vector"
+                            )
+                        patches[nid] = {"is_latest": False, "superseded_by": ""}
+                    self._conn.execute(
+                        "UPDATE coding_memory_meta SET is_latest=0 WHERE memory_id=? AND published=1 AND is_latest=1",
+                        (old_id,),
+                    )
                 for mem in memories:
                     for old_id in mem.supersedes:
                         old = self.get(old_id)
@@ -477,8 +531,15 @@ class CodingMemoryStore:
                     checked = self.vector.get_by_ids(list(patches))
                     if set(checked) != set(patches) or any(
                         checked[nid].is_latest
-                        or checked[nid].superseded_by
-                        != patch["superseded_by"].split("\x1f")
+                        or (
+                            "superseded_by" in patch
+                            and checked[nid].superseded_by
+                            != (
+                                patch["superseded_by"].split("\x1f")
+                                if patch["superseded_by"]
+                                else []
+                            )
+                        )
                         for nid, patch in patches.items()
                     ):
                         raise CodingDecisionError(

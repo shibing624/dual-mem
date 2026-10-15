@@ -31,10 +31,11 @@ pip install -e ".[dev]"
 首次 `MemoryClient(...)` 或 `Settings()` 会在 **`~/.dual_mem/config.yaml`** 自动创建默认配置（与包内 `dual_mem/config.default.yaml` 一致），只需填入 API key：
 
 ```yaml
+jev_api_key: ...
 llm_api_key: sk-...
 embed_api_key: sk-...
 ```
 
-**dual-mem 同时需要 LLM 与 Embedding 两套 API key**，缺失时 `MemoryClient(...)` 会抛 `MissingCredentialsError`。
+构造需要三组凭证：JEV（`jev_api_key`）、生成 LLM（`llm_api_key`）、Embedding（`embed_api_key`）。缺任何一组都会抛 `MissingCredentialsError`。测试或自建后端可以注入 `jev=` / `llm=` / `embed=`，注入后跳过对应密钥检查。
 
-配置优先级：显式传参 > `DUAL_MEM_*` 环境变量 > YAML > 默认值。
+配置优先级：显式传参 > `DUAL_MEM_*` 环境变量 > YAML > 默认值。只接受平铺键；已删除的旧键会让 `Settings` 直接报错。已有数据目录的 `layer_schema_version` 必须是 4，否则打开即失败且不改写文件，换一个新的 `storage_dir`。

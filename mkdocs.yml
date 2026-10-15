@@ -27,6 +27,8 @@ nav:
   - Home: index.md
   - Introduction:
       - Architecture: architecture.md
+      - Memory layers: memory_layers.md
+      - JEV decisions: jev-memory-design.md
   - Getting Started:
       - Installation: getting-started/installation.md
       - Quickstart: getting-started/quickstart.md

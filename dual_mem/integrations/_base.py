@@ -156,7 +156,7 @@ def format_memories_for_prompt(
             if start and end:
                 entry = f"{entry}\n  (持续: {start} → {end})"
         if mem.source_node_id:
-            entry = f"{entry}\n  (来源: L1 {mem.source_node_id[:8]})"
+            entry = f"{entry}\n  (来源: L0 {mem.source_node_id[:8]})"
         if running + len(entry) > max_chars:
             break
         out.append(entry)
@@ -833,7 +833,7 @@ class _SyncMemoryProvider:
             },
             {
                 "name": "memory_delete",
-                "description": "Delete a memory by its memory_id.",
+                "description": "Archive a current memory by id. The old id stays readable.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -844,13 +844,17 @@ class _SyncMemoryProvider:
             },
             {
                 "name": "memory_list",
-                "description": "List stored memories for the current user/agent.",
+                "description": "List current memories. Set include_history to also return archived versions.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "limit": {
                             "type": "integer",
                             "description": "Max results (default 20)",
+                        },
+                        "include_history": {
+                            "type": "boolean",
+                            "description": "Also return archived versions",
                         },
                     },
                 },
@@ -924,6 +928,7 @@ class _SyncMemoryProvider:
                         user_id=self._user_id,
                         agent_id=self._agent_id,
                         limit=int(args.get("limit") or 20),
+                        include_history=bool(args.get("include_history") or False),
                     )
                 )
                 return {

@@ -57,7 +57,7 @@ async def test_all_facts_paged_with_exact_coverage_and_real_evidence(
     original = seed(f)
     stats = await System2Agent(factory=f).run(app_id="app", user_id="u")
     assert stats["created_schemas"] == 3
-    assert len(f.llm.calls) == 3 and len(f.jev.calls) == 6
+    assert len(f.llm.calls) == 3 and len(f.jev.calls) == 9
     derived = f.vector.get_many({"layer": Layer.L3_DERIVED.value}, limit=100)
     assert {nid for n in derived for nid in n.custom["source_ids"]} == {
         n.node_id for n in original

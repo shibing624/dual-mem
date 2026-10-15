@@ -7,7 +7,7 @@ from dual_mem.types import Layer, MemoryNode, MemoryStatus
 from conftest import FakeLLMClient
 
 
-async def test_search_conversation_finds_shadowed_l1(tmp_storage, fake_embed):
+async def test_search_conversation_finds_l0_excluded_from_qa(tmp_storage, fake_embed):
     client = MemoryClient(
         settings=Settings(mode="system1", storage_dir=tmp_storage),
         embed=fake_embed,
@@ -50,7 +50,7 @@ async def test_search_conversation_finds_shadowed_l1(tmp_storage, fake_embed):
     await client.aclose()
 
 
-async def test_search_conversation_keeps_active_l1_when_no_derived(
+async def test_search_conversation_keeps_active_l0_when_no_derived(
     tmp_storage, fake_embed
 ):
     client = MemoryClient(

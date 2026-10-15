@@ -44,11 +44,11 @@ class FakeLLMClient:
     """Async scripted fake LLM.
 
     Routes by call type + system prompt keyword to entries in ``responses``:
-    - ``chat_json`` with system containing "记忆分析专家"/"memory analyst" → key ``"extract"``
-      (default ``{"facts": [], "identity": [], "intentions": [], "is_ephemeral": False}``).
-    - ``chat_json`` with system containing "搜索查询生成器"/"search query generator" → key ``"search_query"``.
-    - ``chat_json`` with system containing "记忆管理系统"/"memory management system" → key ``"reconcile"``.
-    - Other ``chat_json`` → key ``"json"``.
+    - ``chat_json`` whose system is an extract prompt
+      (``extract_system1``: "Generate faithful explicit atomic candidates";
+      ``Extractor.extract``: "只抽取来源中明确陈述" / "Extract explicit atomic statements")
+      → key ``"extract"``.
+    - Other ``chat_json`` (System2 derived memories) → key ``"json"``.
     - ``chat_text`` (summary) → key ``"text"`` (default ``""``).
 
     Each response value can be a direct result or a ``callable(system=, user=)``.
@@ -71,10 +71,9 @@ class FakeLLMClient:
         if any(
             marker in system
             for marker in (
+                "Generate faithful explicit atomic candidates",
                 "只抽取来源中明确陈述",
                 "Extract explicit atomic statements",
-                "memory analyst",
-                "Generate faithful explicit atomic candidates",
             )
         ):
             if "extract" not in self.responses:
@@ -104,10 +103,6 @@ class FakeLLMClient:
                 system=system,
                 user=user,
             )
-        if "搜索查询生成器" in system or "search query generator" in system:
-            return self._resolve("search_query", [], system=system, user=user)
-        if "记忆管理系统" in system or "memory management system" in system:
-            return self._resolve("reconcile", [], system=system, user=user)
         return self._resolve(
             "json", {"facts": [], "identity": []}, system=system, user=user
         )
@@ -145,7 +140,7 @@ class FakeLLMClient:
         tool_choice: str = "auto",
         temperature: float = 0.2,
     ) -> dict:
-        """Scripted ReAct turn for the System2 agent.
+        """Unused by the current System2 single-shot path. Kept for scripted tool-call tests.
 
         Routes by responses["tools"]: a callable taking ``messages`` and returning
         ``{"content": str, "tool_calls": [...]}`` or a single dict / list-of-dicts (the
@@ -195,6 +190,8 @@ class FakeJev:
     def __init__(self, responses=None):
         self.responses = responses
         self.calls = []
+        self.max_question_chars = 60_000
+        self.max_request_chars = 100_000
 
     async def evaluate(self, *, state, questions):
         from dual_mem.providers.jev import JevAnswer

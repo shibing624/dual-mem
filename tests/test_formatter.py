@@ -223,7 +223,7 @@ def test_format_memories_shows_source_node_id():
         ],
     }
     text = format_memories(result, date_preamble=False)
-    assert "来源: L1 l1-abcd1" in text
+    assert "来源: L0 l1-abcd1" in text
 
 
 def test_format_memories_for_prompt_shows_source_node_id():
@@ -235,7 +235,7 @@ def test_format_memories_for_prompt_shows_source_node_id():
         source_node_id="l1-abcd1234eeee",
     )
     text = format_memories_for_prompt([item])
-    assert "来源: L1 l1-abcd1" in text
+    assert "来源: L0 l1-abcd1" in text
 
 
 def test_format_memory_timestamp():

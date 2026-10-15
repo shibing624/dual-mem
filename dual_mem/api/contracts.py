@@ -26,7 +26,7 @@ MEMORY_TOOL_CONTRACTS: list[dict[str, Any]] = [
     },
     {
         "name": "memory_list",
-        "summary": "List ACTIVE memories in a scope",
+        "summary": "List current memories; include_history=true also returns archived versions",
         "http": {"method": "GET", "path": "/v1/memories/"},
     },
     {
@@ -36,12 +36,12 @@ MEMORY_TOOL_CONTRACTS: list[dict[str, Any]] = [
     },
     {
         "name": "memory_update",
-        "summary": "Replace content and re-embed",
+        "summary": "Append a correction and return the new version id",
         "http": {"method": "PUT", "path": "/v1/memories/{memory_id}"},
     },
     {
         "name": "memory_delete",
-        "summary": "Delete one memory by id",
+        "summary": "Archive one current memory; the old id stays readable",
         "http": {"method": "DELETE", "path": "/v1/memories/{memory_id}"},
     },
     {
@@ -56,7 +56,7 @@ MEMORY_TOOL_CONTRACTS: list[dict[str, Any]] = [
     },
     {
         "name": "memory_digest",
-        "summary": "Run System2 consolidation (dual mode)",
+        "summary": "Build L3_DERIVED in dual mode; system1 returns processed=0",
         "http": {"method": "POST", "path": "/v1/digest/"},
     },
 ]

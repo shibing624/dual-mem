@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from dual_mem.isolation import build_filter
-from dual_mem.providers.jev import DecisionProvider
+from dual_mem.providers.jev import DecisionProvider, JevAnswer
 from dual_mem.providers.llm import LLMClient
 from dual_mem.storage.vector_store import VectorStore
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
@@ -27,6 +27,83 @@ _ACTIONS = {
     "INVALID": "Candidate is unsupported by source, invented or incorrectly attributed; reject extraction.",
     "NEED_CONTEXT": "Evidence is insufficient or inconsistent; never guess based on insertion time.",
 }
+
+_WITH_TARGET = (
+    "ADD_OVERRIDE",
+    "ADD_MERGE",
+    "ADD_NEGATE",
+    "ADD_CONFLICT",
+    "SKIP",
+    "DELETE",
+    "INVALID",
+    "NEED_CONTEXT",
+)
+_WITHOUT_TARGET = (
+    "ADD_SUPPLEMENT",
+    "ADD_TEMPORAL",
+    "RAW_ONLY",
+    "INVALID",
+    "NEED_CONTEXT",
+)
+_TARGET_REQUIRED_ACTIONS = set(_WITH_TARGET) - {"INVALID", "NEED_CONTEXT"}
+
+
+def _action_question(
+    pid: str,
+    *,
+    has_targets: bool,
+    allow_delete: bool = True,
+    allow_skip: bool = True,
+) -> dict[str, Any]:
+    if has_targets:
+        skip_instruction = (
+            "SKIP when the single target already fully covers this claim, including the reported event and state. "
+            if allow_skip
+            else "Multiple targets cannot be represented by one SKIP alias; use MERGE when they jointly cover the claim. "
+        )
+        delete_instruction = (
+            "DELETE when the source retracts the current target. "
+            if allow_delete
+            else "An earlier proposal cannot be deleted before it is committed. "
+        )
+        instructions = (
+            f"Decide the relation for proposal id={pid}. "
+            "state.selected_targets already names one or more current heads or earlier proposals. "
+            "Use only those targets. "
+            f"{skip_instruction}"
+            "ADD_OVERRIDE when this proposal replaces that same persistent state. "
+            "ADD_MERGE when both are fragments of one object and every unaffected fact survives. "
+            "ADD_NEGATE when the source terminates the target. "
+            "ADD_CONFLICT when both claims stay current and incompatible. "
+            f"{delete_instruction}"
+            "A completed different event is not a relation to this target. "
+            "INVALID if the candidate is invented or misattributed. "
+            "NEED_CONTEXT if the target mixes dimensions and a lossless merge is impossible. "
+            "The incoming source text itself is not stored knowledge."
+        )
+        keys = tuple(
+            key
+            for key in _WITH_TARGET
+            if (allow_delete or key != "DELETE")
+            and (allow_skip or key != "SKIP")
+        )
+    else:
+        instructions = (
+            f"Decide the action for proposal id={pid}. "
+            "No current head or earlier proposal was selected, so there is no version to update, cover, negate, conflict with, or delete. "
+            "ADD_SUPPLEMENT appends a new dimension or a distinct occurrence, including an initial state with no baseline. "
+            "ADD_TEMPORAL is only an explicit limited exception and does not link a baseline. "
+            "RAW_ONLY keeps the source when nothing durable should be stored. "
+            "INVALID if the candidate is invented or misattributed. "
+            "NEED_CONTEXT if the source is insufficient. "
+            "Do not change, cover, or delete an old version; no such target was selected."
+        )
+        keys = _WITHOUT_TARGET
+    return {
+        "type": "choice",
+        "instructions": instructions,
+        "criteria": {key: _ACTIONS[key] for key in keys},
+    }
 
 
 @dataclass
@@ -156,6 +233,35 @@ class Reconciler:
         self.jev, self.llm, self.embed, self.vector = jev, llm, embed, vector
         self.candidate_limit, self.batch_size = candidate_limit, batch_size
 
+    async def _evaluate(
+        self,
+        *,
+        state: dict[str, Any],
+        questions: dict[str, dict[str, Any]],
+    ) -> dict[str, JevAnswer]:
+        try:
+            answers = await self.jev.evaluate(state=state, questions=questions)
+        except ValueError as exc:
+            raise DecisionContextError("Jev request or response rejected") from exc
+        if not isinstance(answers, dict) or set(answers) != set(questions):
+            raise DecisionContextError("Jev response lacks exact question coverage")
+        checked: dict[str, JevAnswer] = {}
+        for name, raw in answers.items():
+            try:
+                answer = JevAnswer.model_validate(raw)
+            except (TypeError, ValueError) as exc:
+                raise DecisionContextError("invalid Jev answer") from exc
+            question = questions[name]
+            if answer.type != question["type"]:
+                raise DecisionContextError("Jev answer type does not match question")
+            if (
+                answer.type == "choice"
+                and answer.choice not in question["criteria"]
+            ):
+                raise DecisionContextError("Jev selected an unsupported answer")
+            checked[name] = answer
+        return checked
+
     def history(self, head: MemoryNode, scope: tuple[str, str, str]) -> list[dict]:
         found: dict[str, MemoryNode] = {}
         pending = list(head.supersedes)
@@ -250,7 +356,7 @@ class Reconciler:
                     }
                     for n in page
                 }
-                answers = await self.jev.evaluate(
+                answers = await self._evaluate(
                     state={
                         "current": [self._context_node(n) for n in page],
                         "proposals": new_memories,
@@ -278,10 +384,12 @@ class Reconciler:
             dict(m, content=content, id=f"p{i}")
             for i, (content, m) in enumerate(zip(new_memories, new_memories_meta))
         ]
+        proposal_ids = {item["id"] for item in meta}
         ops: list[ReconcileOp] = []
         for start in range(0, len(meta), self.batch_size):
             proposals = meta[start : start + self.batch_size]
             questions: dict[str, dict] = {}
+            target_options: dict[str, dict[str, str]] = {}
             if (
                 start == 0
                 and source_content
@@ -309,24 +417,11 @@ class Reconciler:
                     raise DecisionContextError(
                         "proposal target choices exceed Jev budget; split source into smaller writes"
                     )
-                questions[f"{pid}:action"] = {
-                    "type": "choice",
-                    "instructions": f"Decide the executable action for proposals id={pid}. The source is incoming NEW evidence used only to verify support. The incoming source and stored user claims refer to the SAME scoped user. First check whether a current head fully covers this proposal including reported event and state: an already recorded change is SKIP, never OVERRIDE just because text says moved/again. Source arrival or new source ID is not evidence of a new occurrence. Compare THIS proposal only, not all incoming proposals: a completed move is an event, whereas where the user currently lives is a state. Example: old event A-to-B plus new event B-to-A => SUPPLEMENT/NONE; old state lives B plus new state lives A => OVERRIDE/old-state-ID. Only current heads (or earlier proposals) represent stored knowledge; the proposal itself and matching source text NEVER make it already known. First verify source faithfulness (INVALID if invented or incorrectly attributed) and durable persistence value, then compare current heads, history and earlier proposals. Past occurrence is not current knowledge. Preserve unrelated dimensions and every distinct event. Do not infer truth from store time. If a current target contains multiple dimensions, choose NEED_CONTEXT unless a lossless merge preserves the unaffected dimensions.",
-                    "criteria": {
-                        key: description
-                        for key, description in _ACTIONS.items()
-                        if target_ids
-                        or key
-                        not in (
-                            "SKIP",
-                            "DELETE",
-                            "ADD_OVERRIDE",
-                            "ADD_MERGE",
-                            "ADD_NEGATE",
-                            "ADD_CONFLICT",
-                        )
-                    },
-                }
+                target_options[pid] = target_ids
+                if not target_ids:
+                    questions[f"{pid}:action"] = _action_question(
+                        pid, has_targets=False
+                    )
                 if item.get("layer") != Layer.L3_DERIVED.value:
                     questions[f"{pid}:representation"] = {
                         "type": "choice",
@@ -340,7 +435,7 @@ class Reconciler:
                 if target_ids:
                     questions[f"{pid}:target"] = {
                         "type": "choice",
-                        "instructions": f"For proposal id={pid}, select the ONE corresponding current target or earlier proposal; do not select an ancestor merely because its content matches. Match the SAME representation and dimension: a residence state must target a residence state, never a move event. A completed event targets NONE unless explicitly correcting that SAME occurrence. A-to-B then B-to-A are different events; choose NONE. For repeated residence, select the residence profile that covers the claim, not a move mentioning that city. Choose MULTIPLE if more than one is required. Questions are evaluated independently.",
+                        "instructions": f"For proposal id={pid}, select the ONE executable relation target before deciding its action. Select a current head or earlier proposal only when this proposal covers, replaces, merges, negates or conflicts with it. Choose NONE for an independent supplement, an explicit limited TEMPORAL exception, or RAW_ONLY, even when a baseline is relevant context. An explicit retraction must select the persisted current head directly because an earlier proposal cannot be deleted. Do not select an ancestor merely because its content matches. Match the SAME representation and dimension: a residence state must target a residence state, never a move event. A completed event targets NONE unless explicitly correcting that SAME occurrence. A-to-B then B-to-A are different events; choose NONE. For repeated residence, select the residence profile that covers the claim, not a move mentioning that city. Choose MULTIPLE if more than one is required.",
                         "criteria": {
                             **target_ids,
                             "NONE": "No corresponding existing target",
@@ -357,9 +452,68 @@ class Reconciler:
             }
             if plan_feedback:
                 state["previous_plan_rejected"] = plan_feedback
-            answers = await self.jev.evaluate(state=state, questions=questions)
+            answers = await self._evaluate(state=state, questions=questions)
             if "coverage" in questions and answers["coverage"].choice != "VALID":
                 raise DecisionContextError("Jev rejected incomplete source coverage")
+            targets_by_pid: dict[str, list[str]] = {}
+            for item in proposals:
+                pid = item["id"]
+                target_answer = answers.get(f"{pid}:target")
+                target = target_answer.choice if target_answer else "NONE"
+                target_ids = target_options[pid]
+                if target not in (*target_ids, "NONE", "MULTIPLE"):
+                    raise DecisionContextError(
+                        "unknown target returned by decision provider"
+                    )
+                if target == "MULTIPLE":
+                    include = {
+                        f"{pid}:{nid}": {
+                            "type": "choice",
+                            "instructions": f"Is target {nid} required as corresponding evidence for proposal {pid}?",
+                            "criteria": {
+                                "INCLUDE": "Required corresponding evidence",
+                                "EXCLUDE": "Unrelated",
+                                "UNSURE": "Insufficient evidence",
+                            },
+                        }
+                        for nid in target_ids
+                    }
+                    selected = await self._evaluate(state=state, questions=include)
+                    if any(a.choice == "UNSURE" for a in selected.values()):
+                        raise DecisionContextError("uncertain multiple targets")
+                    targets = [
+                        nid
+                        for nid in target_ids
+                        if selected[f"{pid}:{nid}"].choice == "INCLUDE"
+                    ]
+                else:
+                    targets = [] if target == "NONE" else [str(target)]
+                targets_by_pid[pid] = targets
+
+            action_questions = {
+                f"{item['id']}:action": _action_question(
+                    item["id"],
+                    has_targets=bool(targets_by_pid[item["id"]]),
+                    allow_delete=not any(
+                        target in proposal_ids
+                        for target in targets_by_pid[item["id"]]
+                    ),
+                    allow_skip=len(targets_by_pid[item["id"]]) == 1,
+                )
+                for item in proposals
+                if f"{item['id']}:action" not in answers
+            }
+            if action_questions:
+                answers.update(
+                    await self._evaluate(
+                        state={
+                            **state,
+                            "selected_targets": targets_by_pid,
+                        },
+                        questions=action_questions,
+                    )
+                )
+
             for item in proposals:
                 pid = item["id"]
                 answer = answers[f"{pid}:action"]
@@ -371,60 +525,31 @@ class Reconciler:
                 if action in ("NEED_CONTEXT", "INVALID"):
                     raise DecisionContextError(f"Jev requested more context for {pid}")
                 target_answer = answers.get(f"{pid}:target")
-                target = target_answer.choice if target_answer else "NONE"
-                target_ids = {
-                    n.node_id: json.dumps(self._context_node(n), ensure_ascii=False)
-                    for n in existing
-                }
-                target_ids.update({p["id"]: p["content"] for p in meta[: int(pid[1:])]})
-                if target not in (*target_ids, "NONE", "MULTIPLE"):
-                    raise DecisionContextError(
-                        "unknown target returned by decision provider"
-                    )
-                if target == "MULTIPLE":
-                    include = {
-                        f"{pid}:{nid}": {
-                            "type": "choice",
-                            "instructions": f"Does the selected action {action} for proposal {pid} require target {nid}?",
-                            "criteria": {
-                                "INCLUDE": "Required for the action",
-                                "EXCLUDE": "Unrelated",
-                                "UNSURE": "Insufficient evidence",
-                            },
-                        }
-                        for nid in target_ids
-                    }
-                    selected = await self.jev.evaluate(state=state, questions=include)
-                    if any(a.choice == "UNSURE" for a in selected.values()):
-                        raise DecisionContextError("uncertain multiple targets")
-                    targets = [
-                        nid
-                        for nid in target_ids
-                        if selected[f"{pid}:{nid}"].choice == "INCLUDE"
-                    ]
-                else:
-                    targets = [] if target == "NONE" else [str(target)]
+                targets = targets_by_pid[pid]
                 update_type = (
                     action.removeprefix("ADD_")
                     if action and action.startswith("ADD_")
                     else ""
                 )
-                needs_target = (
-                    update_type in ("OVERRIDE", "NEGATE", "MERGE") or action == "DELETE"
+                relation = action in _TARGET_REQUIRED_ACTIONS
+                if relation != bool(targets):
+                    raise DecisionContextError(
+                        f"{action} does not match the selected target"
+                    )
+                if action == "DELETE" and any(
+                    target in proposal_ids for target in targets
+                ):
+                    raise DecisionContextError(
+                        "DELETE cannot target an uncommitted proposal"
+                    )
+                if action == "SKIP" and len(targets) != 1:
+                    raise DecisionContextError(
+                        "SKIP requires exactly one covering target"
+                    )
+                linked = targets if relation else []
+                references = (
+                    linked if update_type in ("OVERRIDE", "NEGATE", "MERGE") else []
                 )
-                if needs_target and not targets:
-                    raise DecisionContextError(
-                        f"{action} requires a corresponding target"
-                    )
-                if update_type == "CONFLICT" and not targets:
-                    raise DecisionContextError(
-                        "CONFLICT requires corresponding evidence"
-                    )
-                if action == "SKIP" and not targets:
-                    raise DecisionContextError(
-                        "SKIP requires a covering current target"
-                    )
-                references = targets if needs_target else []
                 representation = answers.get(f"{pid}:representation")
                 kind = item.get("kind", "fact")
                 layer = item.get("layer", Layer.L1_FACT.value)
@@ -457,10 +582,10 @@ class Reconciler:
                     content=item["content"],
                     layer=layer,
                     kind=kind,
-                    supersedes=references if update_type else [],
-                    target_ids=targets,
+                    supersedes=references,
+                    target_ids=linked,
                     memory_id=(
-                        targets[0] if targets and action in ("DELETE", "SKIP") else None
+                        linked[0] if linked and action in ("DELETE", "SKIP") else None
                     ),
                     update_type=update_type,
                     negation=update_type == "NEGATE",
@@ -468,12 +593,12 @@ class Reconciler:
                     proposal_ids=[pid],
                     source_ids=list(item.get("source_ids") or []),
                     new_index=int(pid[1:]) + 1,
-                    conflicts_with=targets if update_type == "CONFLICT" else [],
+                    conflicts_with=linked if update_type == "CONFLICT" else [],
                     temporal_scope=item.get("temporal_scope"),
                     valid_from=valid_from,
                     valid_until=valid_until,
                     expected_revisions={
-                        nid: by_id[nid].revision for nid in targets if nid in by_id
+                        nid: by_id[nid].revision for nid in linked if nid in by_id
                     },
                     decision={
                         "action": answer.model_dump(),
@@ -552,7 +677,7 @@ class Reconciler:
                 }
                 for op in merges
             }
-            checked = await self.jev.evaluate(
+            checked = await self._evaluate(
                 state={"sources": material, "merged": generated},
                 questions=verify,
             )

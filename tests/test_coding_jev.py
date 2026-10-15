@@ -123,7 +123,7 @@ def writer(store, *, candidates=None, answers=None, llm=None):
         {
             "scene": "CODING",
             **{
-                f"{i}:action": "ADD"
+                f"{i}:action": "ADD_SUPPLEMENT"
                 for i in range(len(candidates) if isinstance(candidates, list) else 1)
             },
             **(answers or {}),
@@ -169,9 +169,7 @@ async def test_write_preserves_full_source_and_batches_all_decisions(store):
     assert set(w.jev.calls[-1]["questions"]) == {
         "coverage",
         "0:action",
-        "0:target",
         "1:action",
-        "1:target",
     }
     assert w.jev.calls[-1]["state"]["source"] == messages
     assert json.loads(w.llm.calls[0]["user"]) == messages
@@ -212,7 +210,7 @@ async def test_return_to_ancestor_uses_current_target_with_full_history(store):
     w = writer(
         store,
         candidates=[candidate(solution="Use compiler A; keep flag --safe").to_dict()],
-        answers={"0:action": "UPDATE", "0:target": "b"},
+        answers={"0:action": "ADD_OVERRIDE", "0:target": "b"},
     )
     result = await w.write(
         source("Use compiler A again; keep flag --safe"), user_id="u"
@@ -220,7 +218,11 @@ async def test_return_to_ancestor_uses_current_target_with_full_history(store):
     state = w.jev.calls[-1]["state"]
     assert [m["memory_id"] for m in state["current"]] == ["b"]
     assert state["current"][0]["history_versions"][0]["solution"] == memory().solution
-    assert "a" not in w.jev.calls[-1]["questions"]["0:target"]["criteria"]
+    target_call = next(
+        call for call in w.jev.calls if "0:target" in call["questions"]
+    )
+    assert "a" not in target_call["questions"]["0:target"]["criteria"]
+    assert "ADD_SUPPLEMENT" not in w.jev.calls[-1]["questions"]["0:action"]["criteria"]
     new_id = result["memory_ids"][0]
     assert store.get(new_id).supersedes == ["b"]
     assert store.get("a").solution == memory().solution
@@ -231,18 +233,122 @@ async def test_return_to_ancestor_uses_current_target_with_full_history(store):
     assert len(store.snapshot(user_id="u")[2][new_id]) == 2
 
 
+async def test_delete_archives_current_without_new_row(store):
+    await store.add(memory())
+    w = writer(store, answers={"0:action": "DELETE", "0:target": "old"})
+    result = await w.write(source(), user_id="u")
+    assert result["memory_ids"] == []
+    assert result["decisions"][0]["action"] == "DELETE"
+    assert result["decisions"][0]["targets"] == ["old"]
+    assert store.get("old").is_latest is False
+    assert store.get("old").superseded_by == []
+    assert store.list_by_user(user_id="u") == []
+
+
+async def test_none_target_rejects_scripted_skip(store):
+    await store.add(memory())
+    w = writer(store, answers={"0:action": "SKIP", "0:target": "NONE"})
+    with pytest.raises(CodingDecisionError):
+        await w.write(source(), user_id="u")
+    action_call = next(call for call in w.jev.calls if "0:action" in call["questions"])
+    assert set(action_call["questions"]["0:action"]["criteria"]) == {
+        "ADD_SUPPLEMENT",
+        "ADD_TEMPORAL",
+        "RAW_ONLY",
+        "INVALID",
+        "NEED_CONTEXT",
+    }
+    assert store.get("old").is_latest
+
+
+async def test_selected_target_skip_has_no_repair_question(store):
+    await store.add(memory())
+    w = writer(store, answers={"0:action": "SKIP", "0:target": "old"})
+    result = await w.write(source(), user_id="u")
+    assert result["memory_ids"] == []
+    assert result["decisions"][0]["action"] == "SKIP"
+    assert result["decisions"][0]["targets"] == ["old"]
+    criteria = next(
+        call["questions"]["0:action"]["criteria"]
+        for call in w.jev.calls
+        if "0:action" in call["questions"]
+    )
+    assert "SKIP" in criteria and "ADD_SUPPLEMENT" not in criteria
+    assert all(
+        not any(str(name).endswith(":repair") for name in call["questions"])
+        for call in w.jev.calls
+    )
+
+
+@pytest.mark.parametrize("action", ["SKIP", "DELETE", "ADD_CONFLICT"])
+async def test_relation_cannot_cross_version_boundary(store, action):
+    await store.add(memory(workspace_id="old-workspace"))
+    w = writer(
+        store,
+        candidates=[candidate(workspace_id="new-workspace").to_dict()],
+        answers={"0:action": action, "0:target": "old"},
+    )
+    with pytest.raises(CodingDecisionError, match="boundary"):
+        await w.write(source(), user_id="u")
+    assert store.get("old").is_latest
+    assert len(store.list_by_user(user_id="u")) == 1
+
+
+async def test_multiple_target_unsure_does_not_retire_current(store):
+    await store.add(memory())
+
+    def decide(*, state, questions):
+        if any(str(name).endswith(":old") for name in questions):
+            return {name: "UNSURE" for name in questions}
+        return {
+            "scene": "CODING",
+            "coverage": "VALID",
+            "0:target": "MULTIPLE",
+            "0:action": "ADD_OVERRIDE",
+        }
+
+    w = writer(store)
+    w.jev.responses = decide
+    with pytest.raises(CodingDecisionError, match="uncertain"):
+        await w.write(source(), user_id="u")
+    assert store.get("old").is_latest
+
+
+async def test_multiple_target_must_resolve_to_one_head(store):
+    await store.add_many([memory("a"), memory("b")])
+
+    def decide(*, state, questions):
+        if any("INCLUDE" in question["criteria"] for question in questions.values()):
+            return {name: "INCLUDE" for name in questions}
+        return {
+            "scene": "CODING",
+            "coverage": "VALID",
+            "0:target": "MULTIPLE",
+        }
+
+    w = writer(store)
+    w.jev.responses = decide
+    with pytest.raises(CodingDecisionError, match="exactly one"):
+        await w.write(source(), user_id="u")
+    assert store.get("a").is_latest and store.get("b").is_latest
+
+
+def test_candidate_limit_leaves_room_for_none_and_multiple():
+    jev = FakeJev()
+    CodingMemoryReconciler(jev=jev, candidate_limit=253)
+    with pytest.raises(ValueError, match=r"\[1,253\]"):
+        CodingMemoryReconciler(jev=jev, candidate_limit=254)
+
+
 @pytest.mark.parametrize(
     "action,target",
     [
         ("INVALID", "NONE"),
         ("NEED_CONTEXT", "NONE"),
-        ("UPDATE", "NONE"),
-        ("SKIP", "NONE"),
-        ("ADD", "old"),
+        ("ADD_OVERRIDE", "NONE"),
+        ("ADD_SUPPLEMENT", "old"),
         ("RAW_ONLY", "old"),
-        ("UPDATE", "MULTIPLE"),
-        ("UPDATE", "unknown"),
-        ("DELETE", "old"),
+        ("ADD_OVERRIDE", "unknown"),
     ],
 )
 async def test_invalid_decision_fails_without_retiring_current(store, action, target):
@@ -373,9 +479,9 @@ async def test_duplicate_target_batch_rejected_before_any_publication(store):
         store,
         candidates=[candidate().to_dict(), candidate().to_dict()],
         answers={
-            "0:action": "UPDATE",
+            "0:action": "ADD_OVERRIDE",
             "0:target": "old",
-            "1:action": "UPDATE",
+            "1:action": "ADD_OVERRIDE",
             "1:target": "old",
         },
     )
@@ -499,26 +605,44 @@ async def test_scope_snapshot_has_no_100_row_truncation_and_semantic_selection_i
     assert len(heads) == 105 and epoch == 1
 
     def decide(state, questions):
-        if "coverage" not in questions:
-            return {qid: "INCLUDE" if qid == "m104" else "EXCLUDE" for qid in questions}
-        return {"coverage": "VALID", "0:action": "UPDATE", "0:target": "m104"}
+        if any(str(name).endswith(":action") for name in questions):
+            return {"0:action": "ADD_OVERRIDE"}
+        if "coverage" in questions:
+            return {"coverage": "VALID", "0:target": "m104"}
+        return {qid: "INCLUDE" if qid == "m104" else "EXCLUDE" for qid in questions}
 
     jev = FakeJev(decide)
     (op,) = await CodingMemoryReconciler(jev=jev, candidate_limit=32).reconcile(
         [candidate()], heads, source_messages=source(), history_versions=histories
     )
-    assert op.target_memory_id == "m104" and len(jev.calls) == 5
+    assert op.target_memory_id == "m104" and len(jev.calls) == 6
     store.SCAN_LIMIT = 100
     with pytest.raises(CodingDecisionError, match="scan budget"):
         store.snapshot(user_id="u")
 
 
-async def test_context_overflow_fails_instead_of_dropping_evidence(store):
+async def test_provider_request_rejection_retains_source(store):
     w = writer(store)
-    w.jev.max_question_chars = 1000
-    with pytest.raises(CodingDecisionError, match="context budget"):
+    w.jev.responses = ValueError("context budget exceeded")
+    with pytest.raises(CodingDecisionError, match="request rejected"):
         await w.write(source("x" * 1200), user_id="u")
     assert store._conn.execute("SELECT count(*) FROM coding_sources").fetchone()[0] == 1
+
+
+async def test_evaluate_only_custom_provider_is_supported(store):
+    class MinimalProvider:
+        def __init__(self, delegate):
+            self.delegate = delegate
+
+        async def evaluate(self, *, state, questions):
+            return await self.delegate.evaluate(state=state, questions=questions)
+
+    w = writer(store)
+    provider = MinimalProvider(w.jev)
+    w.jev = provider
+    w.reconciler.jev = provider
+    result = await w.write(source(), user_id="u")
+    assert result["success"] and result["commit_passed"]
 
 
 async def test_missing_answer_coverage_fails_closed(store):

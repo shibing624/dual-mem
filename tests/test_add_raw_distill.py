@@ -1,4 +1,4 @@
-"""add_raw writes L1 only; distill extracts without a second L1."""
+"""add_raw writes L0_RAW only; distill extracts without a second raw row."""
 
 from dual_mem import MemoryClient
 from dual_mem.config import Settings
@@ -28,13 +28,13 @@ async def test_add_raw_does_not_call_extract(tmp_storage, fake_embed):
     assert raw.status is MemoryStatus.ACTIVE
     assert not any(
         c["type"] == "chat_json"
-        and ("记忆分析专家" in c["system"] or "memory analyst" in c["system"])
+        and "Generate faithful explicit atomic candidates" in c["system"]
         for c in llm.calls
     )
     await client.aclose()
 
 
-async def test_distill_extracts_and_shadows_source_l1(tmp_storage, fake_embed):
+async def test_distill_extracts_and_keeps_source_l0(tmp_storage, fake_embed):
     client = MemoryClient(
         settings=Settings(mode="system1", storage_dir=tmp_storage),
         embed=fake_embed,
@@ -65,14 +65,14 @@ async def test_distill_extracts_and_shadows_source_l1(tmp_storage, fake_embed):
     assert distilled.extracted_count >= 1
     assert client.factory.vector.get(first.memory_id).status is MemoryStatus.ACTIVE
     assert client.factory.vector.get(second.memory_id).status is MemoryStatus.ACTIVE
-    l1s = [
+    raws = [
         n
         for n in client.factory.vector.get_many(
             {"$and": [{"app_id": "app"}, {"user_id": "u_d"}]}, limit=20
         )
         if n.layer is Layer.L0_RAW
     ]
-    assert len(l1s) == 2
+    assert len(raws) == 2
     facts = [
         n
         for n in client.factory.vector.get_many(
@@ -86,7 +86,7 @@ async def test_distill_extracts_and_shadows_source_l1(tmp_storage, fake_embed):
     await client.aclose()
 
 
-async def test_get_returns_shadowed_l1_source(tmp_storage, fake_embed):
+async def test_get_returns_source_l0(tmp_storage, fake_embed):
     client = MemoryClient(
         settings=Settings(mode="system1", storage_dir=tmp_storage),
         embed=fake_embed,
@@ -121,7 +121,7 @@ async def test_get_returns_shadowed_l1_source(tmp_storage, fake_embed):
     await client.aclose()
 
 
-async def test_dual_distill_enqueues_s2_and_does_not_write_second_l1(
+async def test_dual_distill_enqueues_s2_and_does_not_write_second_l0(
     tmp_storage, fake_embed
 ):
     client = MemoryClient(
@@ -147,15 +147,15 @@ async def test_dual_distill_enqueues_s2_and_does_not_write_second_l1(
         source_node_ids=[raw.memory_id],
     )
     assert distilled.extracted_count >= 1
-    l1s = [
+    raws = [
         n
         for n in client.factory.vector.get_many(
             {"$and": [{"app_id": "app"}, {"user_id": "u_dual"}]}, limit=20
         )
         if n.layer is Layer.L0_RAW
     ]
-    assert len(l1s) == 1
-    assert l1s[0].status is MemoryStatus.ACTIVE
+    assert len(raws) == 1
+    assert raws[0].status is MemoryStatus.ACTIVE
     pending = client.factory.cache.conn.execute(
         "SELECT COUNT(*) FROM s2_queue WHERE status = 'pending'"
     ).fetchone()[0]

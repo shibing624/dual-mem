@@ -1,75 +1,63 @@
 # dual-mem Examples
 
-可直接运行的端到端示例，使用**真实** OpenAI 兼容 API。建议按顺序通读：
+可直接运行的端到端示例，使用真实 JEV、生成模型和 Embedding。建议按顺序看：
 **system1 → dual → REST → CLI**。
 
 ## 前置
 
-dual-mem 需要 **同时配置 LLM 与 Embedding 两套 API key**（缺一者 `MemoryClient(...)` 即报错），
-首次 `MemoryClient(...)` 会在 **`~/.dual_mem/config.yaml`** 自动创建默认配置（与包内 `dual_mem/config.default.yaml` 一致），填入 API key 即可：
+`MemoryClient` 需要 **JEV、LLM、Embedding 三套凭据**，缺 JEV key 会在构造时抛
+`MissingCredentialsError`。首次构造会在 `~/.dual_mem/config.yaml` 写默认配置。
 
 ```yaml
-llm_base_url: https://api5.xhub.chat/v1
-llm_api_key: sk-...
-llm_model: gpt-4o
+jev_endpoint: https://api.typesafe.ai/v1/systemone
+jev_api_key: ...
+jev_model: jev-1.13.0
 
-embed_base_url: https://api5.xhub.chat/v1
+llm_base_url: https://api.openai.com/v1
+llm_api_key: sk-...
+llm_model: gpt-4o-mini
+
+embed_base_url: https://api.openai.com/v1
 embed_api_key: sk-...
 embed_model: text-embedding-3-small
 embed_dim: 1536
 ```
 
-也可用环境变量覆盖（前缀 `DUAL_MEM_`）：
+也可用环境变量（前缀 `DUAL_MEM_`）。yaml 里没有 `jev_api_key` 时，demo 会读
+`VENUS_TOKEN`，并把 JEV endpoint 指到 `/v1/systemone`。
+家目录配置里已经删除的键（例如 `system2_trigger_mode`）会被丢掉，不会让 `Settings` 报错。
 
 ```bash
+export VENUS_TOKEN=...          # 没有 jev_api_key 时使用
 export DUAL_MEM_LLM_API_KEY=sk-...
 export DUAL_MEM_EMBED_API_KEY=sk-...
 ```
 
-各 demo 通过 `mode=` 覆盖运行档位，存储目录用 `examples/.data/` 下的独立子目录
-（每次运行清空，可复现）。async client demo（01 / 02）在结束时调用
-`await client.aclose()` 释放存储资源。
+各 demo 用 `examples/.data/` 下的独立目录，每次运行清空。01 / 02 结束时
+`await client.aclose()`。
 
 ## 运行
 
 ```bash
-python examples/01_system1.py    # system1：抽取 + 显式同步 reconcile + 多轮 messages
-python examples/02_dual.py       # dual：显式 digest 触发 reconcile + System2 ReAct
-python examples/03_rest_api.py   # REST：`/v1/memories/...` 契约（system1 档）
-python examples/04_cli.py        # CLI：dual-mem 子命令调用（system1 档）
+python examples/01_system1.py    # add(content/messages) + search + list
+python examples/02_dual.py       # 同样的写入；digest() 只尝试生成 L3
+python examples/03_rest_api.py   # REST。update 返回新 id，delete 归档当前版本
+python examples/04_cli.py        # CLI 的 add / search / search-conversation / list
+python examples/05_lifecycle.py  # add_raw、distill、原文检索、update/delete 演化链
 ```
 
-> 所有 demo 都会产生真实 LLM + Embedding 调用（gpt-4o 等），有少量费用与数秒延迟。
+## 当前写入
 
-## 当前 SDK
-
-- `MemoryClient.add` / `search` 全部 **async**，返回 `WriteResult` / `SearchResult`
-  等 dataclass，访问字段用 `res.memory_id`、`out.memories.normal[i].content`。
-- `add(messages=[{"role": "user", "content": "..."}, ...])` 直接收多轮对话；L0_RAW 与
-  Extractor 都接收带角色标记的完整内容（`01_system1.py` 演示）。
-- 没有"无 LLM"模式：缺失 `llm_api_key` / `embed_api_key` 时 `MemoryClient(...)` 直接抛
-  `MissingCredentialsError`（fail-fast，比静默降级更直白）。
-- `dual` 写入只登记待处理 scope；`await client.digest()` 显式驱动 reconcile 与
-  System2 ReAct。SDK 不启动后台或定时任务。
-- reader 使用唯一 hybrid 管线：语义召回、召回池内 BM25 重排、图证据融合。
-  `search(include_derived=False)` 可显式排除 L6/L7 派生记忆。
-
-## 并发写入（按需）
-
-`add()` 是 async 的，多条**彼此完全独立**的记忆可以并发写入以缩短总耗时：
-
-```python
-import asyncio
-results = await asyncio.gather(
-    *(client.add(content=f, user_id=user) for f in facts)
-)
-```
-
-注意：
-
-- 同一 `user_id` 的并发 `add` 已被客户端内部 lock **串行化**，不会撕裂演化链；
-  但 dual 的 System2 聚类仍依赖同主题事实各自落库，并发写会让 reconcile 把它们
-  合并成一条，**导致聚类样本不足、出不了 Schema**。
-- 因此 `02_dual.py` 刻意保持串行；`01_system1.py` 也串行，以保证 Java→Python、
-  上海→北京 的演化链顺序稳定。
-- 并发只适合互不取代、无需跨事实归纳的离散写入（比如把不同用户的批量数据灌进库）。
+- `add` / `search` 是 async。`WriteResult.decisions` 是这次 JEV 的 action 和 update_type。
+  `memory_id` 是 L0_RAW。结构化版本在 `extra_node_ids`。
+- `add(messages=[...])` 把整段对话交给生成模型和 JEV。`01_system1.py` 有例子。
+- system1 和 dual 的 `add` 都在返回前完成版本写入。`digest()` 只属于 dual，
+  用来写 L3_DERIVED，不会再裁决已经写下的 L1/L2。
+- 默认 `list` / `search` 只看 `is_latest=true`。历史版本用 `list(include_history=True)`，
+  或从检索结果的 `evolution_chain` 看。
+- `search(intention_limit=0)` 时 proactive 为空。`include_derived=False` 关掉 L3 融合。
+- `update` 追加一条 OVERRIDE，返回**新** id。`delete` 把当前版本标成非 latest，行还在。
+  `05_lifecycle.py` 用这两步演示演化链，不依赖 JEV 把自然语言更新判成 OVERRIDE。
+- `add_raw` 只写 L0。`distill` 对已有原文抽取，不再写第二条原文。
+  默认 `search` 不返回 L0；`search_conversation` 只查 L0。
+- MCP 和实验性 coding 记忆没有单独 demo。MCP 工具就是上面这些 client 方法。

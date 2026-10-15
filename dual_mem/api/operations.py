@@ -101,9 +101,14 @@ class MemoryOperations:
         app_id: str | None = None,
         agent_id: str = "",
         limit: int = 100,
+        include_history: bool = False,
     ) -> list[dict]:
         items = await self.client.list(
-            app_id=app_id, user_id=user_id, agent_id=agent_id, limit=limit
+            app_id=app_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            limit=limit,
+            include_history=include_history,
         )
         return [item.to_dict() for item in items]
 

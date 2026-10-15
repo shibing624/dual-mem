@@ -8,7 +8,7 @@ description: >
 
 # dual-mem 记忆技能
 
-dual-mem 把对话沉淀为**分层长期记忆**（L0–L7），检索时按 profile / proactive / normal 三路返回。
+dual-mem 把对话沉淀为四层长期记忆（`L0_RAW` / `L1_FACT` / `L2_PROFILE` / `L3_DERIVED`），检索时按 profile / proactive / normal 三路返回。
 它管**跨会话记忆**，不能替代 Agent 自己的当前窗口（WorkingMemory）。
 
 dual-mem 原生对接 5 类社区生态，统一入口在 `dual_mem.integrations`：
@@ -94,6 +94,7 @@ await agent.aprint_response("推荐一杯咖啡", context=ctx)
 |---|---|---|---|
 | `memory_add` | `dual-mem add` | `POST /v1/memories/` | `add` |
 | `memory_search` | `dual-mem search` | `POST /v1/memories/search` | `search` |
+| `conversation_search` | `dual-mem search-conversation` | `POST /v1/memories/search_conversation` | `search_conversation` |
 | `memory_list` | `dual-mem list` | `GET /v1/memories/` | `list` |
 | `memory_get` | `dual-mem get <id>` | `GET /v1/memories/{id}` | `get` |
 | `memory_update` | `dual-mem update` | `PUT /v1/memories/{id}` | `update` |
@@ -116,8 +117,9 @@ await agent.aprint_response("推荐一杯咖啡", context=ctx)
 
 | 方式 | API | 适用 | 代价 |
 |------|-----|------|------|
-| 单条实时 | `add(content=...)` | 合规/关键事实需立刻落库 | 每次 ~2 次 LLM + 若干 embed（约 10–15s） |
-| 多轮批量 | `add(messages=[...])` | 普通助手、示例默认、会话末沉淀 | 同上但 **1 次** pipeline，上下文更完整 |
+| 单条实时 | `add(content=...)` | 合规/关键事实需立刻落库 | 1 次生成 + 1 次 JEV 裁决 + embed |
+| 多轮批量 | `add(messages=[...])` | 普通助手、示例默认、会话末沉淀 | 同上，但整段对话只走 **1 次** pipeline |
+| 先存原文 | `add_raw` 再 `distill` | 先保留原话，之后再抽结构化记忆 | distill 复用已有 `L0_RAW`，不再写第二条原文 |
 
 **建议（非约束）**：Agent 集成可「每轮 search、会话结束 add(messages)」以省成本；用户若需 mid-session 单条写入，完全合法。
 
@@ -159,13 +161,15 @@ dual-mem add --messages-json '[{"role":"user","content":"我搬到北京了"}]' 
 
 ```bash
 dual-mem search "用户做什么工作" --user-id u1
+dual-mem search-conversation "原话" --user-id u1
 dual-mem list --user-id u1
+dual-mem list --user-id u1 --include-history
 dual-mem get <memory_id>
-dual-mem update <memory_id> --content "新内容"
-dual-mem delete <memory_id>
+dual-mem update <memory_id> --content "新内容"   # 返回新 id，旧 id 仍可 get
+dual-mem delete <memory_id>                     # 归档当前版本，不物理删除
 dual-mem delete-scope --user-id u1 --confirm
 dual-mem list-scopes
-dual-mem digest   # dual 模式
+dual-mem digest                                 # 仅 dual 生成 L3_DERIVED
 ```
 
 ## MCP 示例
@@ -174,26 +178,31 @@ dual-mem digest   # dual 模式
 memory_add(user_id="u1", content="...")
 memory_add(user_id="u1", messages=[{"role":"user","content":"..."}, ...])
 memory_search(query="...", user_id="u1")
-memory_list(user_id="u1")
+conversation_search(query="...", user_id="u1")
+memory_list(user_id="u1", include_history=false)
 memory_get(memory_id="...")
-memory_update(memory_id="...", content="...")
-memory_delete(memory_id="...")
+memory_update(memory_id="...", content="...")   # 新 id
+memory_delete(memory_id="...")                  # 归档
 memory_delete_scope(user_id="u1", confirm=true)
 memory_list_scopes()
-memory_digest()
+memory_digest()                                 # dual → L3_DERIVED
 ```
 
 启动：`dual-mem-mcp`（stdio）或 `dual-mem-mcp --transport streamable-http --port 8765`
 
 ## 检索结果解读
 
-- **profile** — 画像 / 身份 / 长期偏好（优先用）
-- **proactive** — 推断意图（dual + `intention_limit>0`）
-- **normal** — 普通事实与知识
+- **profile** — `L2_PROFILE` 与画像类记忆（优先用）
+- **proactive** — `L1_FACT` 里 `kind=intention` 的意图；默认 `intention_limit=0`，这一路为空
+- **normal** — `L1_FACT` 事实。默认检索不返回 `L0_RAW`；核对原话用 `conversation_search`
 
-**evolution_chain**：同一记忆多次更新时，按最新→最旧排列；`[0]` 为当前版本。
+**evolution_chain**：同一记忆多次更新时，按最新→最旧排列；`[0]` 为当前版本。system1 要看到链，检索时传 `include_derived=true`。
+
+`update` 追加新版本并返回**新** `memory_id`。`delete` 把当前版本标成 `is_latest=false`，旧 id 仍可 `get`；对已经不是当前版本的 id 再删会失败。
 
 ## 模式
 
-- **system1**（默认）：短期记忆，写入即可检索
-- **dual**：+ System2 深度记忆（L6 行为模式、L7 意图）；`memory_digest` 或自动后台巩固
+- **system1**（默认）：写入即检索。`digest` 返回 `processed=0`，不生成 `L3_DERIVED`。
+- **dual**：写入路径与 system1 相同；显式 `digest` / `memory_digest` 才生成 `L3_DERIVED`。没有自动后台巩固。
+
+构造需要三组凭证：LLM、embedding、JEV（`llm_api_key` / `embed_api_key` / `jev_api_key`，或对应的 `DUAL_MEM_*` 环境变量）。

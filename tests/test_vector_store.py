@@ -41,7 +41,7 @@ def test_get_and_delete(store, fake_embed):
 
 
 def test_archive_preserves_content_and_embedding(store, fake_embed):
-    n1 = _node(fake_embed, "fact shadow")
+    n1 = _node(fake_embed, "archived fact")
     store.upsert([n1])
     store.apply_version_plan(
         nodes=[],

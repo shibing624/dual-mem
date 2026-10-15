@@ -5,8 +5,6 @@ def test_extract_prompts_format():
     for tmpl in (
         prompts.EXTRACT_ZH,
         prompts.EXTRACT_EN,
-        prompts.SUMMARY_ZH,
-        prompts.SUMMARY_EN,
     ):
         out = tmpl.format(content="对话", current_time="2026-06-18T10:00:00")
         assert "对话" in out

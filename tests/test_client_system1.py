@@ -78,10 +78,7 @@ async def test_dual_add_drops_system_role_from_extract_dialogue(
         c
         for c in fake_llm.calls
         if c["type"] == "chat_json"
-        and (
-            "Generate faithful explicit atomic candidates" in c["system"]
-            or "记忆分析专家" in c["system"]
-        )
+        and "Generate faithful explicit atomic candidates" in c["system"]
     ]
     assert extract_calls
     payload = extract_calls[0]["user"]
