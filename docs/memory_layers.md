@@ -1,82 +1,22 @@
-# dual-mem 记忆层模型
+# 四层记忆模型
 
-dual-mem 实现 L0-L4、L6、L7 七个有明确 producer 和 consumer 的层。未实现的 L5 已删除，避免空枚举制造错误能力预期。
+分层表达处理阶段；`kind` 表达语义，不再为每一种内容设置独立层。
 
-## 分层总览
+| 层 | 内容 | producer | 读取 |
+| --- | --- | --- | --- |
+| `L0_RAW` | 原始输入证据 | writer，每次写入先保留 | `get` / `search_conversation` |
+| `L1_FACT` | 显式事实、独立事件、明确意图 | 生成模型提供候选，JEV 裁决 | normal；`kind=intention` 可进入 proactive |
+| `L2_PROFILE` | 状态、身份、画像维度 | 同一批 JEV 选择表示和关系 | profile；关闭 profile 路时进入 normal |
+| `L3_DERIVED` | 跨证据模式、推导、摘要 | dual 的显式 `digest()` | profile / proactive；带实际 evidence IDs |
 
-```
-事实/情境主线 (NORMAL_LAYERS, episodic)
-  L1 RAW  →  L2 FACT  →  L3 SUMMARY
-画像/意图主线 (PROFILE / PROACTIVE, profile)
-  L0 BASIC  →  L4 IDENTITY  →  L6 SCHEMA  →  L7 INTENTION
-```
+`system1` 写 L0/L1/L2；`dual` 共享完全相同的写入步骤，在 digest 时生成 L3。
+显式意图放 L1；推导意图放 L3。`kind` 可取 fact、profile、intention、schema、summary。
 
-存储分界（概念对标 hy_memory 的 VDB/Graph 分界）：
+版本由 `supersedes` / `superseded_by` 链接，退休表示保留原文、向量和时间，
+`is_latest=false`。NEGATE 写入否定版本；TEMPORAL 保留基线并带有效期；CONFLICT
+保留两侧并记录 `conflicts_with`。不存在按相似度把“更新”当作“已知”的写入门。
 
-- L0-L4：写入 Chroma 向量库；SQLite 保存队列与审计信息。
-- L6-L7：写入 Kuzu 图存储，并通过图向量检索召回。
-
-## 逐层定义
-
-### L0_BASIC_INFO — 基础信息层
-
-结构化基础画像（姓名/年龄/所在地…）。
-
-- **Category**：`profile`
-- **产生方**：System1 `BasicProfile`（`dual_mem/agent/basic_profile.py`）
-- **读路径**：作为 profile 结果参与 hybrid 召回。
-
-### L1_RAW — 原始对话层
-
-写入即落的原始文本，Append-Only；写后转 `SHADOW`。
-
-- **Category**：`raw`
-- **产生方**：写入即落（`dual_mem/writer/memory_writer.py`）
-- **读路径**：raw 不进入默认语义召回池，避免与结构化记忆重复。
-
-### L2_FACT — 原子事实层
-
-从对话抽取的离散、版本化事实记录。
-
-- **Category**：`fact`
-- **产生方**：System1 Extractor（`dual_mem/agent/extractor.py`）→ fast-write 落 L2；Reconciler 可 `SUPERSEDE`。
-- **读路径**：归入 `NORMAL_LAYERS` 与 `VDB_RECALL_LAYERS`，是语义/BM25 召回主力。
-
-### L3_SUMMARY — 会话摘要层
-
-超过配置阈值的长文本摘要；默认关闭，启用后默认阈值为 600 tokens。
-
-- **Category**：`summary`
-- **产生方**：System1 Summarizer（`dual_mem/agent/mem_agent.py`）
-- **读路径**：归入 `NORMAL_LAYERS` 与 `VDB_RECALL_LAYERS`。
-
-### L4_IDENTITY — 身份画像层
-
-用户身份与长期偏好的核心画像。
-
-- **Category**：`profile`
-- **产生方**：System1 Extractor（identity 字段）→ fast-write 落 L4；Reconciler / System2 可整理。
-- **读路径**：归入 normal，与 L2/L3 一起参与 hybrid 召回。
-
-### L6_SCHEMA — 心智模型层
-
-跨证据归纳出的抽象行为模式/叙事模板（Graph 层）。
-
-- **Category**：`schema`
-- **产生方**：System2 `System2Agent`（`dual_mem/system2/system2_agent.py`）。
-- **读路径**：归入 `PROFILE_LAYERS`（hybrid 路径 `_PROFILE_LAYERS` 含 L6），图证据加成。
-
-### L7_INTENTION — 前瞻意图层
-
-用户未来待触发的具象意图（Graph 层）。
-
-- **Category**：`intention`
-- **产生方**：System1 intention 抽取（`dual_mem/agent/mem_agent.py`）+ System2 `s2_tools.create_intention`。
-- **读路径**：归入 `PROACTIVE_LAYERS`，proactive 召回通道。
-
-## 模式与写入层数
-
-| 模式 | 写入层 |
-| --- | --- |
-| system1（默认） | L0–L4 |
-| dual | L0–L4、L6–L7 |
+旧层名作为读取兼容别名；枚举迭代只返回四层。加载 Chroma 时转换旧层元数据并
+验证历史链：ACTIVE 的旧祖先也归一为非 latest，原文与向量不重写。旧 SHADOW/DELETED
+改为 ACTIVE 的归档表示；不会恢复为当前事实。损坏或跨 scope 的链需要修复后再迁移。
+旧图节点会复制到统一 VDB，Kuzu 保留为证据关系投影，VDB 决定当前可读性。

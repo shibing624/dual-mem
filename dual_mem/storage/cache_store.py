@@ -105,13 +105,6 @@ class CacheStore:
     ) -> None:
         """Append a pending cognition task, deduplicated per app/user/agent scope."""
         with self._lock:
-            existing = self.conn.execute(
-                "SELECT 1 FROM s2_queue WHERE status = 'pending' "
-                "AND user_id = ? AND app_id = ? AND agent_id = ? LIMIT 1",
-                (user_id, app_id, agent_id),
-            ).fetchone()
-            if existing is not None:
-                return
             self.conn.execute(
                 "INSERT INTO s2_queue (user_id, app_id, agent_id, status, ts) "
                 "VALUES (?, ?, ?, 'pending', ?)",
@@ -123,10 +116,21 @@ class CacheStore:
         """Return pending app/user/agent scopes without changing their status."""
         with self._lock:
             rows = self.conn.execute(
-                "SELECT app_id, user_id, agent_id FROM s2_queue "
+                "SELECT id, app_id, user_id, agent_id FROM s2_queue "
                 "WHERE status = 'pending' ORDER BY id ASC"
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def mark_s2_tasks_done(self, task_ids: list[int]) -> None:
+        """Acknowledge only the claimed watermark; newer writes remain queued."""
+        if not task_ids:
+            return
+        with self._lock:
+            self.conn.executemany(
+                "UPDATE s2_queue SET status='done' WHERE id=? AND status='pending'",
+                [(task_id,) for task_id in task_ids],
+            )
+            self.conn.commit()
 
     def mark_s2_scope_done(self, *, app_id: str, user_id: str, agent_id: str) -> None:
         """Acknowledge a cognition scope after its explicit digest succeeds."""
@@ -150,7 +154,13 @@ class CacheStore:
             self.conn.execute(
                 "INSERT INTO reconcile_queue (app_id, user_id, agent_id, node_ids, status, ts) "
                 "VALUES (?, ?, ?, ?, 'pending', ?)",
-                (app_id, user_id, agent_id, json.dumps(node_ids, ensure_ascii=False), time.time()),
+                (
+                    app_id,
+                    user_id,
+                    agent_id,
+                    json.dumps(node_ids, ensure_ascii=False),
+                    time.time(),
+                ),
             )
             self.conn.commit()
 
@@ -164,7 +174,11 @@ class CacheStore:
             return [dict(row) for row in rows]
 
     def list_pending_reconcile_tasks(
-        self, *, app_id: str | None = None, user_id: str | None = None, agent_id: str | None = None
+        self,
+        *,
+        app_id: str | None = None,
+        user_id: str | None = None,
+        agent_id: str | None = None,
     ) -> list[dict]:
         """Return pending reconcile tasks without acknowledging them."""
         with self._lock:
@@ -186,7 +200,9 @@ class CacheStore:
             rows = self.conn.execute(sql, params).fetchall()
             tasks = [dict(row) for row in rows]
             for task in tasks:
-                task["node_ids"] = json.loads(task["node_ids"]) if task["node_ids"] else []
+                task["node_ids"] = (
+                    json.loads(task["node_ids"]) if task["node_ids"] else []
+                )
             return tasks
 
     def mark_reconcile_task_done(self, task_id: int) -> None:
@@ -224,7 +240,12 @@ class CacheStore:
         with self._lock:
             self.conn.execute(
                 "INSERT INTO pipeline_logs (request_id, stage, payload, ts) VALUES (?, ?, ?, ?)",
-                (request_id, stage, json.dumps(payload, ensure_ascii=False), time.time()),
+                (
+                    request_id,
+                    stage,
+                    json.dumps(payload, ensure_ascii=False),
+                    time.time(),
+                ),
             )
             self.conn.commit()
 
@@ -275,6 +296,11 @@ class CacheStore:
             self.conn.execute(
                 "INSERT OR REPLACE INTO content_hash_cache (iso_key, content_hash, outcome_json, ts) "
                 "VALUES (?, ?, ?, ?)",
-                (iso_key, content_hash, json.dumps(outcome, ensure_ascii=False), time.time()),
+                (
+                    iso_key,
+                    content_hash,
+                    json.dumps(outcome, ensure_ascii=False),
+                    time.time(),
+                ),
             )
             self.conn.commit()

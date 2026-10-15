@@ -1,3 +1,5 @@
+> JEV 配置与版本 API 的迁移说明见 [设计文档](../jev-memory-design.md)。
+
 # 快速开始
 
 ## 同步（脚本 / REPL，推荐入门）
@@ -38,7 +40,7 @@ asyncio.run(main())
 
 已在 async 事件循环内时，必须用 `MemoryClient` + `await`；`SyncMemoryClient` 会报错。
 
-配置：`~/.dual_mem/config.yaml` 首次启动自动创建，填入 `llm_api_key` 与 `embed_api_key` 即可。
+配置：`~/.dual_mem/config.yaml` 首次启动自动创建，填入 `jev_api_key`、`llm_api_key` 与 `embed_api_key` 即可。
 
 ## 核心参数
 
@@ -46,7 +48,7 @@ asyncio.run(main())
 
 | 参数 | 必填 | 含义 |
 |---|---|---|
-| `mode` | 否 | `"system1"`（默认，写 L0–L4）或 `"dual"`（+ 显式 `digest()` 写 L6/L7）。可写在 YAML。 |
+| `mode` | 否 | `"system1"`（默认，写 L0/L1/L2）或 `"dual"`（+ 显式 `digest()` 写 L3_DERIVED）。可写在 YAML。 |
 | `storage_dir` | 否 | 本地数据目录（Chroma + Kuzu + SQLite），默认 `./.dual_mem_data`。 |
 | `settings` | 否 | 传入 `Settings` 对象，覆盖 YAML / 环境变量。 |
 | `embed` / `llm` | 否 | 注入自定义客户端（测试 / 自建后端）；注入后跳过对应 `api_key` 校验。 |
@@ -69,8 +71,8 @@ asyncio.run(main())
 
 | 方式 | 适用 | 行为 |
 |---|---|---|
-| `content="..."` | 单条陈述、日志、离线导入 | 整段由 Extractor 处理并决定是否沉淀。 |
-| `messages=[{role, content}, ...]` | Agent 多轮对话（推荐） | L1_RAW 与 Extractor 都接收带角色标记的完整对话；宿主注入的 system 消息会先移除。 |
+| `content="..."` | 单条陈述、日志、离线导入 | 整段由 生成候选文本，再由 JEV 决定是否沉淀。 |
+| `messages=[{role, content}, ...]` | Agent 多轮对话（推荐） | L0_RAW 与 Extractor 都接收带角色标记的完整对话；宿主注入的 system 消息会先移除。 |
 
 ```python
 await client.add(
@@ -160,7 +162,7 @@ if __name__ == "__main__":
 |---|---|
 | `search` | 每轮用户输入前 |
 | `add` | 会话结束一次（或每 N 轮 batch）；每次至少 1 次 Extract LLM，长文本可再触发摘要 |
-| `WriteResult` | 读取 `commit_passed`；`False` 表示 Extractor 未提交 L0/L2+，`is_ephemeral=True` 表示纯临时内容 |
+| `WriteResult` | 读取 `commit_passed`；`False` 表示 JEV 未追加结构化版本（如已知 SKIP 或 RAW_ONLY），L0 原文仍保留；`decisions` 返回动作与关系 |
 
 ## dual 模式与 System2 触发
 

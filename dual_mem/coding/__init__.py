@@ -10,6 +10,8 @@ from dual_mem.coding.types import (
     CodingMemory,
     CodingReconcileOp,
     BOUNDARY_SCOPES,
+    CodingDecisionError,
+    CodingConcurrentWriteError,
 )
 from dual_mem.coding.writer import CodingWriter
 from dual_mem.coding.store import CodingMemoryStore
@@ -33,6 +35,8 @@ __all__ = [
     "CodingMemory",
     "CodingReconcileOp",
     "BOUNDARY_SCOPES",
+    "CodingDecisionError",
+    "CodingConcurrentWriteError",
     "classify_messages_is_coding",
     "has_any_tool_message",
     "strip_tool_messages",

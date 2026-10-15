@@ -48,9 +48,9 @@ async def test_three_key_structure_and_profile_full(factory):
     assert {"profile", "proactive", "normal"} == {"profile", "proactive", "normal"}
     assert res.proactive == []
     profile_ids = {m.memory_id for m in res.profile}
-    assert profile_ids == {p0.node_id}
+    assert profile_ids == {p0.node_id, p4.node_id}
     normal_ids = {m.memory_id for m in res.normal}
-    assert p4.node_id in normal_ids
+    assert p4.node_id not in normal_ids
     assert f1.node_id in normal_ids
     assert f2.node_id in normal_ids
 
@@ -89,7 +89,13 @@ async def test_evolution_chain_returned(factory):
     b.supersedes = [c.node_id]
     b.superseded_by = [a.node_id]
     c.superseded_by = [b.node_id]
-    factory.vector.upsert([a, b, c])
+    factory.vector.update_payload_many(
+        {
+            a.node_id: {"supersedes": b.node_id},
+            b.node_id: {"supersedes": c.node_id, "superseded_by": a.node_id},
+            c.node_id: {"superseded_by": b.node_id},
+        }
+    )
 
     reader = Reader(factory=factory)
     res, _ = await reader.search(

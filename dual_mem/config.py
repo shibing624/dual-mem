@@ -33,7 +33,11 @@ def config_path() -> Path:
 
 def _default_config_template() -> str:
     """Load the bundled default YAML shipped inside the dual_mem package."""
-    return resources.files("dual_mem").joinpath("config.default.yaml").read_text(encoding="utf-8")
+    return (
+        resources.files("dual_mem")
+        .joinpath("config.default.yaml")
+        .read_text(encoding="utf-8")
+    )
 
 
 def ensure_config_file() -> Path:
@@ -50,8 +54,8 @@ def ensure_config_file() -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_default_config_template(), encoding="utf-8")
     logger.info(
-        "Created default config at %s — edit llm_api_key and embed_api_key, "
-        "or set DUAL_MEM_LLM_API_KEY / DUAL_MEM_EMBED_API_KEY.",
+        "Created default config at %s — edit jev_api_key, llm_api_key and embed_api_key, "
+        "or set DUAL_MEM_JEV_API_KEY / DUAL_MEM_LLM_API_KEY / DUAL_MEM_EMBED_API_KEY.",
         path,
     )
     return path
@@ -90,25 +94,10 @@ EMBED_RETRY_ATTEMPTS = 3
 EMBED_RETRY_BASE_DELAY = 0.5
 
 
-# Tuning presets ("旋钮档位"): bundle the dozens of advanced tuning fields into a few
-# named scenarios so users pick ONE name instead of hand-tuning several knobs. A preset only
-# supplies values for fields the user did NOT set explicitly (init args / env / YAML always
-# win). Presets NEVER touch credentials, model, dim, mode or storage_dir — those stay the
-# user's responsibility.
-#
-# The single axis a preset chooses is recall vs. compactness:
-#   default     — balanced: merge/evolve facts → compact store + evolution chains.
-#   high_recall — never merge/drop facts → every fact kept (counting / audit / eval).
+# Presets change only material budget. Jev remains authoritative in every preset.
 PRESETS: dict[str, dict[str, Any]] = {
-    # General-purpose SDK usage. Balanced, conservative defaults == code defaults.
     "default": {},
-    # High-recall: never merge/drop facts — counting/aggregation/audit workloads keep every
-    # fact. Trades store compactness for recall; also skips reconcile LLM calls.
-    "high_recall": {
-        "reconcile_non_destructive": True,
-        "reconcile_skip_llm": True,
-        "reconcile_policy": "conservative",
-    },
+    "high_recall": {"reconcile_candidate_limit": 128},
 }
 PRESET_NAMES = tuple(PRESETS.keys())
 
@@ -119,10 +108,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Mode:
-    #   system1 — synchronous System1 cognition: LLM extract -> fast-write L0-L4.
-    #   dual    — System1 + async System2 distillation/graph (L6 schema / L7 intention).
-    # Both modes require LLM and embedding API keys; missing credentials fail at construction.
+    # Both modes append System1 facts/profiles using Jev decisions.
+    # dual adds explicit digest for cross-evidence L3 cognition.
     mode: Literal["system1", "dual"] = "system1"
     storage_dir: str = "./.dual_mem_data"
 
@@ -130,7 +117,7 @@ class Settings(BaseSettings):
     # below. The preset only fills in fields you did NOT set explicitly (init/env/YAML
     # override it). See ``PRESETS`` for what each one changes.
     #   default     — balanced general SDK usage (== code defaults).
-    #   high_recall — never merge/drop facts (counting / audit / eval workloads).
+    #   high_recall — expand Jev material budget; preserve normal relation decisions.
     preset: Literal["default", "high_recall"] = "default"
 
     llm_base_url: str = "https://api.openai.com/v1"
@@ -166,99 +153,25 @@ class Settings(BaseSettings):
     # Default tenant namespace when add/list/search omit app_id (single-product default).
     default_app_id: str = "default"
 
-    # Serialize concurrent add() for the same (app_id, user_id) behind a per-user asyncio.Lock
-    # so the fast-write -> reconcile evolution chain never races. Default on (production-safe).
-    # Set False for batch ingestion where many sessions of ONE user are written concurrently
-    # and reconcile is deferred until digest() — lets per-session extract
-    # overlap instead of running strictly one at a time. The vector store is internally
-    # thread-safe, so disabling the lock is safe under deferred reconcile.
-    write_serialize_per_user: bool = True
+    # Optional full serialization; default overlaps model I/O and validates scope CAS.
+    write_serialize_per_user: bool = False
 
-    # System2 聚类的相似度阈值（cosine）。低于该相似度的事实不归为一簇。
-    cluster_stage1_sim: float = 0.42
-    cluster_stage2_sim: float = 0.55
-
-    # Reconciler 额外的 LLM 召回查询改写：默认关闭（语义召回本身够用，省一次 LLM/写入）。
-    reconcile_search_query: bool = False
-    # Reconcile 策略：
-    #   balanced     — 现状：允许跨节点合并（Goal2 merge + DELETE），记忆库更紧凑。
-    #   conservative — 高召回：禁止跨节点合并 DELETE，可数事件强制 SUPPLEMENT 独立保留；
-    #                  仅 OVERRIDE/NEGATE（同维度状态变化）才允许 supersedes。穷举/计数类
-    #                  场景（benchmark、客服日志）用它避免把不同事件误并成一条而丢证据。
-    reconcile_policy: Literal["balanced", "conservative"] = "balanced"
-    # 非破坏性 reconcile（S2 只增量、永不修改/删除原始 fact）。
-    # 开启后，reconcile 的 ADD 操作一律不带 supersedes（原始记忆保持 ACTIVE），
-    # DELETE 操作一律丢弃。记忆库只增不减 → 计数/聚合类问题不再因合并丢事实。
-    # 适合 benchmark 高召回场景。env DUAL_MEM_RECONCILE_NON_DESTRUCTIVE=1 可强制开启。
-    reconcile_non_destructive: bool = False
-    # 跳过 reconcile LLM（配合 non_destructive 使用）。L2 fact 在 Extractor 写入时已 ACTIVE，
-    # non_destructive 下 reconcile 的 ADD SUPPLEMENT 只是写冗余副本、supersedes/DELETE 被剥离。
-    # 开启后直接排空 reconcile 队列不调 LLM → 省 ~47 次 LLM 调用/题（~127s），存储也更干净。
-    reconcile_skip_llm: bool = False
-    # 使用 hy_memory 的 reconcile 契约：bare JSON 数组（非 {"updates":[...]}），ADD/DELETE op，
-    # 无 update_type，无 reason 分组。env DUAL_MEM_RECONCILE_HY_CONTRACT=1 启用。
-    reconcile_use_hy_contract: bool = False
-    # reconcile 召回的最强候选低于该相似度时，跳过 LLM，直接把新记忆当 SUPPLEMENT 落库。
-    # 大量写入其实没有真正的冲突候选（全新事实），这条快路径省掉相应的 reconcile LLM 调用，
-    # 零合并风险。设 0 关闭（总是走 LLM）。
-    reconcile_weak_candidate_score: float = 0.5
-    # ⚠️ 当前为惰性开关：digest 流程已不再调用 link_evolution_chains_heuristic。
-    # 该启发式（同 layer + tag 交集 + 时间序补建 supersedes/superseded_by，旧节点保持 ACTIVE）
-    # 实测为 62% 的记忆打链，而检索会把整条链展开进 QA 上下文，导致已被取代的中间态被当作
-    # 仍然有效的事实喂给模型（PersonaMem 4/4 受影响题由对转错）。因此 System2Writer._digest_user
-    # 现在只排空 reconcile 队列、不建链。函数本身保留在 reconciler_worker 中，可被显式调用
-    # （例如离线还原偏好演化时间线），并有独立单元测试覆盖。
-    reconcile_link_chains_heuristic: bool = True
-    # ReconcilerWorker 排空 reconcile 队列时的并发度。每个 reconcile task 的瓶颈是一次大
-    # prompt 的 LLM 调用（recall+LLM 只读，apply 写入很快），串行排队时 digest 会被拉长。
-    # >1 时多个 task 的 recall+LLM 并发跑（向量库内部线程安全）。代价：同一 evolution chain
-    # 上的跨 task supersede 依赖可能漏判（最终一致，可接受）。1 = 严格串行（旧行为）。
-    reconcile_concurrency: int = 1
-    # Run reconciler synchronously inside the write path (strong consistency for evolution
-    # chains; also raises latency to ~2 LLM calls per add). Default off: async reconcile
-    # via ReconcilerWorker during explicit digest().
-    reconcile_sync: bool = False
-    # System1 inline reconcile: after per-chunk extraction, merge the new memories against
-    # the user's existing ACTIVE memories (candidate recall reuses the new embeddings;
-    # the LLM is skipped when the best candidate is below reconcile_weak_candidate_score).
-    # Produces dense, evolution-aware memories with supersedes chains instead of an
-    # ever-growing pile of narrow static statements.
-    system1_reconcile_enabled: bool = True
-    # System2 ReAct loop iteration cap (the agent stops earlier when the LLM emits no more
-    # tool_calls). Only the residual ReAct path uses this — single-shot handles the small/
-    # single-cluster majority. Each turn is a serial LLM round-trip; the model batches many
-    # tool_calls per turn, so observed heavy digests (~10-12 schemas) finish within ~5 turns.
-    # 6 trims worst-case latency vs the old 10 while leaving headroom for the heavy tail.
-    system2_max_iters: int = 6
-    # Single-shot System2: skip the ReAct tool loop and emit schemas/intentions in ONE
-    # chat_json call when BOTH hold: clusters <= max_clusters AND the total fact workload <=
-    # max_facts. The fact cap matters because clustering can collapse a whole user into one
-    # huge "cluster" (100s of facts); cramming that into a single JSON would truncate on a
-    # small model, so large blobs still use the iterative ReAct loop. 0 clusters disables it.
-    system2_single_shot_max_clusters: int = 1
-    system2_single_shot_max_facts: int = 80
-    # Hard cap on how many cluster facts are rendered into the System2 prompt, total across
-    # all clusters. Clustering can collapse 100s of facts into one cluster; without a cap the
-    # rendered prompt blows past the model context window (observed: 590 facts -> 32k tokens ->
-    # HTTP 400, the whole digest wasted). Excess facts are dropped from the prompt (still marked
-    # processed) and a note tells the model how many were omitted. 0 disables the cap.
+    # Typed decision service (official TypeSafe or Venus-compatible endpoint).
+    jev_endpoint: str = "https://api.typesafe.ai/v1/systemone"
+    jev_api_key: str = ""
+    jev_model: str = "jev-1.13.0"
+    jev_timeout: float = 30.0
+    jev_retry_attempts: int = 3
+    jev_max_questions: int = 64
+    jev_max_request_chars: int = 100_000
+    jev_max_question_chars: int = 60_000
+    reconcile_concurrency: int = 4
+    reconcile_candidate_limit: int = 64
+    reconcile_batch_size: int = 12
+    reconcile_retry_attempts: int = 3
     system2_max_prompt_facts: int = 120
 
-    # Skip extract/reconcile when identical content was already written for this scope.
-    content_hash_dedup: bool = True
-    # Dedup key granularity: "session" = per app/user/agent/session (strict, fewer hits);
-    # "user" = per app/user (cross-session/agent hits, higher hit rate).
-    content_hash_scope: Literal["session", "user"] = "session"
-
-    # L3 summarizer is opt-in; facts are the default System1 output.
-    summarizer_enabled: bool = False
-    summarizer_min_content_tokens: int = 600
-    canonical_dedup_enabled: bool = True
-    # Opt-in until this similarity threshold is calibrated on a larger benchmark.
-    vector_dedup_enabled: bool = False
-    vector_dedup_threshold: float = 0.98
-
-    # Extract final-blob hard cap in tokens (0 = disabled → rely on the LLM chunk+merge path).
+    # Legacy generic extractor cap in tokens (0 = disabled → rely on the LLM chunk+merge path).
     # Applies to the final content of BOTH content= and messages= (after history shaping). This
     # is the last-resort size cap (e.g. when user turns alone are huge); it is layered ON TOP of
     # — and does not conflict with — the role-aware history shaping below.
@@ -279,8 +192,6 @@ class Settings(BaseSettings):
     embed_queue_batch_size: int = 32
     embed_queue_window_ms: float = 200.0
     embed_cache_size: int = 10_000
-    # If extraction creates derived memories, remove the redundant L1 raw vector.
-    skip_l1_vector_when_derived: bool = False
     # Append-only history.db audit log (ADD/SUPERSEDE/DELETE snapshots). Off by default —
     # not used on the read path; enable for compliance / debugging.
     persist_history: bool = False
@@ -296,11 +207,43 @@ class Settings(BaseSettings):
     hybrid_evidence_saturate: int = 5
     # Coding/tool-use memory subsystem — separate write/store path for engineering
     # conversations containing tool calls. When enabled, add() first checks for tool
-    # messages; if found, an LLM judge decides coding vs chat, and coding memories
+    # messages; if found, Jev decides coding vs chat, and coding memories
     # go to a separate SQLite+VDB store with task/search_keys/solution schema.
     coding_enabled: bool = False  # opt-in; experimental
     coding_db_path: str = ""  # empty = auto: {storage_dir}/coding_memory.db
     coding_tool_result_max_bytes: int = 2048
+
+    @field_validator(
+        "jev_timeout",
+        "jev_retry_attempts",
+        "jev_max_questions",
+        "jev_max_request_chars",
+        "jev_max_question_chars",
+        "reconcile_concurrency",
+        "reconcile_candidate_limit",
+        "reconcile_batch_size",
+        "reconcile_retry_attempts",
+        "system2_max_prompt_facts",
+    )
+    @classmethod
+    def _positive_decision_limit(cls, value: int | float) -> int | float:
+        if value <= 0:
+            raise ValueError("decision and cognition limits must be positive")
+        return value
+
+    @field_validator("reconcile_candidate_limit")
+    @classmethod
+    def _choice_material_limit(cls, value: int) -> int:
+        if value > 220:
+            raise ValueError("candidate limit must be <=220 to fit Jev choice options")
+        return value
+
+    @field_validator("reconcile_batch_size")
+    @classmethod
+    def _proposal_limit(cls, value: int) -> int:
+        if value > 24:
+            raise ValueError("batch size must be <=24")
+        return value
 
     @field_validator("app_whitelist", mode="before")
     @classmethod
@@ -451,6 +394,11 @@ def _flatten_config_dict(config_dict: dict[str, Any]) -> dict[str, Any]:
     if isinstance(embed_section, dict):
         _map_provider_section(embed_section, flat, prefix="embed")
 
+    jev = flat.pop("jev", None)
+    if isinstance(jev, dict):
+        for key, value in jev.items():
+            flat.setdefault(f"jev_{key}", value)
+
     vector_store = flat.pop("vector_store", None)
     if isinstance(vector_store, dict):
         vector_config = vector_store.get("config")
@@ -477,7 +425,9 @@ def _flatten_config_dict(config_dict: dict[str, Any]) -> dict[str, Any]:
     return flat
 
 
-def _map_provider_section(section: dict[str, Any], flat: dict[str, Any], *, prefix: str) -> None:
+def _map_provider_section(
+    section: dict[str, Any], flat: dict[str, Any], *, prefix: str
+) -> None:
     """Copy provider keys into ``{prefix}_*`` Settings fields."""
     provider_config = section.get("config")
     if isinstance(provider_config, dict):

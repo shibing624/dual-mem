@@ -30,9 +30,9 @@ from dual_mem.types import Layer, MemoryNode, MemoryStatus
 logger = logging.getLogger("dual_mem.retrieval.hybrid")
 
 # Hybrid layer routing
-_PROFILE_LAYERS = [Layer.L0_BASIC_INFO, Layer.L6_SCHEMA]
-_VDB_PROFILE_LAYERS = [Layer.L0_BASIC_INFO]
-_VDB_RECALL_LAYERS = [Layer.L2_FACT, Layer.L3_SUMMARY, Layer.L4_IDENTITY]
+_PROFILE_LAYERS = [Layer.L2_PROFILE, Layer.L3_DERIVED]
+_VDB_PROFILE_LAYERS = [Layer.L2_PROFILE, Layer.L3_DERIVED]
+_VDB_RECALL_LAYERS = [Layer.L1_FACT, Layer.L2_PROFILE]
 # Note: L1_RAW excluded from VDB semantic recall (align hy_memory: raw fragments
 #   are noisy and dilute top-k ranking; only extracted/curated layers are recalled).
 _PROFILE_RECALL_LIMIT = 10
@@ -94,6 +94,15 @@ def _item_to_memory(item: dict) -> MemoryItem:
         source_node_id = str(source_node_id)
     return MemoryItem(
         memory_id=node.node_id,
+        layer=node.layer.value,
+        kind=node.kind or node.category.value,
+        is_latest=node.is_latest,
+        revision=node.revision,
+        supersedes=list(node.supersedes),
+        source_ids=list((node.custom or {}).get("source_ids", [])),
+        conflicts_with=list((node.custom or {}).get("conflicts_with", [])),
+        valid_from=node.valid_from,
+        valid_until=node.valid_until,
         content=node.content,
         category=node.category.value,
         score=item["score"],
@@ -160,6 +169,7 @@ async def search_hybrid(
         session_ids=session_ids,
         layers=_VDB_RECALL_LAYERS,
         statuses=recall_statuses,
+        latest_only=True,
         created_after=created_after,
     )
     profile_where = build_filter(
@@ -167,8 +177,9 @@ async def search_hybrid(
         user_id=user_id,
         agent_ids=agent_ids,
         session_ids=session_ids,
-        layers=_VDB_PROFILE_LAYERS,
+        layers=_VDB_PROFILE_LAYERS if include_derived else [Layer.L2_PROFILE],
         statuses=[MemoryStatus.ACTIVE],
+        latest_only=True,
         created_after=created_after,
     )
 
@@ -217,6 +228,9 @@ async def search_hybrid(
             }
             for g in hits
             if g.score >= profile_min_score
+            and (head := vector.get(g.node_id)) is not None
+            and head.is_latest
+            and head.agent_id in (agent_ids or [head.agent_id])
         ]
 
     results = await asyncio.gather(
@@ -250,7 +264,7 @@ async def search_hybrid(
         if graph is not None:
             graph_intentions = await asyncio.to_thread(
                 graph.query_by_embedding,
-                layer=Layer.L7_INTENTION.value,
+                layer=Layer.L3_DERIVED.value,
                 user_id=user_id,
                 app_ids=app_ids,
                 embedding=query_embedding,
@@ -258,12 +272,18 @@ async def search_hybrid(
             )
             seen = {h["node_id"] for h in intention_hits}
             for g in graph_intentions:
+                head = vector.get(g.node_id)
+                if head is None or not head.is_latest or head.kind != "intention":
+                    continue
+                if agent_ids and head.agent_id not in agent_ids:
+                    continue
                 if g.node_id in seen:
                     continue
                 seen.add(g.node_id)
                 node = MemoryNode(
                     content=g.content,
-                    layer=Layer.L7_INTENTION,
+                    layer=head.layer,
+                    kind=head.kind,
                     app_id=g.app_id,
                     user_id=g.user_id,
                     agent_id=g.agent_id,
@@ -277,7 +297,7 @@ async def search_hybrid(
                         "node_id": g.node_id,
                         "score": g.score,
                         "node": node,
-                        "layer": Layer.L7_INTENTION.value,
+                        "layer": head.layer.value,
                         "source": "graph_intention",
                     }
                 )
@@ -306,7 +326,11 @@ async def search_hybrid(
         nid = row["node_id"]
         sem_score = row["score"]
         bm25_score = bm25_by_nid.get(nid, 0.0)
-        final = score_vdb_node(sem_score, bm25_score, w_sem, w_bm25) if has_bm25 else sem_score
+        final = (
+            score_vdb_node(sem_score, bm25_score, w_sem, w_bm25)
+            if has_bm25
+            else sem_score
+        )
         vdb_scored.append(
             {
                 "node_id": nid,
@@ -360,14 +384,29 @@ async def search_hybrid(
     if forward_l6 or reverse_l6:
         by_id: dict[str, dict] = {}
         for item in forward_l6 + reverse_l6:
+            head = vector.get(item["node_id"])
+            if (
+                head is None
+                or not head.is_latest
+                or head.app_id not in app_ids
+                or head.user_id != user_id
+                or (agent_ids and head.agent_id not in agent_ids)
+            ):
+                continue
+            item["node"] = head
             by_id.setdefault(item["node_id"], item)
-        fused = rrf.rrf_fuse({"forward": forward_l6, "reverse": reverse_l6})
+        fused = rrf.rrf_fuse(
+            {
+                "forward": [i for i in forward_l6 if i["node_id"] in by_id],
+                "reverse": [i for i in reverse_l6 if i["node_id"] in by_id],
+            }
+        )
         for f_item in fused:
             src = by_id.get(f_item["node_id"], {})
             fused_l6.append(
                 {
                     "node_id": f_item["node_id"],
-                    "node": None,
+                    "node": src.get("node"),
                     "content": src.get("content", ""),
                     "layer": src.get("layer", Layer.L6_SCHEMA.value),
                     "score": float(f_item.get("rrf_score", 0.0)),
@@ -377,7 +416,9 @@ async def search_hybrid(
             )
 
     expandable = vdb_scored + list(profile_hits)
-    meta_by_nid: dict[str, dict] = {it["node_id"]: it for it in expandable if it.get("node_id")}
+    meta_by_nid: dict[str, dict] = {
+        it["node_id"]: it for it in expandable if it.get("node_id")
+    }
     # NOTE(dual_vs_hy): evolution-chain 展开只作用于 profile/L6 桶 —— normal 路保持
     # ACTIVE 纯事实（S1 原始记忆保真），S2 深层证据（chain/schema）单独进 profile 桶。
     # 实测 62-74% 检索结果被 chain 挤占导致事实丢失，分段后事实路与 s1 一致。
@@ -411,7 +452,12 @@ async def search_hybrid(
     else:
         expanded = expandable
 
-    normal_results = [it for it in expanded if _layer_of(it) not in _PROFILE_LAYER_VALS]
+    normal_results = [
+        it
+        for it in expanded
+        if _layer_of(it) not in _PROFILE_LAYER_VALS
+        or (profile_limit == 0 and _layer_of(it) == Layer.L2_PROFILE.value)
+    ]
     if min_score_gate > 0:
         normal_results = [
             it
@@ -424,7 +470,13 @@ async def search_hybrid(
 
     l0_results = [it for it in expanded if _layer_of(it) in _PROFILE_LAYER_VALS]
     l0_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    profile_results = l0_results + (fused_l6 if use_derived else [])
+    profile_results = list(
+        {
+            it["node"].node_id: it
+            for it in l0_results + (fused_l6 if use_derived else [])
+            if it.get("node")
+        }.values()
+    )
     if profile_limit == 0:
         profile_results = []
     elif profile_limit > 0:

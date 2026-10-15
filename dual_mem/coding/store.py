@@ -1,237 +1,642 @@
-# -*- coding: utf-8 -*-
-"""Coding memory store — SQLite (metadata) + VDB (vectors) dual-layer.
+"""SQLite owns publication/history; vectors are a rebuildable retrieval index.
 
-Each CodingMemory has 1 SQLite row + 1+N VDB rows (task + search_keys).
-VDB isolation: coding vectors use app_id=f"coding_{real_app_id}" in the same
-VDB collection as chat memories (ChromaVectorStore uses one collection "memories").
-Chat searches filter by the real app_id, so they never see coding vectors, and
-vice versa. Multi-tenant isolation is preserved per app_id.
-
-SQLite: coding_memory_meta table, one row per memory, filtered by app_id + user_id.
+Candidate rows are reserved but invisible until every vector and link operation
+succeeds and a scope CAS transaction publishes the entire batch. Failed vectors
+may remain indexed, but coding reads always gate them through published SQLite
+rows. History stays ACTIVE in the VDB; coding search uses SQL is_latest, never
+vector hints, so partial link metadata cannot retire a visible head.
 """
+
 import asyncio
 import json
-import logging
+import math
 import sqlite3
 import threading
 import uuid
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
+from dual_mem.coding.types import (
+    BOUNDARY_SCOPES,
+    CodingConcurrentWriteError,
+    CodingDecisionError,
+    CodingMemory,
+    CodingScope,
+    coding_scope,
+    version_boundary,
+)
+from dual_mem.isolation import build_filter
 from dual_mem.providers.embedding import EmbedService
 from dual_mem.storage.vector_store import VectorStore
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
-from dual_mem.coding.types import CodingMemory
-
-logger = logging.getLogger("dual_mem.coding.store")
 
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS coding_memory_meta (
-    memory_id        TEXT PRIMARY KEY,
-    user_id          TEXT NOT NULL,
-    agent_id         TEXT NOT NULL DEFAULT 'default_agent',
-    app_id           TEXT NOT NULL DEFAULT 'default',
-    task             TEXT NOT NULL,
-    search_keys      TEXT NOT NULL DEFAULT '[]',
-    solution         TEXT NOT NULL DEFAULT '',
-    boundary_envs    TEXT NOT NULL DEFAULT '',
-    boundary_scope   TEXT NOT NULL DEFAULT 'project',
-    workspace_id     TEXT,
-    branch           TEXT,
-    session_id       TEXT,
-    files            TEXT NOT NULL DEFAULT '[]',
-    confidence       REAL NOT NULL DEFAULT 0.7,
-    source           TEXT NOT NULL DEFAULT 'auto_extract',
-    created_at       TEXT,
-    updated_at       TEXT
-);
-"""
-
-# Index for multi-tenant queries (app_id + user_id + agent_id)
-_CREATE_INDEX_SQL = """
-CREATE INDEX IF NOT EXISTS idx_coding_user ON coding_memory_meta (app_id, user_id, agent_id);
+    memory_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL DEFAULT 'default_agent',
+    app_id TEXT NOT NULL DEFAULT 'default',
+    task TEXT NOT NULL,
+    search_keys TEXT NOT NULL DEFAULT '[]',
+    solution TEXT NOT NULL DEFAULT '',
+    boundary_envs TEXT NOT NULL DEFAULT '',
+    boundary_scope TEXT NOT NULL DEFAULT 'project',
+    workspace_id TEXT,
+    branch TEXT,
+    session_id TEXT,
+    files TEXT NOT NULL DEFAULT '[]',
+    confidence REAL NOT NULL DEFAULT 0.7,
+    source TEXT NOT NULL DEFAULT 'auto_extract',
+    created_at TEXT,
+    updated_at TEXT,
+    is_latest INTEGER NOT NULL DEFAULT 1,
+    supersedes TEXT NOT NULL DEFAULT '[]',
+    superseded_by TEXT NOT NULL DEFAULT '[]',
+    source_ids TEXT NOT NULL DEFAULT '[]',
+    published INTEGER NOT NULL DEFAULT 1
+)
 """
 
 
 class CodingMemoryStore:
-    """Dual-layer store: SQLite metadata + VDB vectors for task + search_keys.
-
-    VDB vectors use app_id=f"coding_{real_app_id}" for isolation from chat
-    memories (which use the bare app_id). Both live in the same Chroma
-    collection but are never cross-queried because search filters by app_id.
-    """
-
-    LAYER = Layer.L2_FACT  # reuse L2 for VDB routing; "coding" tag distinguishes
+    LAYER = Layer.L1_FACT
+    SCAN_LIMIT = 100_000
 
     def __init__(
-        self,
-        *,
-        db_path: str,
-        vector: VectorStore,
-        embed: EmbedService,
-    ):
+        self, *, db_path: str, vector: VectorStore, embed: EmbedService
+    ) -> None:
         self.db_path = db_path
         self.vector = vector
         self.embed = embed
-        self._lock = threading.Lock()
-        self._conn: Optional[sqlite3.Connection] = None
-        self._init_db()
+        self._lock = threading.RLock()
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        try:
+            self._init_db()
+        except BaseException:
+            self._conn.close()
+            raise
 
     def _init_db(self) -> None:
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute(_CREATE_TABLE_SQL)
-        self._conn.execute(_CREATE_INDEX_SQL)
-        self._conn.commit()
+        with self._lock, self._conn:
+            self._conn.execute(_CREATE_TABLE_SQL)
+            columns = {
+                r[1]
+                for r in self._conn.execute("PRAGMA table_info(coding_memory_meta)")
+            }
+            for name, definition in {
+                "is_latest": "INTEGER NOT NULL DEFAULT 1",
+                "supersedes": "TEXT NOT NULL DEFAULT '[]'",
+                "superseded_by": "TEXT NOT NULL DEFAULT '[]'",
+                "source_ids": "TEXT NOT NULL DEFAULT '[]'",
+                "published": "INTEGER NOT NULL DEFAULT 1",
+            }.items():
+                if name not in columns:
+                    self._conn.execute(
+                        f"ALTER TABLE coding_memory_meta ADD COLUMN {name} {definition}"
+                    )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_coding_user ON coding_memory_meta (app_id,user_id,agent_id)"
+            )
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS coding_epochs (scope TEXT PRIMARY KEY, epoch INTEGER NOT NULL)"
+            )
+            self._conn.execute(
+                """CREATE TABLE IF NOT EXISTS coding_sources (
+                raw_id TEXT PRIMARY KEY, app_id TEXT NOT NULL, user_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL, messages TEXT NOT NULL, session_id TEXT,
+                workspace_id TEXT, branch TEXT, indexed INTEGER NOT NULL DEFAULT 0
+            )"""
+            )
+            self._repair_history()
+
+    def _repair_history(self) -> None:
+        """Validate legacy links first, then repair only SQL retirement metadata."""
+        rows = self._conn.execute(
+            "SELECT * FROM coding_memory_meta WHERE published=1"
+        ).fetchall()
+        memories = {r["memory_id"]: self._row_to_mem(r) for r in rows}
+        reverse: dict[str, list[str]] = {mid: [] for mid in memories}
+        for mem in memories.values():
+            for old_id in mem.supersedes:
+                old = memories.get(old_id)
+                if old is None or coding_scope(old) != coding_scope(mem):
+                    raise CodingDecisionError("missing or foreign coding history")
+                if version_boundary(old) != version_boundary(mem):
+                    raise CodingDecisionError(
+                        "coding history crosses retirement boundary"
+                    )
+                reverse[old_id].append(mem.memory_id)
+        # Kahn traversal detects cycles without recursion or truncating history.
+        counts = {mid: len(set(m.supersedes)) for mid, m in memories.items()}
+        ready = [mid for mid, count in counts.items() if count == 0]
+        visited = 0
+        while ready:
+            mid = ready.pop()
+            visited += 1
+            for child in set(reverse[mid]):
+                counts[child] -= 1
+                if counts[child] == 0:
+                    ready.append(child)
+        if visited != len(memories):
+            raise CodingDecisionError("cyclic coding history")
+        changed_scopes = set()
+        for mid, mem in memories.items():
+            links = list(dict.fromkeys(reverse[mid]))
+            if set(mem.superseded_by) - set(links):
+                raise CodingDecisionError("dangling coding reverse history link")
+            latest = False if links else mem.is_latest
+            if mem.superseded_by != links or mem.is_latest != latest:
+                self._conn.execute(
+                    "UPDATE coding_memory_meta SET superseded_by=?,is_latest=? WHERE memory_id=?",
+                    (json.dumps(links), int(latest), mid),
+                )
+                changed_scopes.add(coding_scope(mem))
+        for scope in changed_scopes:
+            self._conn.execute(
+                "INSERT INTO coding_epochs (scope,epoch) VALUES (?,1) "
+                "ON CONFLICT(scope) DO UPDATE SET epoch=epoch+1",
+                (self._scope_key(scope),),
+            )
 
     @staticmethod
     def _vdb_app_id(app_id: str) -> str:
-        """VDB app_id for coding memories: f"coding_{real_app_id}"."""
         return f"coding_{app_id}"
 
-    async def add(self, mem: CodingMemory) -> str:
-        """Insert a new coding memory (SQLite + VDB)."""
+    @staticmethod
+    def _scope_key(scope: CodingScope) -> str:
+        return json.dumps(scope, ensure_ascii=False)
+
+    def _epoch(self, scope: CodingScope) -> int:
+        row = self._conn.execute(
+            "SELECT epoch FROM coding_epochs WHERE scope=?", (self._scope_key(scope),)
+        ).fetchone()
+        return row[0] if row else 0
+
+    def assert_epoch(self, scope: CodingScope, expected_epoch: int) -> None:
         with self._lock:
+            if self._epoch(scope) != expected_epoch:
+                raise CodingConcurrentWriteError(
+                    "coding scope changed after reconciliation"
+                )
+
+    async def retain_source(
+        self,
+        messages: list[dict],
+        *,
+        user_id: str,
+        agent_id: str = "default_agent",
+        app_id: str = "default",
+        session_id: str | None = None,
+        workspace_id: str | None = None,
+        branch: str | None = None,
+    ) -> str:
+        """Persist lossless source BEFORE generation; never discard it on failure."""
+        raw_id = str(uuid.uuid4())
+        content = json.dumps(messages, ensure_ascii=False)
+        with self._lock, self._conn:
             self._conn.execute(
-                """INSERT OR REPLACE INTO coding_memory_meta
-                   (memory_id, user_id, agent_id, app_id, task, search_keys, solution,
-                    boundary_envs, boundary_scope, workspace_id, branch, session_id,
-                    files, confidence, source, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                "INSERT INTO coding_sources (raw_id,app_id,user_id,agent_id,messages,session_id,workspace_id,branch) VALUES (?,?,?,?,?,?,?,?)",
                 (
-                    mem.memory_id, mem.user_id, mem.agent_id, mem.app_id, mem.task,
-                    json.dumps(mem.search_keys, ensure_ascii=False),
-                    mem.solution, mem.boundary_envs, mem.boundary_scope,
-                    mem.workspace_id, mem.branch, mem.session_id,
-                    json.dumps(mem.files, ensure_ascii=False),
-                    mem.confidence, mem.source,
-                    mem.created_at.isoformat() if mem.created_at else None,
-                    mem.updated_at.isoformat() if mem.updated_at else None,
+                    raw_id,
+                    app_id,
+                    user_id,
+                    agent_id,
+                    content,
+                    session_id,
+                    workspace_id,
+                    branch,
                 ),
             )
-            self._conn.commit()
-        await self._upsert_vectors(mem)
-        return mem.memory_id
+        embeddings = await self.embed.embed_batch([content])
+        self._validate_embeddings(embeddings, 1)
+        node = MemoryNode(
+            node_id=raw_id,
+            content=content,
+            layer=Layer.L0_RAW,
+            app_id=self._vdb_app_id(app_id),
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id or "",
+            embedding=list(embeddings[0]),
+            tags=["coding"],
+            custom={"coding_raw_id": raw_id},
+        )
+        await asyncio.to_thread(self._write_vectors, [node])
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE coding_sources SET indexed=1 WHERE raw_id=?", (raw_id,)
+            )
+        return raw_id
 
-    async def update(self, mem: CodingMemory) -> None:
-        """Overwrite an existing memory (SQLite update + VDB re-embed)."""
-        old = self.get(mem.memory_id)
-        if old:
-            await self._delete_vectors(old)
-        await self.add(mem)
-
-    async def delete(self, memory_id: str) -> None:
-        """Delete a memory (SQLite + VDB)."""
-        mem = self.get(memory_id)
-        if mem:
-            await self._delete_vectors(mem)
-        with self._lock:
-            self._conn.execute("DELETE FROM coding_memory_meta WHERE memory_id = ?", (memory_id,))
-            self._conn.commit()
-
-    def get(self, memory_id: str) -> Optional[CodingMemory]:
-        """Fetch one memory by ID from SQLite."""
+    def get_source(
+        self,
+        raw_id: str,
+        *,
+        user_id: str,
+        agent_id: str = "default_agent",
+        app_id: str = "default",
+    ) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM coding_memory_meta WHERE memory_id = ?", (memory_id,)
+                "SELECT * FROM coding_sources WHERE raw_id=? AND app_id=? AND user_id=? AND agent_id=?",
+                (raw_id, app_id, user_id, agent_id),
+            ).fetchone()
+        return dict(row, messages=json.loads(row["messages"])) if row else None
+
+    def get(self, memory_id: str) -> CodingMemory | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM coding_memory_meta WHERE memory_id=? AND published=1",
+                (memory_id,),
             ).fetchone()
         return self._row_to_mem(row) if row else None
 
     def list_by_user(
-        self, *, user_id: str, agent_id: str = "default_agent",
-        app_id: str = "default", limit: int = 100,
-    ) -> List[CodingMemory]:
-        """List all coding memories for a user in one app."""
+        self,
+        *,
+        user_id: str,
+        agent_id: str = "default_agent",
+        app_id: str = "default",
+        limit: int | None = None,
+    ) -> list[CodingMemory]:
+        _, current, _ = self.snapshot(user_id=user_id, agent_id=agent_id, app_id=app_id)
+        if limit is not None and limit < 0:
+            raise ValueError("coding limit must be nonnegative")
+        return current if limit is None else current[:limit]
+
+    def snapshot(
+        self, *, user_id: str, agent_id: str = "default_agent", app_id: str = "default"
+    ) -> tuple[int, list[CodingMemory], dict[str, list[dict[str, Any]]]]:
+        """One SQLite read transaction: complete scope, heads, ancestors and epoch."""
+        scope = (app_id, user_id, agent_id)
         with self._lock:
-            rows = self._conn.execute(
-                """SELECT * FROM coding_memory_meta
-                   WHERE app_id = ? AND user_id = ? AND agent_id = ?
-                   ORDER BY created_at DESC LIMIT ?""",
-                (app_id, user_id, agent_id, limit),
-            ).fetchall()
-        return [self._row_to_mem(r) for r in rows]
+            self._conn.execute("BEGIN")
+            try:
+                epoch = self._epoch(scope)
+                rows = self._conn.execute(
+                    "SELECT * FROM coding_memory_meta WHERE app_id=? AND user_id=? AND agent_id=? AND published=1 ORDER BY created_at DESC,memory_id LIMIT ?",
+                    (*scope, self.SCAN_LIMIT + 1),
+                ).fetchall()
+                if len(rows) > self.SCAN_LIMIT:
+                    raise CodingDecisionError(
+                        "coding scope exceeds complete scan budget"
+                    )
+                memories = {r["memory_id"]: self._row_to_mem(r) for r in rows}
+                heads = [m for m in memories.values() if m.is_latest]
+                histories = {m.memory_id: self._history(m, memories) for m in heads}
+                return epoch, heads, histories
+            finally:
+                self._conn.rollback()
+
+    @staticmethod
+    def _history(
+        head: CodingMemory, memories: dict[str, CodingMemory]
+    ) -> list[dict[str, Any]]:
+        found: dict[str, CodingMemory] = {}
+        visiting: set[str] = set()
+
+        def visit(memory: CodingMemory) -> None:
+            if memory.memory_id in visiting:
+                raise CodingDecisionError("cyclic coding history")
+            visiting.add(memory.memory_id)
+            for old_id in memory.supersedes:
+                old = memories.get(old_id)
+                if old is None:
+                    raise CodingDecisionError("missing or foreign coding history")
+                if old.is_latest or version_boundary(old) != version_boundary(memory):
+                    raise CodingDecisionError(
+                        "coding history crosses retirement boundary"
+                    )
+                if memory.memory_id not in old.superseded_by:
+                    raise CodingDecisionError("missing coding reverse history link")
+                if old_id not in found:
+                    visit(old)
+                    found[old_id] = old
+            visiting.remove(memory.memory_id)
+
+        visit(head)
+        return [m.to_dict() for m in found.values()]
+
+    async def add(self, mem: CodingMemory) -> str:
+        await self.add_many([mem])
+        return mem.memory_id
+
+    async def add_many(
+        self, memories: list[CodingMemory], *, expected_epoch: int | None = None
+    ) -> list[str]:
+        """Append an all-or-nothing visible batch; immutable IDs cannot be reused."""
+        if not memories:
+            return []
+        # Freeze the caller's mutable dataclasses before any await.
+        memories = [
+            replace(
+                m,
+                search_keys=list(m.search_keys),
+                files=list(m.files),
+                supersedes=list(m.supersedes),
+                superseded_by=list(m.superseded_by),
+                source_ids=list(m.source_ids),
+            )
+            for m in memories
+        ]
+        scope = coding_scope(memories[0])
+        with self._lock:
+            epoch = self._epoch(scope) if expected_epoch is None else expected_epoch
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._validate_plan(memories, scope, epoch)
+                for mem in memories:
+                    self._insert(mem, published=False)
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+        texts = [text for mem in memories for text in [mem.task, *mem.search_keys]]
+        embeddings = await self.embed.embed_batch(texts)
+        self._validate_embeddings(embeddings, len(texts))
+        nodes = []
+        offset = 0
+        for mem in memories:
+            for i, text in enumerate([mem.task, *mem.search_keys]):
+                nodes.append(
+                    MemoryNode(
+                        node_id=f"{mem.memory_id}_key{i}",
+                        content=text,
+                        layer=self.LAYER,
+                        app_id=self._vdb_app_id(mem.app_id),
+                        user_id=mem.user_id,
+                        agent_id=mem.agent_id,
+                        embedding=list(embeddings[offset]),
+                        tags=["coding"],
+                        supersedes=[f"{old}_key0" for old in mem.supersedes],
+                        custom={
+                            "coding_memory_id": mem.memory_id,
+                            "coding_key_idx": i,
+                            "source_ids": mem.source_ids,
+                        },
+                    )
+                )
+                offset += 1
+        await asyncio.to_thread(self._write_vectors, nodes)
+        await asyncio.to_thread(self._publish, memories, scope, epoch)
+        return [m.memory_id for m in memories]
+
+    def _validate_plan(
+        self,
+        memories: list[CodingMemory],
+        scope: CodingScope,
+        epoch: int,
+        *,
+        reserved: bool = False,
+    ) -> None:
+        if self._epoch(scope) != epoch:
+            raise CodingConcurrentWriteError(
+                "coding scope changed after reconciliation"
+            )
+        ids = [m.memory_id for m in memories]
+        if len(set(ids)) != len(ids):
+            raise ValueError("duplicate coding memory IDs")
+        retired = set()
+        for mem in memories:
+            if coding_scope(mem) != scope or mem.boundary_scope not in BOUNDARY_SCOPES:
+                raise ValueError("coding memory crosses scope")
+            if not isinstance(mem.task, str) or not isinstance(mem.solution, str):
+                raise ValueError("coding text must be strings")
+            if any(
+                not isinstance(key, str) or not key.strip() for key in mem.search_keys
+            ):
+                raise ValueError("invalid coding search keys")
+            if not math.isfinite(mem.confidence) or not 0 <= mem.confidence <= 1:
+                raise ValueError("invalid coding confidence")
+            if (
+                not mem.memory_id
+                or not mem.task.strip()
+                or not mem.solution.strip()
+                or not mem.is_latest
+                or mem.superseded_by
+            ):
+                raise ValueError("coding append requires a complete new head")
+            row = self._conn.execute(
+                "SELECT published FROM coding_memory_meta WHERE memory_id=?",
+                (mem.memory_id,),
+            ).fetchone()
+            if (reserved and (row is None or row[0])) or (
+                not reserved and row is not None
+            ):
+                raise ValueError("immutable coding memory ID already used")
+            if len(set(mem.supersedes)) != len(mem.supersedes):
+                raise ValueError("duplicate coding version targets")
+            for source_id in mem.source_ids:
+                raw = self._conn.execute(
+                    "SELECT app_id,user_id,agent_id,indexed FROM coding_sources WHERE raw_id=?",
+                    (source_id,),
+                ).fetchone()
+                if raw is None or tuple(raw[:3]) != scope or not raw[3]:
+                    raise ValueError(
+                        "coding source is missing, unindexed or crosses scope"
+                    )
+            for old_id in mem.supersedes:
+                old = self.get(old_id)
+                if old is None or coding_scope(old) != scope:
+                    raise ValueError("coding version target missing or crosses scope")
+                if not old.is_latest or old_id in retired:
+                    raise CodingConcurrentWriteError(
+                        "coding version target is no longer current"
+                    )
+                if version_boundary(mem) != version_boundary(old):
+                    raise ValueError("coding retirement crosses version boundary")
+                retired.add(old_id)
+
+    def _publish(
+        self, memories: list[CodingMemory], scope: CodingScope, epoch: int
+    ) -> None:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._validate_plan(memories, scope, epoch, reserved=True)
+                patches = {}
+                for mem in memories:
+                    for old_id in mem.supersedes:
+                        old = self.get(old_id)
+                        links = [*old.superseded_by, mem.memory_id]
+                        for i in range(1 + len(old.search_keys)):
+                            nid = f"{old_id}_key{i}"
+                            vector = self.vector.get(nid)
+                            if vector is None or (
+                                vector.app_id,
+                                vector.user_id,
+                                vector.agent_id,
+                            ) != (self._vdb_app_id(scope[0]), scope[1], scope[2]):
+                                raise CodingDecisionError(
+                                    "missing or foreign coding history vector"
+                                )
+                            patches[nid] = {
+                                "is_latest": False,
+                                "superseded_by": "\x1f".join(
+                                    f"{link}_key0" for link in links
+                                ),
+                            }
+                        self._conn.execute(
+                            "UPDATE coding_memory_meta SET is_latest=0,superseded_by=? WHERE memory_id=? AND published=1 AND is_latest=1",
+                            (json.dumps(links), old_id),
+                        )
+                if patches:
+                    self.vector.update_payload_many(patches)
+                    checked = self.vector.get_by_ids(list(patches))
+                    if set(checked) != set(patches) or any(
+                        checked[nid].is_latest
+                        or checked[nid].superseded_by
+                        != patch["superseded_by"].split("\x1f")
+                        for nid, patch in patches.items()
+                    ):
+                        raise CodingDecisionError(
+                            "coding vector history link acknowledgement missing"
+                        )
+                for mem in memories:
+                    self._conn.execute(
+                        "UPDATE coding_memory_meta SET published=1 WHERE memory_id=? AND published=0",
+                        (mem.memory_id,),
+                    )
+                self._conn.execute(
+                    "INSERT INTO coding_epochs (scope,epoch) VALUES (?,?) ON CONFLICT(scope) DO UPDATE SET epoch=excluded.epoch",
+                    (self._scope_key(scope), epoch + 1),
+                )
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+
+    def _insert(self, mem: CodingMemory, *, published: bool) -> None:
+        data = mem.to_dict()
+        for key in (
+            "search_keys",
+            "files",
+            "supersedes",
+            "superseded_by",
+            "source_ids",
+        ):
+            data[key] = json.dumps(data[key], ensure_ascii=False)
+        data["is_latest"] = int(mem.is_latest)
+        data["published"] = int(published)
+        columns = list(data)
+        self._conn.execute(
+            f"INSERT INTO coding_memory_meta ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+            tuple(data.values()),
+        )
+
+    @staticmethod
+    def _validate_embeddings(embeddings: list[list[float]], expected: int) -> None:
+        if len(embeddings) != expected:
+            raise CodingDecisionError("coding embedding count mismatch")
+        dim = len(embeddings[0]) if embeddings else 0
+        if not dim or any(
+            len(e) != dim or any(not math.isfinite(v) for v in e) for e in embeddings
+        ):
+            raise CodingDecisionError("invalid coding embeddings")
+
+    def _write_vectors(self, nodes: list[MemoryNode]) -> None:
+        ids = [n.node_id for n in nodes]
+        if self.vector.get_by_ids(ids):
+            raise ValueError("immutable coding vector ID already used")
+        self.vector.upsert(nodes)
+        saved = self.vector.get_by_ids(ids)
+        if set(saved) != set(ids) or any(
+            saved[n.node_id].content != n.content
+            or (
+                saved[n.node_id].app_id,
+                saved[n.node_id].user_id,
+                saved[n.node_id].agent_id,
+            )
+            != (n.app_id, n.user_id, n.agent_id)
+            or saved[n.node_id].supersedes != n.supersedes
+            for n in nodes
+        ):
+            raise CodingDecisionError("coding vector append acknowledgement missing")
+
+    async def update(self, mem: CodingMemory) -> None:
+        raise ValueError("coding history is immutable; append a new ID with supersedes")
+
+    async def delete(self, memory_id: str) -> None:
+        raise ValueError(
+            "coding history is immutable; destructive delete is unsupported"
+        )
 
     async def search(
-        self, *, query: str, user_id: str, agent_id: str = "default_agent",
-        app_id: str = "default", top_k: int = 10,
-    ) -> List[Dict[str, Any]]:
-        """Semantic search over coding memories via VDB."""
-        embedding = await self.embed.embed_batch([query])
-        if not embedding:
+        self,
+        *,
+        query: str,
+        user_id: str,
+        agent_id: str = "default_agent",
+        app_id: str = "default",
+        top_k: int = 10,
+    ) -> list[dict[str, Any]]:
+        if top_k < 1:
+            raise ValueError("coding top_k must be positive")
+        embeddings = await self.embed.embed_batch([query])
+        self._validate_embeddings(embeddings, 1)
+        # Fetch all index keys in this bounded scope, including invisible attempts
+        # and history, so neither duplicates nor retired hits consume top_k.
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT search_keys FROM coding_memory_meta WHERE app_id=? AND user_id=? AND agent_id=? LIMIT ?",
+                (app_id, user_id, agent_id, self.SCAN_LIMIT + 1),
+            ).fetchall()
+        count = sum(1 + len(json.loads(r[0])) for r in rows)
+        if count > self.SCAN_LIMIT:
+            raise CodingDecisionError("coding search exceeds complete index budget")
+        if not count:
             return []
-        from dual_mem.isolation import build_filter
-        where = build_filter(
-            app_ids=[self._vdb_app_id(app_id)],
-            user_id=user_id,
-            agent_ids=[agent_id],
-            layers=[self.LAYER],
-            statuses=[MemoryStatus.ACTIVE],
-        )
         nodes = await asyncio.to_thread(
-            self.vector.query, embedding=embedding[0], where=where, top_k=top_k,
+            self.vector.query,
+            embedding=embeddings[0],
+            where=build_filter(
+                app_ids=[self._vdb_app_id(app_id)],
+                user_id=user_id,
+                agent_ids=[agent_id],
+                layers=[self.LAYER],
+                statuses=[MemoryStatus.ACTIVE],
+            ),
+            top_k=count,
         )
         results = []
+        seen = set()
         for node in nodes:
-            mem_id = (node.custom or {}).get("coding_memory_id", "")
-            if not mem_id:
+            mem_id = (node.custom or {}).get("coding_memory_id")
+            if mem_id in seen:
                 continue
-            mem = self.get(mem_id)
-            if mem:
-                results.append({**mem.to_dict(), "score": node.score})
+            mem = self.get(mem_id) if mem_id else None
+            if (
+                mem
+                and mem.is_latest
+                and coding_scope(mem) == (app_id, user_id, agent_id)
+            ):
+                seen.add(mem_id)
+                results.append(dict(mem.to_dict(), score=node.score))
+                if len(results) == top_k:
+                    break
         return results
-
-    async def _upsert_vectors(self, mem: CodingMemory) -> None:
-        """Embed task + search_keys and upsert to VDB."""
-        texts = [mem.task] + list(mem.search_keys)
-        embeddings = await self.embed.embed_batch(texts)
-        vdb_app_id = self._vdb_app_id(mem.app_id)
-        nodes = []
-        for i, (text, emb) in enumerate(zip(texts, embeddings)):
-            node = MemoryNode(
-                content=text,
-                layer=self.LAYER,
-                app_id=vdb_app_id,
-                user_id=mem.user_id,
-                agent_id=mem.agent_id,
-                node_id=f"{mem.memory_id}_key{i}",
-                tags=["coding"],
-                status=MemoryStatus.ACTIVE,
-                embedding=emb,
-                custom={"coding_memory_id": mem.memory_id, "coding_key_idx": i},
-            )
-            nodes.append(node)
-        await asyncio.to_thread(self.vector.upsert, nodes)
-
-    async def _delete_vectors(self, mem: CodingMemory) -> None:
-        """Delete VDB nodes for a memory."""
-        n_keys = 1 + len(mem.search_keys)
-        node_ids = [f"{mem.memory_id}_key{i}" for i in range(n_keys)]
-        await asyncio.to_thread(self.vector.delete, node_ids)
 
     @staticmethod
     def _row_to_mem(row: sqlite3.Row) -> CodingMemory:
-        return CodingMemory(
-            memory_id=row["memory_id"],
-            user_id=row["user_id"],
-            agent_id=row["agent_id"],
-            app_id=row["app_id"],
-            task=row["task"],
-            search_keys=json.loads(row["search_keys"]),
-            solution=row["solution"],
-            boundary_envs=row["boundary_envs"],
-            boundary_scope=row["boundary_scope"],
-            workspace_id=row["workspace_id"],
-            branch=row["branch"],
-            session_id=row["session_id"],
-            files=json.loads(row["files"]),
-            confidence=row["confidence"],
-            source=row["source"],
-            created_at=datetime.fromisoformat(row["created_at"]) if row["created_at"] else None,
-            updated_at=datetime.fromisoformat(row["updated_at"]) if row["updated_at"] else None,
-        )
+        data = dict(row)
+        data.pop("published", None)
+        for key in (
+            "search_keys",
+            "files",
+            "supersedes",
+            "superseded_by",
+            "source_ids",
+        ):
+            data[key] = json.loads(data[key])
+        for key in ("created_at", "updated_at"):
+            data[key] = datetime.fromisoformat(data[key]) if data[key] else None
+        data["is_latest"] = bool(data["is_latest"])
+        return CodingMemory(**data)
 
     def close(self) -> None:
-        if self._conn:
+        with self._lock:
             self._conn.close()

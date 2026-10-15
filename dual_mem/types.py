@@ -14,34 +14,37 @@ _LIST_SEP = "\x1f"
 
 
 class Layer(str, Enum):
-    """七个已实现的记忆层（L0-L4、L6、L7）。
+    """Four processing layers; content kinds do not create additional layers.
 
-    两条主线：
-    - 事实/情境线：L1 原始 → L2 事实 → L3 摘要
-    - 画像/意图线：
-      L0 基础信息 → L4 身份 → L6 心智模型 → L7 意图
-
-    各层语义（参考 hy_memory）：
-    - L0_BASIC_INFO — 基础信息层：姓名/年龄/所在地等结构化基础画像。
-    - L1_RAW        — 原始对话层：写入即落、Append-Only 的原始文本。
-    - L2_FACT       — 原子事实层：从对话抽取的离散、版本化事实记录。
-    - L3_SUMMARY    — 会话摘要层：超过配置阈值的长文本摘要（默认关闭）。
-    - L4_IDENTITY   — 身份画像层：用户身份与长期偏好的核心画像。
-    - L6_SCHEMA     — 心智模型层：跨证据归纳的抽象行为模式/叙事模板（Graph 层）。
-    - L7_INTENTION  — 前瞻意图层：用户未来待触发的具象意图（Graph 层）。
-
-    存储分界：L0-L4 属事实/画像主线，L6-L7 属高层图主线。
-
-    每个枚举值经由 ``LAYER_TO_CATEGORY`` 映射到一个 ``Category``。
+    Legacy member aliases are read/API compatibility only. Iteration exposes
+    exactly four layers and all new metadata uses the new canonical values.
     """
 
-    L0_BASIC_INFO = "L0_BASIC_INFO"
-    L1_RAW = "L1_RAW"
-    L2_FACT = "L2_FACT"
-    L3_SUMMARY = "L3_SUMMARY"
-    L4_IDENTITY = "L4_IDENTITY"
-    L6_SCHEMA = "L6_SCHEMA"
-    L7_INTENTION = "L7_INTENTION"
+    L0_RAW = "L0_RAW"
+    L1_FACT = "L1_FACT"
+    L2_PROFILE = "L2_PROFILE"
+    L3_DERIVED = "L3_DERIVED"
+
+    L1_RAW = L0_RAW
+    L2_FACT = L1_FACT
+    L0_BASIC_INFO = L2_PROFILE
+    L4_IDENTITY = L2_PROFILE
+    L3_SUMMARY = L3_DERIVED
+    L6_SCHEMA = L3_DERIVED
+    L7_INTENTION = L1_FACT
+
+    @classmethod
+    def _missing_(cls, value: object) -> "Layer | None":
+        legacy = {
+            "L1_RAW": cls.L0_RAW,
+            "L2_FACT": cls.L1_FACT,
+            "L0_BASIC_INFO": cls.L2_PROFILE,
+            "L4_IDENTITY": cls.L2_PROFILE,
+            "L3_SUMMARY": cls.L3_DERIVED,
+            "L6_SCHEMA": cls.L3_DERIVED,
+            "L7_INTENTION": cls.L1_FACT,
+        }
+        return legacy.get(str(value))
 
 
 class Category(str, Enum):
@@ -62,18 +65,16 @@ class MemoryStatus(str, Enum):
 
 class ReconcileOp(str, Enum):
     ADD = "ADD"
-    SUPERSEDE = "SUPERSEDE"
+    SKIP = "SKIP"
+    SUPERSEDE = "SUPERSEDE"  # legacy import compatibility
     DELETE = "DELETE"
 
 
 LAYER_TO_CATEGORY: dict[Layer, Category] = {
-    Layer.L0_BASIC_INFO: Category.profile,
-    Layer.L1_RAW: Category.raw,
-    Layer.L2_FACT: Category.fact,
-    Layer.L3_SUMMARY: Category.summary,
-    Layer.L4_IDENTITY: Category.profile,
-    Layer.L6_SCHEMA: Category.schema,
-    Layer.L7_INTENTION: Category.intention,
+    Layer.L0_RAW: Category.raw,
+    Layer.L1_FACT: Category.fact,
+    Layer.L2_PROFILE: Category.profile,
+    Layer.L3_DERIVED: Category.schema,
 }
 
 
@@ -109,17 +110,33 @@ class MemoryNode:
     embedding: list[float] | None = None
     s2_evidence_count: int = 0
     custom: dict | None = None
+    kind: str = ""
+    revision: int = 0
+    valid_from: int | None = None
+    valid_until: int | None = None
     score: float = field(default=0.0, compare=False)
 
     @property
     def category(self) -> Category:
         """Routing category derived from the node's layer."""
+        kind = (
+            self.kind
+            or (self.custom or {}).get("kind")
+            or (self.custom or {}).get("memory_type")
+        )
+        if kind in Category._value2member_map_:
+            return Category(kind)
         return LAYER_TO_CATEGORY[self.layer]
 
     def to_metadata(self) -> dict:
         """Flatten this node into a storage-friendly metadata dict (lists joined, None encoded)."""
         return {
             "layer": self.layer.value,
+            "layer_schema_version": 4,
+            "kind": self.kind,
+            "revision": self.revision,
+            "valid_from": self.valid_from if self.valid_from is not None else -1,
+            "valid_until": self.valid_until if self.valid_until is not None else -1,
             "app_id": self.app_id,
             "user_id": self.user_id,
             "agent_id": self.agent_id,
@@ -144,6 +161,7 @@ class MemoryNode:
         cls, content: str, meta: dict, embedding: list[float] | None = None
     ) -> "MemoryNode":
         """Reconstruct a MemoryNode from stored content/metadata (inverse of to_metadata)."""
+
         def _split(value: str) -> list[str]:
             return value.split(_LIST_SEP) if value else []
 
@@ -153,6 +171,18 @@ class MemoryNode:
         return cls(
             content=content,
             layer=Layer(meta["layer"]),
+            kind=meta.get("kind")
+            or {
+                "L7_INTENTION": "intention",
+                "L3_SUMMARY": "summary",
+                "L6_SCHEMA": "schema",
+                "L0_BASIC_INFO": "profile",
+            }.get(meta["layer"], ""),
+            revision=int(meta.get("revision", 0)),
+            valid_from=None if meta.get("valid_from", -1) == -1 else meta["valid_from"],
+            valid_until=(
+                None if meta.get("valid_until", -1) == -1 else meta["valid_until"]
+            ),
             app_id=meta["app_id"],
             user_id=meta["user_id"],
             agent_id=meta["agent_id"],

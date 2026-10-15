@@ -23,7 +23,7 @@ def test_defaults():
     assert s.embed_input_max_chars == int(EMBED_MAX_TOKENS * CHARS_PER_TOKEN)
     assert s.auth_disabled is True
     assert s.default_app_id == "default"
-    assert s.summarizer_enabled is False
+    assert s.reconcile_concurrency == 4
     assert s.persist_history is False
     assert s.purge_done_queues is True
 
@@ -111,25 +111,27 @@ def test_ensure_storage_dir_creates_nested(tmp_path):
 
 
 def test_settings_from_dict_mem0_style():
-    s = Settings.from_dict({
-        "mode": "dual",
-        "default_app_id": "agentica",
-        "llm": {
-            "model": "deepseek-chat",
-            "api_key": "sk-llm",
-            "base_url": "https://api.example/v1",
-        },
-        "embedder": {
-            "model": "text-embedding-v3",
-            "api_key": "sk-embed",
-            "base_url": "https://embed.example/v1",
-        },
-        "vector_store": {
-            "persist_directory": "/data/mem",
-            "embedding_dims": 768,
-        },
-        "graph_store": {"provider": "neo4j"},
-    })
+    s = Settings.from_dict(
+        {
+            "mode": "dual",
+            "default_app_id": "agentica",
+            "llm": {
+                "model": "deepseek-chat",
+                "api_key": "sk-llm",
+                "base_url": "https://api.example/v1",
+            },
+            "embedder": {
+                "model": "text-embedding-v3",
+                "api_key": "sk-embed",
+                "base_url": "https://embed.example/v1",
+            },
+            "vector_store": {
+                "persist_directory": "/data/mem",
+                "embedding_dims": 768,
+            },
+            "graph_store": {"provider": "neo4j"},
+        }
+    )
     assert s.mode == "dual"
     assert s.default_app_id == "agentica"
     assert s.llm_model == "deepseek-chat"
@@ -146,32 +148,28 @@ def test_preset_default_equals_code_defaults():
     s = Settings()
     assert s.preset == "default"
     # default preset is empty → these stay at their conservative code defaults
-    assert s.reconcile_non_destructive is False
-    assert s.reconcile_skip_llm is False
-    assert s.reconcile_policy == "balanced"
+    assert s.reconcile_concurrency == 4
+    assert s.reconcile_candidate_limit == 64
 
 
 def test_preset_high_recall_fills_knobs():
     s = Settings(preset="high_recall")
-    assert s.reconcile_non_destructive is True
-    assert s.reconcile_skip_llm is True
-    assert s.reconcile_policy == "conservative"
+    assert s.reconcile_candidate_limit == 128
     # latency knobs are orthogonal — NOT touched by any preset
 
 
 def test_explicit_field_overrides_preset():
     # init arg beats preset
-    s = Settings(preset="high_recall", reconcile_policy="balanced")
-    assert s.reconcile_policy == "balanced"
+    s = Settings(preset="high_recall", reconcile_candidate_limit=32)
+    assert s.reconcile_candidate_limit == 32
 
 
 def test_env_field_overrides_preset(monkeypatch):
     monkeypatch.setenv("DUAL_MEM_PRESET", "high_recall")
-    monkeypatch.setenv("DUAL_MEM_RECONCILE_POLICY", "balanced")
+    monkeypatch.setenv("DUAL_MEM_RECONCILE_CANDIDATE_LIMIT", "32")
     s = Settings()
     assert s.preset == "high_recall"
-    assert s.reconcile_non_destructive is True  # from preset
-    assert s.reconcile_policy == "balanced"  # env wins over preset
+    assert s.reconcile_candidate_limit == 32  # env wins over preset
 
 
 def test_preset_selected_from_yaml(tmp_path, monkeypatch):
@@ -180,7 +178,7 @@ def test_preset_selected_from_yaml(tmp_path, monkeypatch):
     monkeypatch.setenv("DUAL_MEM_CONFIG_FILE", str(cfg))
     s = Settings()
     assert s.preset == "high_recall"
-    assert s.reconcile_non_destructive is True
+    assert s.reconcile_candidate_limit == 128
 
 
 @pytest.mark.parametrize("bad_preset", ["fast", "prod", "hi-recall"])
@@ -190,22 +188,56 @@ def test_invalid_preset_raises(bad_preset):
 
 
 def test_settings_from_dict_mem0_config_blocks():
-    s = Settings.from_dict({
-        "embedder": {
-            "provider": "openai",
-            "config": {
-                "model": "text-embedding-3-small",
-                "embedding_dims": 1024,
+    s = Settings.from_dict(
+        {
+            "embedder": {
+                "provider": "openai",
+                "config": {
+                    "model": "text-embedding-3-small",
+                    "embedding_dims": 1024,
+                },
             },
-        },
-        "vector_store": {
-            "provider": "qdrant",
-            "config": {
-                "embedding_model_dims": 1024,
-                "persist_directory": "/data/nested",
+            "vector_store": {
+                "provider": "qdrant",
+                "config": {
+                    "embedding_model_dims": 1024,
+                    "persist_directory": "/data/nested",
+                },
             },
-        },
-    })
+        }
+    )
     assert s.embed_model == "text-embedding-3-small"
     assert s.embed_dim == 1024
     assert s.storage_dir == "/data/nested"
+
+
+def test_nested_jev_config_and_removed_controls():
+    s = Settings.from_dict(
+        {
+            "jev": {
+                "api_key": "test-jev",
+                "model": "jev-1.13.0",
+                "endpoint": "https://example.test/v1/systemone",
+            },
+            "reconcile_sync": True,
+            "reconcile_skip_llm": True,
+            "reconcile_weak_candidate_score": 0.4,
+        }
+    )
+    assert s.jev_api_key == "test-jev" and s.jev_endpoint.endswith("/v1/systemone")
+    assert not hasattr(s, "reconcile_sync") and not hasattr(s, "reconcile_skip_llm")
+
+
+def test_missing_jev_credentials_fails_before_network(
+    tmp_storage, fake_embed, fake_llm, monkeypatch
+):
+    from dual_mem import MemoryClient
+    from dual_mem.client import MissingCredentialsError
+
+    monkeypatch.delenv("DUAL_MEM_JEV_API_KEY", raising=False)
+    with pytest.raises(MissingCredentialsError, match="Jev requires"):
+        MemoryClient(
+            settings=Settings(storage_dir=tmp_storage, jev_api_key=""),
+            embed=fake_embed,
+            llm=fake_llm,
+        )

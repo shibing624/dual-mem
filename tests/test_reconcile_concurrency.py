@@ -1,108 +1,70 @@
-"""ReconcilerWorker.reconcile_pending bounded-concurrency drain.
-
-Verifies that reconcile_concurrency>1 still drains every queued task exactly once
-(same result as serial), and that fast-write originals whose content a reconcile ADD
-re-emits get shadowed (covered → replaced). The scripted reconcile echoes each new
-memory's content so coverage matches.
-"""
 import pytest
-
+from conftest import FakeJev, FakeLLMClient
+from dual_mem import MemoryClient
 from dual_mem.config import Settings
-from dual_mem.registry import ComponentFactory
 from dual_mem.system2.reconciler_worker import ReconcilerWorker
-from dual_mem.types import Layer, MemoryNode, MemoryStatus
-
-from tests.conftest import FakeLLMClient
+from dual_mem.types import MemoryNode, Layer
 
 
-def _make_factory(tmp_storage, fake_embed, concurrency: int):
-    settings = Settings(
-        mode="system1",
-        storage_dir=tmp_storage,
-        reconcile_concurrency=concurrency,
+def setup(tmp_storage, embed):
+    c = MemoryClient(
+        settings=Settings(mode="dual", storage_dir=tmp_storage),
+        embed=embed,
+        llm=FakeLLMClient(),
+        jev=FakeJev(),
     )
-    # reconcile op: one ADD echoing the new memory content verbatim (no supersede), so the
-    # worker's coverage check shadows the fast-write original it re-emitted.
-    def _echo(*, system, user):
-        content = user.split(". ", 1)[-1].split("\n", 1)[0].strip()
-        return [{"op": "ADD", "content": content, "layer": "L2_FACT"}]
-
-    llm = FakeLLMClient(responses={"reconcile": _echo})
-    return ComponentFactory(settings=settings, embed=fake_embed, llm=llm)
-
-
-def _seed_fast_write(factory, node_id: str, content: str) -> None:
     n = MemoryNode(
-        content=content, layer=Layer.L2_FACT, app_id="app", user_id="u",
-        status=MemoryStatus.ACTIVE, is_latest=True, node_id=node_id,
+        node_id="legacy",
+        content="old extracted fact",
+        layer=Layer.L1_FACT,
+        app_id="app",
+        user_id="u",
+        embedding=embed.embed_sync("old"),
     )
-    n.embedding = factory.embed.embed_sync(content)
-    factory.vector.upsert([n])
-
-
-def _enqueue_tasks(factory, n: int) -> None:
-    for i in range(n):
-        nid = f"fw_{i}"
-        _seed_fast_write(factory, nid, f"fact number {i}")
-        factory.cache.enqueue_reconcile_task(
-            app_id="app", user_id="u", agent_id="", node_ids=[nid]
-        )
-
-
-@pytest.mark.parametrize("concurrency", [1, 8])
-async def test_reconcile_pending_drains_all_tasks(tmp_storage, fake_embed, concurrency):
-    factory = _make_factory(tmp_storage, fake_embed, concurrency)
-    _enqueue_tasks(factory, 6)
-
-    worker = ReconcilerWorker(factory=factory)
-    processed = await worker.reconcile_pending(app_id="app", user_id="u", agent_id="")
-
-    assert processed == 6
-    # queue fully drained
-    assert factory.cache.list_pending_reconcile_tasks(app_id="app", user_id="u") == []
-    # each fast-write original was re-emitted by a reconcile ADD → covered → shadowed
-    for i in range(6):
-        node = factory.vector.get(f"fw_{i}")
-        assert node.status is MemoryStatus.SHADOW
-        assert node.is_latest is False
-
-
-async def test_reconcile_concurrency_matches_serial_result(tmp_path, fake_embed):
-    s_dir = tmp_path / "serial"
-    p_dir = tmp_path / "parallel"
-    s_dir.mkdir(parents=True, exist_ok=True)
-    p_dir.mkdir(parents=True, exist_ok=True)
-
-    serial = _make_factory(str(s_dir), fake_embed, 1)
-    _enqueue_tasks(serial, 5)
-    n_serial = await ReconcilerWorker(factory=serial).reconcile_pending(
-        app_id="app", user_id="u", agent_id=""
+    c.factory.vector.upsert([n])
+    c.factory.cache.enqueue_reconcile_task(
+        app_id="app", user_id="u", agent_id="", node_ids=["legacy"]
     )
-
-    parallel = _make_factory(str(p_dir), fake_embed, 8)
-    _enqueue_tasks(parallel, 5)
-    n_parallel = await ReconcilerWorker(factory=parallel).reconcile_pending(
-        app_id="app", user_id="u", agent_id=""
-    )
-
-    assert n_serial == n_parallel == 5
+    return c
 
 
-async def test_failed_reconcile_task_remains_pending(
-    tmp_storage,
-    fake_embed,
-    monkeypatch,
+async def test_legacy_pending_task_is_decided_and_archived_without_deletion(
+    tmp_storage, fake_embed
 ):
-    factory = _make_factory(tmp_storage, fake_embed, 1)
-    _enqueue_tasks(factory, 1)
-    worker = ReconcilerWorker(factory=factory)
+    c = setup(tmp_storage, fake_embed)
+    assert (
+        await ReconcilerWorker(factory=c.factory).reconcile_pending(
+            app_id="app", user_id="u"
+        )
+        == 1
+    )
+    assert not c.factory.vector.get("legacy").is_latest
+    assert c.factory.vector.get("legacy").content == "old extracted fact"
+    assert c.factory.cache.reconcile_queue_size() == 0
+    assert len(c.factory.jev.calls) == 1 and c.factory.cache.list_pending_s2_scopes()
+    await c.aclose()
 
-    async def _fail(_task):
-        raise RuntimeError("reconcile failed")
 
-    monkeypatch.setattr(worker, "_process_task", _fail)
-    with pytest.raises(RuntimeError, match="reconcile failed"):
-        await worker.reconcile_pending(app_id="app", user_id="u", agent_id="")
+async def test_legacy_failure_remains_pending(tmp_storage, fake_embed):
+    c = setup(tmp_storage, fake_embed)
+    c.factory.jev.responses = RuntimeError("failed")
+    with pytest.raises(RuntimeError):
+        await ReconcilerWorker(factory=c.factory).reconcile_pending(
+            app_id="app", user_id="u"
+        )
+    assert (
+        c.factory.cache.reconcile_queue_size() == 1
+        and c.factory.vector.get("legacy").is_latest
+    )
+    await c.aclose()
 
-    tasks = factory.cache.list_pending_reconcile_tasks(app_id="app", user_id="u")
-    assert len(tasks) == 1
+
+async def test_legacy_missing_source_never_acknowledged(tmp_storage, fake_embed):
+    c = setup(tmp_storage, fake_embed)
+    c.factory.vector.delete(["legacy"])
+    with pytest.raises(RuntimeError, match="missing evidence"):
+        await ReconcilerWorker(factory=c.factory).reconcile_pending(
+            app_id="app", user_id="u"
+        )
+    assert c.factory.cache.reconcile_queue_size() == 1
+    await c.aclose()

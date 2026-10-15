@@ -2,15 +2,16 @@
 
 场景：用户偏好随时间变化，记忆系统应自动用新认知"取代"旧认知，并保留可追溯的演化链。
 system1 档每次 `add` 会跑一次 Extractor LLM：提交判定 → fast-write 直落 L0/L2/L4。
-本 demo 显式设置 `reconcile_sync=true` 来展示演化链，同时
+每次写入都用 JEV 判断版本关系，同时
 演示 `add(messages=[...])`：L1_RAW 与 Extractor 都接收带角色标记的完整对话。
 
-环境要求：`llm_*` + `embed_*` 全部齐全；会产生真实 LLM 调用与少量费用。
+环境要求：`jev_*` + `llm_*` + `embed_*` 全部齐全；会产生真实 LLM 调用与少量费用。
 
 运行：python examples/01_system1.py
 期望：第二轮写入后，"现在用什么编程语言"应命中 Python，并附 Java→Python 演化链；
       "住在哪里"应命中北京。
 """
+
 import asyncio
 
 from _common import fresh_storage, section, show_memories
@@ -24,7 +25,6 @@ async def main() -> None:
         settings=Settings(
             mode="system1",
             storage_dir=fresh_storage("system1"),
-            reconcile_sync=True,
         )
     )
     user = "bob"
@@ -44,7 +44,10 @@ async def main() -> None:
         section("第 2 轮：多轮 messages 写入（偏好变化 + 搬家，触发演化链）")
         # 完整多轮对话会作为一个写入单元交给 Extractor。
         dialogue = [
-            {"role": "user", "content": "其实我现在主要用 Python 做机器学习了，Java 基本不碰了。"},
+            {
+                "role": "user",
+                "content": "其实我现在主要用 Python 做机器学习了，Java 基本不碰了。",
+            },
             {"role": "assistant", "content": "好的，我帮你把语言偏好更新一下。"},
             {"role": "user", "content": "我从上海搬到北京了，入职了一家新公司。"},
         ]
@@ -58,14 +61,19 @@ async def main() -> None:
         section("检索：现在的编程语言（期望 Python，并带 Java→Python 演化链）")
         out = await client.search(
             query="这位用户现在主要用什么编程语言？",
-            user_id=user, limit=5, min_score=0.0,
+            user_id=user,
+            limit=5,
+            min_score=0.0,
         )
         show_memories(out.memories)
 
         section("检索：基础画像 / 居住地（期望 profile 命中北京）")
         out = await client.search(
             query="用户是谁？住在哪里？做什么工作？",
-            user_id=user, limit=5, min_score=0.0, profile_limit=5,
+            user_id=user,
+            limit=5,
+            min_score=0.0,
+            profile_limit=5,
         )
         show_memories(out.memories)
 

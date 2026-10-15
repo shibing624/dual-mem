@@ -49,6 +49,7 @@ class SyncMemoryClient:
         mode: str | None = None,
         embed=None,
         llm=None,
+        jev=None,
     ) -> None:
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
@@ -63,6 +64,7 @@ class SyncMemoryClient:
             mode=mode,
             embed=embed,
             llm=llm,
+            jev=jev,
         )
         self._closed = False
 
@@ -74,12 +76,13 @@ class SyncMemoryClient:
         mode: str | None = None,
         embed=None,
         llm=None,
+        jev=None,
     ) -> SyncMemoryClient:
         """Blocking client from a mem0-style config dict (see ``MemoryClient.from_config``)."""
         settings = Settings.from_dict(config_dict)
         if mode is not None:
             settings = settings.model_copy(update={"mode": mode})
-        return cls(settings=settings, embed=embed, llm=llm)
+        return cls(settings=settings, embed=embed, llm=llm, jev=jev)
 
     @property
     def settings(self) -> Settings:
@@ -132,6 +135,7 @@ class SyncMemoryClient:
         agent_id: str = "",
         session_id: str = "",
         memory_at: int | None = None,
+        request_id: str | None = None,
     ) -> WriteResult:
         return self._run(
             self._client.add(
@@ -142,6 +146,7 @@ class SyncMemoryClient:
                 agent_id=agent_id,
                 session_id=session_id,
                 memory_at=memory_at,
+                request_id=request_id,
             )
         )
 
@@ -263,7 +268,13 @@ class SyncMemoryClient:
         return self._run(self._client.get(memory_id))
 
     def list(
-        self, *, app_id: str | None = None, user_id: str, agent_id: str = "", limit: int = 100
+        self,
+        *,
+        app_id: str | None = None,
+        user_id: str,
+        agent_id: str = "",
+        limit: int = 100,
+        include_history: bool = False,
     ) -> list[MemoryItem]:
         return self._run(
             self._client.list(
@@ -271,6 +282,7 @@ class SyncMemoryClient:
                 user_id=user_id,
                 agent_id=agent_id,
                 limit=limit,
+                include_history=include_history,
             )
         )
 

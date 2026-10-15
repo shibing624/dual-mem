@@ -14,6 +14,7 @@ from json.decoder import JSONDecoder
 from typing import Any
 
 from openai import AsyncOpenAI
+import httpx
 
 from dual_mem.providers.usage import UsageCallback, UsageEvent, tokens_from_usage
 
@@ -182,7 +183,9 @@ def _parse_json(content: str):
     recovered_array = _recover_partial_array(text)
     if recovered_array is not None:
         return recovered_array
-    logger.warning("chat_json output unparseable, returning empty object (len=%d)", len(content))
+    logger.warning(
+        "chat_json output unparseable, returning empty object (len=%d)", len(content)
+    )
     return {}
 
 
@@ -196,7 +199,7 @@ def _recover_partial_object(text: str) -> dict | None:
         m = re.search(rf'"{key}"\s*:\s*\[', text)
         if not m:
             continue
-        rest = text[m.end():]
+        rest = text[m.end() :]
         decoder = JSONDecoder()
         idx = 0
         items: list[str] = []
@@ -232,9 +235,9 @@ def _recover_partial_array(text: str) -> list | None:
         m2 = re.match(r"\s*\{", text, re.DOTALL)
         if not m2:
             return None
-        rest = text[m2.start():]
+        rest = text[m2.start() :]
     else:
-        rest = text[m.start() + 1:]
+        rest = text[m.start() + 1 :]
     decoder = JSONDecoder()
     idx = 0
     items: list[dict] = []
@@ -277,8 +280,11 @@ class LLMClient:
         self.usage_callback = usage_callback
         self.input_max_chars = input_max_chars
         self.client = AsyncOpenAI(
-            base_url=base_url, api_key=api_key, timeout=timeout,
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
             default_headers=extra_headers or None,
+            http_client=httpx.AsyncClient(timeout=timeout),
         )
 
     def _content_char_budget(self, build_system: Callable[[str], str]) -> int:
@@ -299,7 +305,11 @@ class LLMClient:
         """Emit an INFO log per real LLM request with a global sequence number."""
         seq = next(_call_seq)
         logger.info(
-            "LLM call #%d kind=%s model=%s took=%.0fms", seq, kind, self.model, elapsed_ms
+            "LLM call #%d kind=%s model=%s took=%.0fms",
+            seq,
+            kind,
+            self.model,
+            elapsed_ms,
         )
 
     def _after_call(self, kind: str, resp: Any, start: float) -> None:
@@ -318,6 +328,9 @@ class LLMClient:
             )
         )
 
+    async def aclose(self) -> None:
+        await self.client.close()
+
     async def _chat_json_once(
         self,
         *,
@@ -329,13 +342,18 @@ class LLMClient:
         max_tokens: int,
     ) -> dict | list:
         # json_array=True disables json_object mode (which only allows objects)
-        use_json_mode = False if json_array else (self.json_mode if json_object is None else json_object)
+        use_json_mode = (
+            False
+            if json_array
+            else (self.json_mode if json_object is None else json_object)
+        )
         kwargs: dict = {"max_tokens": max_tokens}
         if use_json_mode:
             kwargs["response_format"] = {"type": "json_object"}
         # Deterministic decoding: pin seed so batching/composition is the ONLY remaining
         # source of cross-batch variance (env DUAL_MEM_LLM_SEED, empty = off).
         import os as _os
+
         _seed = _os.environ.get("DUAL_MEM_LLM_SEED", "").strip()
         if _seed:
             try:
@@ -388,7 +406,8 @@ class LLMClient:
                 break
             parsed = await self._chat_json_once(
                 system=system,
-                user=user + "\n\nImportant: reply with ONLY a valid JSON "
+                user=user
+                + "\n\nImportant: reply with ONLY a valid JSON "
                 + ("array" if json_array else "object")
                 + ". No markdown fences, no explanation, no extra text.",
                 temperature=temperature,
@@ -412,7 +431,10 @@ class LLMClient:
         """Chunk long *content*, run JSON extract per chunk, merge with *merge_results*."""
         user_text = content if user is None else user
         budget = self._content_char_budget(build_system)
-        if self.input_max_chars <= 0 or len(build_system(user_text)) + len(user_text) <= self.input_max_chars:
+        if (
+            self.input_max_chars <= 0
+            or len(build_system(user_text)) + len(user_text) <= self.input_max_chars
+        ):
             system = build_system(user_text)
             return await self._chat_json_once(
                 system=system,
@@ -472,9 +494,13 @@ class LLMClient:
         self._after_call("chat_text", resp, start)
         return resp.choices[0].message.content or ""
 
-    async def chat_text(self, *, system: str, user: str, temperature: float = 0.2) -> str:
+    async def chat_text(
+        self, *, system: str, user: str, temperature: float = 0.2
+    ) -> str:
         """Run a chat completion and return the raw text reply (single-shot)."""
-        return await self._chat_text_once(system=system, user=user, temperature=temperature)
+        return await self._chat_text_once(
+            system=system, user=user, temperature=temperature
+        )
 
     async def chat_text_for_content(
         self,
@@ -486,7 +512,10 @@ class LLMClient:
     ) -> str:
         """Chunk long *content*, summarize each chunk, merge text (map-reduce)."""
         budget = self._content_char_budget(build_system)
-        if self.input_max_chars <= 0 or len(build_system(content)) + len(content) <= self.input_max_chars:
+        if (
+            self.input_max_chars <= 0
+            or len(build_system(content)) + len(content) <= self.input_max_chars
+        ):
             return await self._chat_text_once(
                 system=build_system(content),
                 user=content,

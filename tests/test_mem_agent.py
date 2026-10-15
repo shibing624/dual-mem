@@ -1,277 +1,230 @@
-import asyncio
-
+import pytest
+from conftest import FakeJev, FakeLLMClient
 from dual_mem import MemoryClient
-from dual_mem.agent.mem_agent import MemAgent
+from dual_mem.agent.reconciler import DecisionContextError
 from dual_mem.config import Settings
-from dual_mem.registry import ComponentFactory
 from dual_mem.types import Layer, MemoryStatus
 
-from conftest import FakeLLMClient
 
-
-EXTRACT_RESPONSE = {
-    "is_ephemeral": False,
-    "emotion": {"valence": 0.0, "arousal": 0.0, "dominant_emotion": None},
-    "identity": [{"content": "用户喜欢喝咖啡", "speculate": None, "tags": ["food"]}],
-    "facts": [{"content": "用户昨天去了北京", "speculate": None, "tags": ["travel"]}],
-    "intentions": [],
-    "basic_info": {},
-}
-
-
-def _factory(tmp_storage, fake_embed, responses, **settings_kwargs):
-    return ComponentFactory(
-        settings=Settings(
-            mode="system1",
-            storage_dir=tmp_storage,
-            **settings_kwargs,
-        ),
-        embed=fake_embed,
-        llm=FakeLLMClient(responses=responses),
+def client(tmp_storage, embed, extract, jev=None, mode="system1", **kw):
+    return MemoryClient(
+        settings=Settings(storage_dir=tmp_storage, mode=mode, **kw),
+        embed=embed,
+        llm=FakeLLMClient({"extract": extract}),
+        jev=jev or FakeJev(),
     )
 
 
-async def _run(agent: MemAgent, content: str, request_id: str = "req"):
-    return await agent.run(
-        content=content,
-        app_id="app",
-        user_id="u",
-        agent_id="ag",
-        session_id="se",
-        request_id=request_id,
-        memory_at=None,
-    )
+async def test_one_generation_and_one_jev_batch_for_facts_profiles_intentions(
+    tmp_storage, fake_embed
+):
+    def script(state, questions):
+        return {
+            "p0:representation": "FACT",
+            "p1:representation": "PROFILE",
+            "p2:representation": "INTENTION",
+        }
 
-
-async def test_extract_commit_uses_one_llm_call_and_writes_l2_l4(tmp_storage, fake_embed):
-    factory = _factory(tmp_storage, fake_embed, {"extract": EXTRACT_RESPONSE})
-    agent = MemAgent(factory=factory)
-
-    stored_ids, commit_result, is_ephemeral = await _run(
-        agent,
-        "用户喜欢喝咖啡，昨天去了北京",
-    )
-
-    assert is_ephemeral is False
-    assert commit_result.passed is True
-    assert commit_result.reason == "extractor produced persistable memory"
-    assert len(stored_ids) == 2
-    assert [call["type"] for call in factory.llm.calls] == ["chat_json"]
-    layers = {factory.vector.get(node_id).layer for node_id in stored_ids}
-    assert layers == {Layer.L4_IDENTITY, Layer.L2_FACT}
-    for node_id in stored_ids:
-        node = factory.vector.get(node_id)
-        assert node.status is MemoryStatus.ACTIVE
-        assert node.is_latest is True
-
-
-async def test_ephemeral_extract_rejects_commit(tmp_storage, fake_embed):
-    response = {**EXTRACT_RESPONSE, "is_ephemeral": True}
-    factory = _factory(tmp_storage, fake_embed, {"extract": response})
-
-    stored_ids, commit_result, is_ephemeral = await _run(
-        MemAgent(factory=factory),
-        "嗯嗯好的",
-    )
-
-    assert stored_ids == []
-    assert commit_result.passed is False
-    assert commit_result.reason == "extractor marked content ephemeral"
-    assert is_ephemeral is True
-
-
-async def test_empty_extract_rejects_commit(tmp_storage, fake_embed):
-    response = {
-        **EXTRACT_RESPONSE,
-        "identity": [],
-        "facts": [],
-        "intentions": [],
-        "basic_info": {},
-    }
-    factory = _factory(tmp_storage, fake_embed, {"extract": response})
-
-    stored_ids, commit_result, is_ephemeral = await _run(
-        MemAgent(factory=factory),
-        "没有可沉淀的信息",
-    )
-
-    assert stored_ids == []
-    assert commit_result.passed is False
-    assert commit_result.reason == "extractor produced no persistable memory"
-    assert is_ephemeral is False
-
-
-async def test_blank_structured_items_reject_commit(tmp_storage, fake_embed):
-    response = {
-        **EXTRACT_RESPONSE,
-        "identity": [{"content": "   "}],
-        "facts": [{"content": ""}],
-        "intentions": [{"content": "\t"}],
-        "basic_info": {"nickname": "not a supported L0 field"},
-    }
-    factory = _factory(tmp_storage, fake_embed, {"extract": response})
-
-    stored_ids, commit_result, is_ephemeral = await _run(
-        MemAgent(factory=factory),
-        "Extractor 返回了无效空白项",
-    )
-
-    assert stored_ids == []
-    assert commit_result.passed is False
-    assert commit_result.reason == "extractor produced no persistable memory"
-    assert is_ephemeral is False
-
-
-async def test_canonical_dedup_drops_equivalent_items(tmp_storage, fake_embed):
-    response = {
-        **EXTRACT_RESPONSE,
-        "identity": [],
-        "facts": [
-            {"content": "User likes coffee!", "tags": ["food"]},
-            {"content": " user LIKES coffee ", "tags": ["duplicate"]},
-        ],
-    }
-    factory = _factory(tmp_storage, fake_embed, {"extract": response})
-
-    stored_ids, commit_result, _ = await _run(
-        MemAgent(factory=factory),
-        "User likes coffee",
-        "req-dedup",
-    )
-
-    assert commit_result.passed is True
-    assert len(stored_ids) == 1
-    assert factory.vector.get(stored_ids[0]).content == "User likes coffee!"
-
-
-async def test_malformed_basic_info_rejects_commit(tmp_storage, fake_embed):
-    response = {
-        **EXTRACT_RESPONSE,
-        "identity": [],
-        "facts": [],
-        "intentions": [],
-        "basic_info": {"name": {}, "age": []},
-    }
-    factory = _factory(tmp_storage, fake_embed, {"extract": response})
-
-    stored_ids, commit_result, is_ephemeral = await _run(
-        MemAgent(factory=factory),
-        "Extractor 返回了类型错误的基本信息",
-    )
-
-    assert stored_ids == []
-    assert commit_result.passed is False
-    assert commit_result.reason == "extractor produced no persistable memory"
-    assert is_ephemeral is False
-
-
-async def test_passed_extract_summarizer_overlaps(tmp_storage, fake_embed):
-    long_text = "x" * 1600
-    order: list[str] = []
-    factory = _factory(
+    jev = FakeJev(script)
+    c = client(
         tmp_storage,
         fake_embed,
-        {"extract": EXTRACT_RESPONSE, "text": "摘要"},
-        summarizer_enabled=True,
-        summarizer_min_content_tokens=600,
+        {
+            "facts": [{"content": "Paid 80 yuan"}],
+            "identity": [{"content": "Lives in Beijing"}],
+            "intentions": [{"content": "Will travel tomorrow"}],
+        },
+        jev,
     )
-    agent = MemAgent(factory=factory)
-    original_extract = agent.extractor.extract
-
-    async def timed_extract(**kwargs):
-        order.append("extract_start")
-        await asyncio.sleep(0)
-        result = await original_extract(**kwargs)
-        order.append("extract_end")
-        return result
-
-    agent.extractor.extract = timed_extract  # type: ignore[method-assign]
-    original_summarize = agent.summarizer.summarize
-
-    async def timed_summarize(**kwargs):
-        order.append("summary_start")
-        result = await original_summarize(**kwargs)
-        order.append("summary_end")
-        return result
-
-    agent.summarizer.summarize = timed_summarize  # type: ignore[method-assign]
-
-    stored_ids, commit_result, _ = await _run(agent, long_text, "req-overlap")
-
-    assert commit_result.passed is True
-    assert len(stored_ids) == 3
-    assert order.index("summary_start") < order.index("extract_end")
+    result = await c.add(
+        content="Paid 80 yuan, live in Beijing and will travel", user_id="u"
+    )
+    nodes = c.factory.vector.get_by_ids(result.extra_node_ids)
+    assert {n.layer for n in nodes.values()} == {Layer.L1_FACT, Layer.L2_PROFILE}
+    assert {n.kind for n in nodes.values()} == {"fact", "profile", "intention"}
+    assert len(c.factory.llm.calls) == 1 and len(jev.calls) == 1
+    assert all(
+        (n.custom or {})["source_ids"] == [result.memory_id] for n in nodes.values()
+    )
+    assert c.factory.vector.get(result.memory_id).layer == Layer.L0_RAW
 
 
-async def test_summary_failure_still_persists_l2_l4(tmp_storage, fake_embed):
-    long_text = "用户" + "聊了很多关于旅行和美食的事情。" * 110
-    factory = _factory(
+@pytest.mark.parametrize("mode", ["system1", "dual"])
+async def test_extractor_ephemeral_field_cannot_discard_update(
+    tmp_storage, fake_embed, mode
+):
+    c = client(
         tmp_storage,
         fake_embed,
-        {"extract": EXTRACT_RESPONSE},
-        summarizer_enabled=True,
-        summarizer_min_content_tokens=600,
+        {"facts": [{"content": "Moved to Shanghai"}], "is_ephemeral": True},
+        mode=mode,
     )
-    agent = MemAgent(factory=factory)
-
-    async def fail_summarize(**kwargs):
-        raise TimeoutError("summary LLM timeout")
-
-    agent.summarizer.summarize = fail_summarize  # type: ignore[method-assign]
-
-    stored_ids, commit_result, is_ephemeral = await _run(
-        agent,
-        long_text,
-        "req-summary-fail",
+    result = await c.add(content="Moved to Shanghai", user_id="u")
+    assert (
+        result.commit_passed and result.extracted_count == 1 and not result.is_ephemeral
     )
-
-    assert is_ephemeral is False
-    assert commit_result.passed is True
-    assert len(stored_ids) == 2
-    layers = {factory.vector.get(node_id).layer for node_id in stored_ids}
-    assert layers == {Layer.L4_IDENTITY, Layer.L2_FACT}
+    assert c.factory.vector.get(result.memory_id).status == MemoryStatus.ACTIVE
 
 
-async def test_fast_write_batches_l0_with_l2_l4(tmp_storage, fake_embed):
-    response = {**EXTRACT_RESPONSE, "basic_info": {"name": "张三"}}
-    factory = _factory(tmp_storage, fake_embed, {"extract": response})
+async def test_empty_extraction_jev_decides_raw_only(tmp_storage, fake_embed):
+    c = client(tmp_storage, fake_embed, {"facts": []})
+    result = await c.add(content="Thanks", user_id="u")
+    assert result.is_ephemeral and not result.commit_passed
+    assert len(c.factory.jev.calls) == 1 and c.factory.vector.get(result.memory_id)
 
-    stored_ids, commit_result, _ = await _run(
-        MemAgent(factory=factory),
-        "我叫张三，喜欢咖啡",
-        "req-l0",
+
+async def test_failed_jev_keeps_raw_evidence_for_idempotent_retry(
+    tmp_storage, fake_embed
+):
+    jev = FakeJev(RuntimeError("service unavailable"))
+    c = client(tmp_storage, fake_embed, {"facts": [{"content": "Moved"}]}, jev)
+    with pytest.raises(RuntimeError, match="unavailable"):
+        await c.add(content="Moved", user_id="u", request_id="retry-me")
+    assert len(c.factory.vector.get_many({"user_id": "u"}, limit=100)) == 1
+    jev.responses = None
+    result = await c.add(content="Moved", user_id="u", request_id="retry-me")
+    assert result.extracted_count == 1
+    repeated = await c.add(content="Moved", user_id="u", request_id="retry-me")
+    assert repeated.extra_node_ids == result.extra_node_ids
+    assert len(c.factory.vector.get_many({"user_id": "u"}, limit=100)) == 2
+    assert len(jev.calls) == 2
+    with pytest.raises(ValueError, match="different input"):
+        await c.add(content="different", user_id="u", request_id="retry-me")
+
+
+async def test_exact_text_distinct_events_are_not_hash_deduplicated(
+    tmp_storage, fake_embed
+):
+    c = client(
+        tmp_storage, fake_embed, {"facts": [{"content": "Bought coffee for 20 yuan"}]}
     )
+    first = await c.add(content="Bought coffee for 20 yuan", user_id="u", memory_at=100)
+    second = await c.add(
+        content="Bought coffee for 20 yuan", user_id="u", memory_at=200
+    )
+    assert (
+        first.memory_id != second.memory_id
+        and first.extra_node_ids != second.extra_node_ids
+    )
+    assert len(c.factory.jev.calls) == 2
 
-    assert commit_result.passed is True
-    assert len(stored_ids) == 3
-    layers = {factory.vector.get(node_id).layer for node_id in stored_ids}
-    assert layers == {Layer.L4_IDENTITY, Layer.L2_FACT, Layer.L0_BASIC_INFO}
+
+async def test_batch_skip_predecessor_resolves_to_current_head(tmp_storage, fake_embed):
+    c = client(tmp_storage, fake_embed, {"facts": [{"content": "Old"}]})
+    result = await c.add(content="Old", user_id="u")
+    old = result.extra_node_ids[0]
+    c.factory.llm.responses = {
+        "extract": {"facts": [{"content": "Old"}, {"content": "New"}]}
+    }
+    c.factory.jev.responses = {
+        "p0:action": "SKIP",
+        "p0:target": old,
+        "p1:action": "ADD_OVERRIDE",
+        "p1:target": "p0",
+    }
+    updated = await c.add(content="Old to New", user_id="u")
+    assert c.factory.vector.get(updated.extra_node_ids[0]).supersedes == [old]
+    assert not c.factory.vector.get(old).is_latest
 
 
-async def test_dual_fast_write_stamps_source_node_id(tmp_storage, fake_embed):
-    client = MemoryClient(
-        settings=Settings(
-            mode="dual",
-            storage_dir=tmp_storage,
-            reconcile_skip_llm=True,
-        ),
+async def test_model_missed_durable_extraction_fails_without_silent_drop(
+    tmp_storage, fake_embed
+):
+    c = client(tmp_storage, fake_embed, {"facts": []}, FakeJev({"value": "REEXTRACT"}))
+    with pytest.raises(DecisionContextError, match="missed"):
+        await c.add(content="Moved to Beijing", user_id="u")
+    assert len(c.factory.vector.get_many({"user_id": "u"}, limit=100)) == 1
+
+
+async def test_request_retry_after_result_cache_failure_does_not_rerun_jev(
+    tmp_storage, fake_embed, monkeypatch
+):
+    c = client(tmp_storage, fake_embed, {"facts": [{"content": "Fact"}]})
+    original = c.factory.cache.set_profile
+
+    def fail(*args, **kwargs):
+        raise OSError("cache failed after commit")
+
+    monkeypatch.setattr(c.factory.cache, "set_profile", fail)
+    with pytest.raises(OSError):
+        await c.add(content="Fact", user_id="u", request_id="durable")
+    calls = len(c.factory.jev.calls)
+    monkeypatch.setattr(c.factory.cache, "set_profile", original)
+    retried = await c.add(content="Fact", user_id="u", request_id="durable")
+    assert retried.extracted_count == 1 and len(c.factory.jev.calls) == calls
+    assert len(c.factory.vector.get_many({"user_id": "u"}, limit=100)) == 2
+
+
+async def test_partial_extraction_coverage_cannot_silently_drop_update(
+    tmp_storage, fake_embed
+):
+    from conftest import FakeLLMClient, FakeJev
+    from dual_mem import MemoryClient
+    from dual_mem.config import Settings
+    from dual_mem.agent.reconciler import DecisionContextError
+
+    c = MemoryClient(
+        settings=Settings(storage_dir=tmp_storage),
         embed=fake_embed,
-        llm=FakeLLMClient(responses={"extract": EXTRACT_RESPONSE}),
+        llm=FakeLLMClient({"extract": {"facts": [{"content": "User is named Alice"}]}}),
+        jev=FakeJev({"coverage": "INVALID"}),
     )
-    result = await client.add(
-        content="我昨天去了北京，喜欢喝咖啡",
-        app_id="app",
-        user_id="u",
+    with pytest.raises(DecisionContextError, match="coverage"):
+        await c.add(content="My name is Alice and I moved to Shanghai", user_id="u")
+    raw = c.factory.vector.get_many({"layer": "L0_RAW"})
+    assert len(raw) == 1 and "Shanghai" in raw[0].content
+    assert c.factory.vector.get_many({"layer": "L1_FACT"}) == []
+    await c.aclose()
+
+
+async def test_conflicting_batch_targets_replan_with_jev_feedback(
+    tmp_storage, fake_embed
+):
+    from conftest import FakeLLMClient, FakeJev
+    from dual_mem import MemoryClient
+    from dual_mem.config import Settings
+    from dual_mem.types import MemoryNode, Layer
+
+    def script(state, questions):
+        ids = [n["id"] for n in state["current"]]
+        fixed = bool(state.get("previous_plan_rejected"))
+        return {
+            "p0:action": "ADD_SUPPLEMENT" if fixed else "ADD_OVERRIDE",
+            "p0:target": "NONE" if fixed else ids[0],
+            "p1:action": "ADD_OVERRIDE",
+            "p1:target": ids[0],
+        }
+
+    j = FakeJev(script)
+    c = MemoryClient(
+        settings=Settings(storage_dir=tmp_storage),
+        embed=fake_embed,
+        llm=FakeLLMClient(
+            {
+                "extract": {
+                    "facts": [
+                        {"content": "Moved Beijing to Shanghai"},
+                        {"content": "Currently Shanghai"},
+                    ]
+                }
+            }
+        ),
+        jev=j,
     )
-    l1 = client.factory.vector.get(result.memory_id)
-    assert l1 is not None
-    assert l1.layer is Layer.L1_RAW
-    derived = [
-        client.factory.vector.get(nid)
-        for nid in result.extra_node_ids
-        if client.factory.vector.get(nid) is not None
-    ]
-    l2l4 = [n for n in derived if n.layer in (Layer.L2_FACT, Layer.L4_IDENTITY)]
-    assert l2l4
-    assert all((n.custom or {}).get("source_node_id") == l1.node_id for n in l2l4)
-    await client.aclose()
+    c.factory.vector.upsert(
+        [
+            MemoryNode(
+                node_id="old",
+                content="Currently Beijing",
+                layer=Layer.L2_PROFILE,
+                app_id="default",
+                user_id="u",
+                embedding=fake_embed.embed_sync("Currently Beijing"),
+            )
+        ]
+    )
+    r = await c.add(content="Moved Beijing to Shanghai, now Shanghai", user_id="u")
+    assert len(j.calls) == 2 and j.calls[1]["state"]["previous_plan_rejected"]
+    assert len(r.extra_node_ids) == 2 and not c.factory.vector.get("old").is_latest
+    assert len(c.factory.llm.calls) == 1
+    await c.aclose()

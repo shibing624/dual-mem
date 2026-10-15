@@ -4,7 +4,7 @@
 @description: Public async facade of the dual-mem layered-memory SDK. MemoryClient wires
 configured providers/stores together and exposes add/search/get/list/update/delete/digest,
 returning strongly typed dataclass models (sdk_models). Multi-turn messages are formatted
-into natural dialogue text for L1_RAW + extract; embed sees the user-only concatenation.
+into natural dialogue text for L0_RAW + extract; embed sees the user-only concatenation.
 A per-user asyncio.Lock serializes concurrent add() for the same (app_id, user_id) so the
 fast-write -> reconcile pipeline can never race on the same evolution chain.
 
@@ -28,6 +28,7 @@ from dual_mem.locks import LockRegistry
 from dual_mem.registry import _UNSET, ComponentFactory
 from dual_mem.retrieval.reader import Reader
 from dual_mem.sdk_models import (
+    MemoryDecision,
     ChatMessage,
     DeleteBulkResult,
     DeleteResult,
@@ -60,7 +61,7 @@ def strip_memory_injection(text: str) -> str:
 
 
 class MissingCredentialsError(RuntimeError):
-    """Raised when MemoryClient is constructed without the required LLM / embedding keys."""
+    """Raised when MemoryClient is constructed without the required Jev / LLM / embedding providers."""
 
 
 class MemoryClient:
@@ -70,7 +71,7 @@ class MemoryClient:
 
     Constructor kwargs (see also ``Settings`` / ``~/.dual_mem/config.yaml``):
 
-    - ``mode``: ``"system1"`` (default, L0–L4 fast-write) or ``"dual"`` (+ async System2 L6/L7).
+    - ``mode``: ``"system1"`` (default, L0/L1/L2 versions) or ``"dual"`` (+ explicit digest L3).
     - ``storage_dir``: on-disk root for Chroma / Kuzu / SQLite; default ``./.dual_mem_data``.
     - ``settings``: explicit ``Settings`` instance; overrides YAML and env.
     - ``embed`` / ``llm``: inject custom clients; skips the corresponding api_key check.
@@ -94,6 +95,7 @@ class MemoryClient:
         mode: str | None = None,
         embed=None,
         llm=None,
+        jev=None,
     ) -> None:
         overrides = {}
         if storage_dir is not None:
@@ -111,12 +113,19 @@ class MemoryClient:
             settings=settings,
             embed=embed,
             llm=llm if llm is not None else _UNSET,
+            jev=jev,
         )
 
-        self._validate_credentials(injected_embed=embed is not None, injected_llm=llm is not None)
+        self._validate_credentials(
+            injected_embed=embed is not None, injected_llm=llm is not None
+        )
+        if jev is None and not settings.jev_api_key:
+            raise MissingCredentialsError(
+                "Jev requires DUAL_MEM_JEV_API_KEY or jev= provider"
+            )
         self._build_writer()
         self.reader = Reader(factory=self.factory)
-        self._write_locks = LockRegistry()
+        self._write_locks = self.factory.commit_locks
         self._coding_writer = None
         if self.settings.coding_enabled and self.factory.llm is not None:
             self._init_coding_writer()
@@ -129,6 +138,7 @@ class MemoryClient:
         mode: str | None = None,
         embed=None,
         llm=None,
+        jev=None,
     ) -> MemoryClient:
         """Create a client from a mem0/Hy-style config dict (see ``Settings.from_dict``).
 
@@ -144,7 +154,7 @@ class MemoryClient:
         settings = Settings.from_dict(config_dict)
         if mode is not None:
             settings = settings.model_copy(update={"mode": mode})
-        return cls(settings=settings, embed=embed, llm=llm)
+        return cls(settings=settings, embed=embed, llm=llm, jev=jev)
 
     @classmethod
     async def acreate(
@@ -155,6 +165,7 @@ class MemoryClient:
         mode: str | None = None,
         embed=None,
         llm=None,
+        jev=None,
     ) -> "MemoryClient":
         """Async factory mirror of ``MemoryClient(...)``; kept for API symmetry with prior versions."""
         return cls(
@@ -163,9 +174,12 @@ class MemoryClient:
             mode=mode,
             embed=embed,
             llm=llm,
+            jev=jev,
         )
 
-    def _validate_credentials(self, *, injected_embed: bool, injected_llm: bool) -> None:
+    def _validate_credentials(
+        self, *, injected_embed: bool, injected_llm: bool
+    ) -> None:
         """Fail fast when LLM or embedding credentials are missing.
 
         Injected ``embed`` / ``llm`` clients (tests, custom backends) bypass the api_key check
@@ -173,9 +187,13 @@ class MemoryClient:
         """
         missing: list[str] = []
         if not injected_llm and not self.settings.llm_api_key:
-            missing.append("llm_api_key (set DUAL_MEM_LLM_API_KEY or pass settings.llm_api_key)")
+            missing.append(
+                "llm_api_key (set DUAL_MEM_LLM_API_KEY or pass settings.llm_api_key)"
+            )
         if not injected_embed and not self.settings.embed_api_key:
-            missing.append("embed_api_key (set DUAL_MEM_EMBED_API_KEY or pass settings.embed_api_key)")
+            missing.append(
+                "embed_api_key (set DUAL_MEM_EMBED_API_KEY or pass settings.embed_api_key)"
+            )
         if missing:
             raise MissingCredentialsError(
                 "dual-mem requires both LLM and embedding API keys. Missing: "
@@ -231,8 +249,9 @@ class MemoryClient:
         self._coding_writer = CodingWriter(
             store=store,
             extractor=extractor,
-            reconciler=CodingMemoryReconciler(),
+            reconciler=CodingMemoryReconciler(jev=self.factory.jev),
             llm=self.factory.llm,
+            jev=self.factory.jev,
         )
 
     async def add(
@@ -245,19 +264,19 @@ class MemoryClient:
         agent_id: str = "",
         session_id: str = "",
         memory_at: int | None = None,
+        request_id: str | None = None,
     ) -> WriteResult:
         """Write one memory and run the cognition pipeline (Extract -> commit -> ...).
 
         Pass either ``content`` (single blob) or ``messages`` (multi-turn chat) — same API.
 
         ``app_id`` defaults to ``settings.default_app_id`` when omitted.
-        ``user_id`` is required. With ``messages``, L1_RAW and the extractor see the shaped
+        ``user_id`` is required. With ``messages``, L0_RAW and the extractor see the shaped
         full dialogue after host-injected system turns are removed.
 
-        Each add performs one extraction call; long content may also trigger the optional
-        summarizer. Batch ``messages`` at session end to reduce cost when appropriate.
+        Each normal add performs one candidate-generation call and one batched Jev decision. Batch ``messages`` at session end to reduce cost when appropriate.
         """
-        request_id = str(uuid.uuid4())
+        request_id = request_id or str(uuid.uuid4())
         start = time.perf_counter()
         resolved_app_id = self._resolve_app_id(app_id)
 
@@ -266,28 +285,83 @@ class MemoryClient:
             # Coding path: check for tool messages before chat normalization
             if self._coding_writer:
                 raw_dicts = [
-                    m if isinstance(m, dict) else {"role": m.role, "content": m.content}
+                    (
+                        dict(m)
+                        if isinstance(m, dict)
+                        else {"role": m.role, "content": m.content}
+                    )
                     for m in messages
+                    if (m.get("role") if isinstance(m, dict) else m.role) != "system"
                 ]
                 for raw in raw_dicts:
-                    raw["content"] = strip_memory_injection(str(raw.get("content") or ""))
-                from dual_mem.coding.preproc import has_any_tool_message, strip_tool_messages
+                    raw["content"] = strip_memory_injection(
+                        str(raw.get("content") or "")
+                    )
+                from dual_mem.coding.preproc import (
+                    has_any_tool_message,
+                    strip_tool_messages,
+                )
+
                 if has_any_tool_message(raw_dicts):
-                    try:
-                        coding_result = await self._coding_writer.write(
-                            raw_dicts, user_id=user_id, agent_id=agent_id,
-                            session_id=session_id, app_id=resolved_app_id,
-                        )
-                    except Exception as exc:
-                        logger.warning("coding write failed: %s; falling back to chat", exc)
-                        coding_result = None
+                    coding_result = await self._coding_writer.write(
+                        raw_dicts,
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        session_id=session_id,
+                        app_id=resolved_app_id,
+                    )
                     if coding_result is not None:
                         mids = coding_result.get("memory_ids") or []
                         return WriteResult(
                             success=True,
-                            memory_id=mids[0] if mids else "",
+                            memory_id=coding_result["raw_id"],
+                            extra_node_ids=mids,
+                            extracted_count=len(mids),
+                            commit_passed=bool(mids),
+                            is_ephemeral=bool(coding_result.get("decisions"))
+                            and all(
+                                d["action"] == "RAW_ONLY"
+                                for d in coding_result["decisions"]
+                            ),
+                            decisions=[
+                                MemoryDecision(
+                                    action=(
+                                        "ADD"
+                                        if d["action"] == "UPDATE"
+                                        else (
+                                            "SKIP"
+                                            if d["action"] == "RAW_ONLY"
+                                            else d["action"]
+                                        )
+                                    ),
+                                    update_type=(
+                                        "OVERRIDE"
+                                        if d["action"] == "UPDATE"
+                                        else (
+                                            "SUPPLEMENT"
+                                            if d["action"] == "ADD"
+                                            else None
+                                        )
+                                    ),
+                                    targets=(
+                                        [d["target_memory_id"]]
+                                        if d.get("target_memory_id")
+                                        else []
+                                    ),
+                                    proposal_ids=(
+                                        [f"p{d['draft_idx']}"]
+                                        if d.get("draft_idx") is not None
+                                        else []
+                                    ),
+                                    source_ids=d["source_ids"],
+                                    reason=d.get("reason", ""),
+                                )
+                                for d in coding_result.get("decisions", [])
+                            ],
                             request_id=request_id,
-                            processing_time_ms=round((time.perf_counter() - start) * 1000, 2),
+                            processing_time_ms=round(
+                                (time.perf_counter() - start) * 1000, 2
+                            ),
                         )
                     # Not coding → strip tool messages so chat path sees clean dialogue
                     messages = strip_tool_messages(raw_dicts)
@@ -310,7 +384,9 @@ class MemoryClient:
             normalized = _shape_history(
                 normalized,
                 threshold_chars=threshold_chars,
-                assistant_max_chars=int(self.settings.extract_assistant_max_tokens * cpt),
+                assistant_max_chars=int(
+                    self.settings.extract_assistant_max_tokens * cpt
+                ),
             )
             user_turn_count = sum(
                 1 for m in normalized if m.role == "user" and m.content.strip()
@@ -332,7 +408,11 @@ class MemoryClient:
 
         logger.info(
             "add app=%s user=%s mode=%s len=%d turns=%d",
-            resolved_app_id, user_id, self.mode, len(content), user_turn_count,
+            resolved_app_id,
+            user_id,
+            self.mode,
+            len(content),
+            user_turn_count,
         )
 
         write_kwargs = {
@@ -344,8 +424,7 @@ class MemoryClient:
             "request_id": request_id,
             "memory_at": memory_at,
         }
-        if self.settings.mode != "dual":
-            write_kwargs["messages"] = normalized if messages is not None else None
+        write_kwargs["messages"] = normalized if messages is not None else None
         async with self._user_write_lock_ctx(resolved_app_id, user_id):
             result = await self.writer.write(**write_kwargs)
         return WriteResult(
@@ -357,6 +436,7 @@ class MemoryClient:
             extracted_count=len(result.extra_node_ids),
             extra_node_ids=list(result.extra_node_ids),
             is_ephemeral=result.is_ephemeral,
+            decisions=result.decisions,
         )
 
     async def add_raw(
@@ -370,12 +450,14 @@ class MemoryClient:
         session_id: str = "",
         memory_at: int | None = None,
     ) -> WriteResult:
-        """Write L1_RAW only (embed + store). Does not run extract."""
+        """Write L0_RAW only (embed + store). Does not run extract."""
         request_id = str(uuid.uuid4())
         start = time.perf_counter()
         resolved_app_id = self._resolve_app_id(app_id)
         text, _normalized, _turns = _prepare_write_text(
-            content, messages, settings=self.settings,
+            content,
+            messages,
+            settings=self.settings,
         )
         if not text.strip():
             return WriteResult(
@@ -423,7 +505,9 @@ class MemoryClient:
         start = time.perf_counter()
         resolved_app_id = self._resolve_app_id(app_id)
         text, normalized, _turns = _prepare_write_text(
-            content, messages, settings=self.settings,
+            content,
+            messages,
+            settings=self.settings,
         )
         if not text.strip() or not source_node_ids:
             return WriteResult(
@@ -456,6 +540,7 @@ class MemoryClient:
             extracted_count=len(result.extra_node_ids),
             extra_node_ids=list(result.extra_node_ids),
             is_ephemeral=result.is_ephemeral,
+            decisions=result.decisions,
         )
 
     async def search(
@@ -513,10 +598,16 @@ class MemoryClient:
         """
         request_id = request_id or str(uuid.uuid4())
         start = time.perf_counter()
-        resolved_app_ids = app_ids if app_ids is not None else [self.settings.default_app_id]
+        resolved_app_ids = (
+            app_ids if app_ids is not None else [self.settings.default_app_id]
+        )
         logger.info(
             "search app=%s user=%s query=%r limit=%d debug=%s",
-            (resolved_app_ids[0] if resolved_app_ids else ""), user_id, query, limit, debug,
+            (resolved_app_ids[0] if resolved_app_ids else ""),
+            user_id,
+            query,
+            limit,
+            debug,
         )
         resolved_profile_limit = (
             (-1 if self.settings.enable_graph else 0)
@@ -565,10 +656,12 @@ class MemoryClient:
         created_after: int | None = None,
         request_id: str | None = None,
     ) -> SearchResult:
-        """Search L1_RAW originals (including SHADOW after extract). Not used by default QA."""
+        """Search L0_RAW originals (including retained history). Not used by default QA."""
         request_id = request_id or str(uuid.uuid4())
         start = time.perf_counter()
-        resolved_app_ids = app_ids if app_ids is not None else [self.settings.default_app_id]
+        resolved_app_ids = (
+            app_ids if app_ids is not None else [self.settings.default_app_id]
+        )
         memories = await self.reader.search_conversation(
             query=query,
             app_ids=resolved_app_ids,
@@ -594,51 +687,84 @@ class MemoryClient:
         return Reader.memory_node_to_item(node)
 
     async def list(
-        self, *, app_id: str | None = None, user_id: str, agent_id: str = "", limit: int = 100
+        self,
+        *,
+        app_id: str | None = None,
+        user_id: str,
+        agent_id: str = "",
+        limit: int = 100,
+        include_history: bool = False,
     ) -> list[MemoryItem]:
-        """List ACTIVE memories under the given app/user (optionally agent) scope."""
+        """List current memories under the given app/user (optionally agent) scope."""
         resolved_app_id = self._resolve_app_id(app_id)
         where = build_filter(
             app_ids=[resolved_app_id],
             user_id=user_id,
             agent_ids=[agent_id],
             statuses=[MemoryStatus.ACTIVE],
+            latest_only=not include_history,
         )
         nodes = self.factory.vector.get_many(where, limit=limit)
         return [Reader.memory_node_to_item(node) for node in nodes]
 
     async def update(self, memory_id: str, content: str) -> UpdateResult:
-        """Replace a memory's content and re-embed it, logging the change to history."""
+        """Append an explicit user correction and return its new version ID."""
+        from dataclasses import replace
+
         node = self.factory.vector.get(memory_id)
         if node is None:
             return UpdateResult(success=False, error_code=404)
-        old_meta = node.to_metadata()
-        node.content = content
-        node.embedding = await self.factory.embed.embed(content)
-        node.gmt_modified = int(time.time())
-        self.factory.vector.upsert([node])
-        self.factory.history.append(
-            event="UPDATE",
-            node_id=node.node_id,
-            user_id=node.user_id,
-            old=old_meta,
-            new=node.to_metadata(),
+        if not content.strip() or not node.is_latest:
+            return UpdateResult(success=False, error_code=409)
+        scope = (node.app_id, node.user_id, node.agent_id)
+        replacement = replace(
+            node,
+            node_id=str(uuid.uuid4()),
+            content=content,
+            embedding=await self.factory.embed.embed(content),
+            supersedes=[node.node_id],
+            superseded_by=[],
+            revision=0,
+            gmt_created=int(time.time()),
+            gmt_modified=None,
+            s2_evidence_count=0,
+            custom={
+                **(node.custom or {}),
+                "update_type": "OVERRIDE",
+                "explicit_update": True,
+            },
         )
-        return UpdateResult(success=True, memory_id=memory_id)
+        if not self.factory.vector.apply_version_plan(
+            nodes=[replacement],
+            expected={node.node_id: node.revision},
+            archives=[],
+            scope=scope,
+        ):
+            return UpdateResult(success=False, error_code=409)
+        if self.mode == "dual":
+            self.factory.cache.enqueue_s2_task(
+                user_id=node.user_id, app_id=node.app_id, agent_id=node.agent_id
+            )
+        return UpdateResult(success=True, memory_id=replacement.node_id)
 
     async def delete(self, memory_id: str) -> DeleteResult:
-        """Physically remove a memory and append a DELETE history record."""
+        """Archive the current representation while retaining its evidence/history."""
         node = self.factory.vector.get(memory_id)
         if node is None:
             return DeleteResult(success=False, error_code=404)
-        self.factory.vector.delete([memory_id])
-        self.factory.history.append(
-            event="DELETE",
-            node_id=memory_id,
-            user_id=node.user_id,
-            old=node.to_metadata(),
-            new=None,
-        )
+        if not node.is_latest:
+            return DeleteResult(success=False, error_code=409)
+        if not self.factory.vector.apply_version_plan(
+            nodes=[],
+            expected={memory_id: node.revision},
+            archives=[memory_id],
+            scope=(node.app_id, node.user_id, node.agent_id),
+        ):
+            return DeleteResult(success=False, error_code=409)
+        if self.mode == "dual":
+            self.factory.cache.enqueue_s2_task(
+                user_id=node.user_id, app_id=node.app_id, agent_id=node.agent_id
+            )
         return DeleteResult(success=True)
 
     async def delete_bulk(
@@ -715,22 +841,40 @@ class MemoryClient:
         return DigestResult(success=True, processed=processed, timing=timing)
 
     async def search_coding(
-        self, *, query: str, user_id: str, agent_id: str = "default_agent",
-        app_id: str | None = None, top_k: int = 10,
+        self,
+        *,
+        query: str,
+        user_id: str,
+        agent_id: str = "default_agent",
+        app_id: str | None = None,
+        top_k: int = 10,
     ) -> list[dict]:
         """Search coding memories (tool-use / engineering memories)."""
         if not self._coding_writer:
             return []
         resolved = self._resolve_app_id(app_id)
         return await self._coding_writer.search(
-            query=query, user_id=user_id, agent_id=agent_id,
-            app_id=resolved, top_k=top_k,
+            query=query,
+            user_id=user_id,
+            agent_id=agent_id,
+            app_id=resolved,
+            top_k=top_k,
         )
 
     async def aclose(self) -> None:
         """Release storage resources. Idempotent; call once at application shutdown."""
         if self._coding_writer is not None:
             self._coding_writer.store.close()
+        provider = self.factory._jev
+        if provider is not None and hasattr(provider, "aclose"):
+            await provider.aclose()
+        for provider in (self.factory._embed, self.factory._llm):
+            if (
+                provider is not _UNSET
+                and provider is not None
+                and hasattr(provider, "aclose")
+            ):
+                await provider.aclose()
         self.factory.close()
 
 
@@ -752,9 +896,7 @@ def _prepare_write_text(
     normalized = [m for m in normalized if m.content.strip()]
     cpt = settings.chars_per_token
     threshold_chars = int(
-        settings.llm_context_window
-        * settings.extract_dialogue_context_ratio
-        * cpt
+        settings.llm_context_window * settings.extract_dialogue_context_ratio * cpt
     )
     normalized = _shape_history(
         normalized,
@@ -813,13 +955,15 @@ def _shape_history(
             shaped.append(msg)
         else:
             shaped.append(
-                ChatMessage(role=msg.role, content=msg.content[:assistant_max_chars] + "…")
+                ChatMessage(
+                    role=msg.role, content=msg.content[:assistant_max_chars] + "…"
+                )
             )
     return shaped
 
 
 def _format_dialogue(messages: list[ChatMessage]) -> str:
-    """Render normalized messages into a natural-language dialogue chunk for L1_RAW + extract."""
+    """Render normalized messages into a natural-language dialogue chunk for L0_RAW + extract."""
     parts: list[str] = []
     for msg in messages:
         if msg.role == "user":

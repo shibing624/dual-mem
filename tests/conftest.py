@@ -65,15 +65,29 @@ class FakeLLMClient:
         return value
 
     async def chat_json(self, *, system: str, user: str, **kw):
-        self.calls.append({"type": "chat_json", "system": system, "user": user, "kw": kw})
-        if "记忆分析专家" in system or "memory analyst" in system:
+        self.calls.append(
+            {"type": "chat_json", "system": system, "user": user, "kw": kw}
+        )
+        if any(
+            marker in system
+            for marker in (
+                "只抽取来源中明确陈述",
+                "Extract explicit atomic statements",
+                "memory analyst",
+                "Generate faithful explicit atomic candidates",
+            )
+        ):
             if "extract" not in self.responses:
                 return {
                     "facts": [{"content": user, "tags": []}] if user.strip() else [],
                     "identity": [],
                     "intentions": [],
                     "is_ephemeral": False,
-                    "emotion": {"valence": 0.0, "arousal": 0.0, "dominant_emotion": None},
+                    "emotion": {
+                        "valence": 0.0,
+                        "arousal": 0.0,
+                        "dominant_emotion": None,
+                    },
                     "basic_info": {},
                 }
             default_extract = {
@@ -94,7 +108,9 @@ class FakeLLMClient:
             return self._resolve("search_query", [], system=system, user=user)
         if "记忆管理系统" in system or "memory management system" in system:
             return self._resolve("reconcile", [], system=system, user=user)
-        return self._resolve("json", {"facts": [], "identity": []}, system=system, user=user)
+        return self._resolve(
+            "json", {"facts": [], "identity": []}, system=system, user=user
+        )
 
     async def chat_json_for_content(
         self,
@@ -110,10 +126,14 @@ class FakeLLMClient:
         return await self.chat_json(system=system, user=user_text, **kw)
 
     async def chat_text(self, *, system: str, user: str, **kw) -> str:
-        self.calls.append({"type": "chat_text", "system": system, "user": user, "kw": kw})
+        self.calls.append(
+            {"type": "chat_text", "system": system, "user": user, "kw": kw}
+        )
         return self._resolve("text", "", system=system, user=user)
 
-    async def chat_text_for_content(self, *, content: str, build_system, merge_text=None, **kw) -> str:
+    async def chat_text_for_content(
+        self, *, content: str, build_system, merge_text=None, **kw
+    ) -> str:
         system = build_system(content)
         return await self.chat_text(system=system, user=content, **kw)
 
@@ -133,7 +153,11 @@ class FakeLLMClient:
         terminates after one turn.
         """
         self.calls.append(
-            {"type": "chat_with_tools", "messages": list(messages), "tools_count": len(tools)}
+            {
+                "type": "chat_with_tools",
+                "messages": list(messages),
+                "tools_count": len(tools),
+            }
         )
         spec = self.responses.get("tools")
         if spec is None:
@@ -163,3 +187,75 @@ def tmp_storage(tmp_path):
     storage = tmp_path / "storage"
     storage.mkdir(parents=True, exist_ok=True)
     return str(storage)
+
+
+class FakeJev:
+    """Scripted decisions; semantic examples supply explicit outcomes, never network."""
+
+    def __init__(self, responses=None):
+        self.responses = responses
+        self.calls = []
+
+    async def evaluate(self, *, state, questions):
+        from dual_mem.providers.jev import JevAnswer
+
+        self.calls.append({"state": state, "questions": questions})
+        response = (
+            self.responses(state=state, questions=questions)
+            if callable(self.responses)
+            else self.responses
+        )
+        if isinstance(response, Exception):
+            raise response
+        result = {}
+        for name, q in questions.items():
+            choices = q.get("criteria", {})
+            selection = (response or {}).get(name)
+            if selection is None:
+                selection = next(
+                    (
+                        option
+                        for option in (
+                            "ADD_SUPPLEMENT",
+                            "NONE",
+                            "RAW_ONLY",
+                            "VALID",
+                            "INCLUDE",
+                            "FACT",
+                            "CHAT",
+                        )
+                        if option in choices
+                    ),
+                    next(iter(choices), None),
+                )
+            if isinstance(selection, JevAnswer):
+                result[name] = selection
+            else:
+                result[name] = JevAnswer(
+                    type="choice",
+                    choice=selection,
+                    confidence=1,
+                    probabilities={selection: 1},
+                )
+        return result
+
+
+@pytest.fixture
+def fake_jev():
+    return FakeJev()
+
+
+@pytest.fixture(autouse=True)
+def mock_decisions_for_legacy_fixtures(monkeypatch):
+    """All SDK fixtures are offline; new protocol tests inject their own script."""
+    from dual_mem.registry import ComponentFactory
+
+    original = ComponentFactory.__init__
+
+    def initialize(self, **kwargs):
+        if kwargs.get("jev") is None:
+            kwargs["jev"] = FakeJev()
+        original(self, **kwargs)
+
+    monkeypatch.setattr(ComponentFactory, "__init__", initialize)
+    monkeypatch.setenv("DUAL_MEM_JEV_API_KEY", "test-jev-key")

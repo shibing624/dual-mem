@@ -28,7 +28,7 @@ def test_build_filter_all_options():
     assert f["user_id"] == "u"
     assert f["agent_id"] == {"$in": ["ag1"]}
     assert f["session_id"] == {"$in": ["s1", "s2"]}
-    assert f["layer"] == {"$in": ["L2_FACT"]}
+    assert f["layer"] == {"$in": ["L1_FACT"]}
     assert f["status"] == {"$in": ["ACTIVE"]}
 
 

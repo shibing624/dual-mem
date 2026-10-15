@@ -54,11 +54,24 @@ async def test_mark_superseded_is_atomic_and_keeps_embedding(tmp_storage, fake_e
         llm=None,
     )
     old = MemoryNode(
-        content="老事实", layer=Layer.L2_FACT, app_id="app", user_id="u",
-        status=MemoryStatus.ACTIVE, is_latest=True,
+        content="老事实",
+        layer=Layer.L2_FACT,
+        app_id="app",
+        user_id="u",
+        status=MemoryStatus.ACTIVE,
+        is_latest=True,
     )
     old.embedding = fake_embed.embed_sync(old.content)
     factory.vector.upsert([old])
+    successor = MemoryNode(
+        node_id="new-1",
+        content="新事实",
+        layer=Layer.L1_FACT,
+        app_id="app",
+        user_id="u",
+        embedding=fake_embed.embed_sync("新事实"),
+    )
+    factory.vector.upsert([successor])
 
     ok = factory.vector.mark_superseded(old.node_id, superseded_by_id="new-1")
     assert ok is True
@@ -67,12 +80,15 @@ async def test_mark_superseded_is_atomic_and_keeps_embedding(tmp_storage, fake_e
 
     reloaded = factory.vector.get(old.node_id)
     assert reloaded.is_latest is False
-    assert reloaded.status is MemoryStatus.SUPERSEDED
+    assert reloaded.status is MemoryStatus.ACTIVE
     assert reloaded.superseded_by == ["new-1"]
+    assert factory.vector.get("new-1").supersedes == [old.node_id]
     # embedding never rewritten (float32 round-trip, so compare approximately)
     assert reloaded.embedding == pytest.approx(old.embedding, rel=1e-4)
 
-    assert factory.vector.mark_superseded("does-not-exist", superseded_by_id="x") is False
+    assert (
+        factory.vector.mark_superseded("does-not-exist", superseded_by_id="x") is False
+    )
 
 
 async def test_kuzu_parallel_query_under_lock(tmp_storage):

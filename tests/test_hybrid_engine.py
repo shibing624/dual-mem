@@ -78,10 +78,18 @@ async def test_bm25_rerank_surfaces_exact_term_over_higher_semantic(
     embed = _ScriptedEmbed(query)
     client = MemoryClient(settings=settings, embed=embed, llm=FakeLLMClient())
 
-    _seed_fact(client, node_id="kw", content="the vault access code is 70355 as requested",
-               cosine=0.5)
-    _seed_fact(client, node_id="distractor",
-               content="general notes about safety and storage habits", cosine=0.7)
+    _seed_fact(
+        client,
+        node_id="kw",
+        content="the vault access code is 70355 as requested",
+        cosine=0.5,
+    )
+    _seed_fact(
+        client,
+        node_id="distractor",
+        content="general notes about safety and storage habits",
+        cosine=0.7,
+    )
 
     query_calls = []
     get_calls = []
@@ -99,14 +107,18 @@ async def test_bm25_rerank_surfaces_exact_term_over_higher_semantic(
     monkeypatch.setattr(client.factory.vector, "query", _counted_query)
     monkeypatch.setattr(client.factory.vector, "get_by_ids", _counted_get_by_ids)
 
-    result = await client.search(query=query, app_ids=["app"], user_id="u", min_score=0.0)
+    result = await client.search(
+        query=query, app_ids=["app"], user_id="u", min_score=0.0
+    )
     normal_ids = [m.memory_id for m in result.memories.normal]
     assert "kw" in normal_ids and "distractor" in normal_ids
     assert normal_ids.index("kw") < normal_ids.index("distractor")
     assert embed.direct_calls == 1
     assert embed.queued_calls == 0
     assert len(query_calls) == 1
-    assert query_calls[0][1]["top_k"] == 75  # v10: vdb_sem_limit = max(ceil(10*3*2.5),60) = 75
+    assert (
+        query_calls[0][1]["top_k"] == 75
+    )  # v10: vdb_sem_limit = max(ceil(10*3*2.5),60) = 75
     assert get_calls == []
 
     await client.aclose()
@@ -120,14 +132,20 @@ async def test_i3_keyword_hit_survives_min_score_gate(tmp_storage):
     """
     query = "membership number 88231"
     settings = Settings(mode="system1", storage_dir=tmp_storage)
-    client = MemoryClient(settings=settings, embed=_ScriptedEmbed(query),
-                          llm=FakeLLMClient())
+    client = MemoryClient(
+        settings=settings, embed=_ScriptedEmbed(query), llm=FakeLLMClient()
+    )
 
-    _seed_fact(client, node_id="kw", content="the membership number is 88231", cosine=0.3)
-    _seed_fact(client, node_id="nokw", content="some unrelated background details",
-               cosine=0.3)
+    _seed_fact(
+        client, node_id="kw", content="the membership number is 88231", cosine=0.3
+    )
+    _seed_fact(
+        client, node_id="nokw", content="some unrelated background details", cosine=0.3
+    )
 
-    result = await client.search(query=query, app_ids=["app"], user_id="u")  # min_score=0.4
+    result = await client.search(
+        query=query, app_ids=["app"], user_id="u"
+    )  # min_score=0.4
     normal_ids = [m.memory_id for m in result.memories.normal]
     assert "kw" in normal_ids
     assert "nokw" not in normal_ids
@@ -160,22 +178,44 @@ async def test_dual_l6_schema_recalled_into_profile(tmp_storage, fake_embed):
 
     fact = MemoryNode(
         content="用户在上海的人工智能实验室做研究",
-        layer=Layer.L2_FACT, app_id="app", user_id="u", node_id="f1",
+        layer=Layer.L2_FACT,
+        app_id="app",
+        user_id="u",
+        node_id="f1",
         status=MemoryStatus.ACTIVE,
     )
     fact.embedding = fake_embed.embed_sync(fact.content)
     client.factory.vector.upsert([fact])
 
     schema = GraphNode(
-        node_id="s1", layer=Layer.L6_SCHEMA.value, content="用户从事人工智能研究",
-        app_id="app", user_id="u",
-        embedding=fake_embed.embed_sync("用户从事人工智能研究"), tags=["研究"],
+        node_id="s1",
+        layer=Layer.L6_SCHEMA.value,
+        content="用户从事人工智能研究",
+        app_id="app",
+        user_id="u",
+        embedding=fake_embed.embed_sync("用户从事人工智能研究"),
+        tags=["研究"],
+    )
+    client.factory.vector.upsert(
+        [
+            MemoryNode(
+                node_id=schema.node_id,
+                content=schema.content,
+                layer=Layer.L3_DERIVED,
+                kind="schema",
+                app_id=schema.app_id,
+                user_id=schema.user_id,
+                embedding=schema.embedding,
+                custom={"source_ids": ["f1"]},
+            )
+        ]
     )
     client.factory.graph.add_node(schema)
     client.factory.graph.add_evidence(schema_id="s1", fact_id="f1")
 
-    result = await client.search(query="人工智能研究", app_ids=["app"], user_id="u",
-                                 min_score=0.0)
+    result = await client.search(
+        query="人工智能研究", app_ids=["app"], user_id="u", min_score=0.0
+    )
     profile_ids = [m.memory_id for m in result.memories.profile]
     normal_ids = [m.memory_id for m in result.memories.normal]
     assert "s1" in profile_ids

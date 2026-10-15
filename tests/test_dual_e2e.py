@@ -1,120 +1,62 @@
-from conftest import FakeLLMClient
-
+import json
+from conftest import FakeLLMClient, FakeJev
 from dual_mem import MemoryClient
 from dual_mem.config import Settings
-from dual_mem.types import Layer, MemoryNode
-
-_SCHEMA = "当处理任务时，用户追求确定性与掌控——反映低不确定性容忍。"
-_INTENTION = "用户正在准备一场数据库技术分享。"
+from dual_mem.types import Layer
 
 
-# Scripted System2 ops: create the schema and the intention in one call.
-# System2 makes a single chat_json call returning an ops array (the ReAct tool loop was
-# removed upstream), so this is the already-parsed list the agent expects.
-_TOOL_TURNS = [
-    {"op": "create_schema", "content": _SCHEMA, "tags": ["工作"],
-     "evidence": ["a1", "a2", "a3"]},
-    {"op": "create_intention", "content": _INTENTION, "tags": ["工作"],
-     "evidence": ["a1"]},
-]
+async def test_dual_evidence_derived_recall_and_history(tmp_storage, fake_embed):
+    def response(system, user):
+        ids = [f["id"] for f in json.loads(user)["facts"]]
+        return {
+            "memories": [
+                {
+                    "content": "User prepares carefully",
+                    "kind": "schema",
+                    "evidence_ids": ids,
+                },
+                {
+                    "content": "User will give a talk",
+                    "kind": "intention",
+                    "evidence_ids": ids,
+                },
+            ],
+            "processed_ids": ids,
+        }
 
-
-def _vec(comps: dict[int, float], dim: int = 64) -> list[float]:
-    v = [0.0] * dim
-    for i, val in comps.items():
-        v[i] = val
-    return v
-
-
-def _seed_fresh_facts(client):
-    nodes = []
-    for nid, content, comp in [
-        ("a1", "用户做项目前先列详细计划", {0: 1.0, 4: 0.5}),
-        ("a2", "用户写代码前先画架构图", {0: 1.0, 5: 0.5}),
-        ("a3", "用户旅行前把行程排满", {0: 1.0, 6: 0.5}),
-    ]:
-        node = MemoryNode(
-            content=content, layer=Layer.L2_FACT, app_id="app", user_id="u", node_id=nid
-        )
-        node.embedding = _vec(comp)
-        nodes.append(node)
-    client.factory.vector.upsert(nodes)
-
-
-async def test_dual_digest_then_recall_schema_and_intention(tmp_storage, fake_embed):
-    # Isolate the L6/L7 plumbing: script the System2 ops response and keep derived-layer
-    # recall on regardless of the (FACTUAL) query intent.
-    settings = Settings(
-        mode="dual",
-        storage_dir=tmp_storage,
-        system2_single_shot_max_clusters=0,
-    )
-    client = MemoryClient(
-        settings=settings,
+    c = MemoryClient(
+        settings=Settings(mode="dual", storage_dir=tmp_storage),
         embed=fake_embed,
-        llm=FakeLLMClient(responses={"json": _TOOL_TURNS}),
+        llm=FakeLLMClient({"json": response}),
+        jev=FakeJev(),
     )
-    _seed_fresh_facts(client)
-    client.factory.cache.enqueue_s2_task("u", "app")
-
-    digest = await client.digest()
-    assert digest.processed >= 1
-
-    # profile 路召回 L6 schema
-    res = await client.search(query=_SCHEMA, app_ids=["app"], user_id="u")
-    profile_contents = [m.content for m in res.memories.profile]
-    assert _SCHEMA in profile_contents
-    assert any(m.category == "schema" for m in res.memories.profile)
-
-    # proactive 路（intention_limit>0）召回 L7 intention
-    res2 = await client.search(
-        query=_INTENTION, app_ids=["app"], user_id="u", intention_limit=3
-    )
-    proactive_contents = [m.content for m in res2.memories.proactive]
-    assert _INTENTION in proactive_contents
-
-    # 默认 intention_limit=0 → proactive 恒空
-    res3 = await client.search(query=_INTENTION, app_ids=["app"], user_id="u")
-    assert res3.memories.proactive == []
-
-
-async def test_explicitly_excluding_derived_schema(
-    tmp_storage,
-    fake_embed,
-    monkeypatch,
-):
-    """include_derived=False excludes L6 schema without guessing query intent."""
-    settings = Settings(
-        mode="dual",
-        storage_dir=tmp_storage,
-        system2_single_shot_max_clusters=0,
-    )
-    client = MemoryClient(
-        settings=settings,
-        embed=fake_embed,
-        llm=FakeLLMClient(responses={"tools": _TOOL_TURNS}),
-    )
-    _seed_fresh_facts(client)
-    client.factory.cache.enqueue_s2_task("u", "app")
-    await client.digest()
-
-    graph_queries = 0
-    original_query = client.factory.graph.query_by_embedding
-
-    def _track_query(**kwargs):
-        nonlocal graph_queries
-        graph_queries += 1
-        return original_query(**kwargs)
-
-    monkeypatch.setattr(client.factory.graph, "query_by_embedding", _track_query)
-
-    res = await client.search(
-        query=_SCHEMA,
-        app_ids=["app"],
+    written = await c.add(content="User prepares talk with diagrams", user_id="u")
+    assert c.factory.cache.reconcile_queue_size() == 0
+    assert (await c.digest()).processed == 1
+    found = await c.search(
+        query="User prepares carefully",
         user_id="u",
-        intention_limit=3,
+        min_score=0,
+        profile_min_score=0,
+        intention_limit=5,
+    )
+    assert any(
+        m.content == "User prepares carefully" and m.kind == "schema"
+        for m in found.memories.profile
+    )
+    assert any(m.kind == "intention" for m in found.memories.proactive)
+    excluded = await c.search(
+        query="User prepares carefully",
+        user_id="u",
+        min_score=0,
+        profile_min_score=0,
         include_derived=False,
     )
-    assert all(m.category != "schema" for m in res.memories.profile)
-    assert res.memories.proactive == []
-    assert graph_queries == 0
+    assert all(m.layer != Layer.L3_DERIVED.value for m in excluded.memories.profile)
+    old = written.extra_node_ids[0]
+    updated = await c.update(old, "User cancelled talk")
+    assert updated.memory_id != old and not (await c.get(old)).is_latest
+    derived = c.factory.vector.get_many({"layer": Layer.L3_DERIVED.value})
+    assert all(not n.is_latest for n in derived)
+    assert all(n.content for n in derived)
+    await c.aclose()

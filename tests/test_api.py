@@ -26,7 +26,12 @@ def test_add_search_get_list_update_delete_flow(app_client):
 
     searched = app_client.post(
         "/v1/memories/search",
-        json={"query": "用户喜欢喝咖啡", "app_ids": ["app"], "user_id": "u", "min_score": 0.4},
+        json={
+            "query": "用户喜欢喝咖啡",
+            "app_ids": ["app"],
+            "user_id": "u",
+            "min_score": 0.4,
+        },
     )
     assert searched.status_code == 200
     memories = searched.json()["memories"]
@@ -42,7 +47,15 @@ def test_add_search_get_list_update_delete_flow(app_client):
         json={"content": "用户喜欢喝茶"},
     )
     assert updated.status_code == 200
-    assert app_client.get(f"/v1/memories/{memory_id}").json()["content"] == "用户喜欢喝茶"
+    assert (
+        app_client.get(f"/v1/memories/{memory_id}").json()["content"]
+        == "用户喜欢喝咖啡"
+    )
+    assert not app_client.get(f"/v1/memories/{memory_id}").json()["is_latest"]
+    memory_id = updated.json()["memory_id"]
+    assert (
+        app_client.get(f"/v1/memories/{memory_id}").json()["content"] == "用户喜欢喝茶"
+    )
 
     listed = app_client.get("/v1/memories/", params={"app_id": "app", "user_id": "u"})
     assert listed.status_code == 200
@@ -80,9 +93,7 @@ def test_update_missing_404(app_client):
 
 
 def test_add_requires_content_or_messages(app_client):
-    resp = app_client.post(
-        "/v1/memories/", json={"user_id": "u"}
-    )
+    resp = app_client.post("/v1/memories/", json={"user_id": "u"})
     assert resp.status_code == 400
     assert resp.json()["error_code"] == 400
 
@@ -126,7 +137,9 @@ def test_delete_bulk_requires_confirm(app_client):
     app_client.post(
         "/v1/memories/", json={"content": "批量1", "app_id": "app", "user_id": "u"}
     )
-    no_confirm = app_client.delete("/v1/memories/", params={"app_id": "app", "user_id": "u"})
+    no_confirm = app_client.delete(
+        "/v1/memories/", params={"app_id": "app", "user_id": "u"}
+    )
     assert no_confirm.status_code == 400
     assert no_confirm.json()["error_code"] == 400
 

@@ -9,8 +9,15 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 
 PATH_KEYS: Tuple[str, ...] = (
-    "path", "file_path", "filename", "file", "filepath",
-    "target_path", "notebook_path", "src_path", "dst_path",
+    "path",
+    "file_path",
+    "filename",
+    "file",
+    "filepath",
+    "target_path",
+    "notebook_path",
+    "src_path",
+    "dst_path",
 )
 
 DEFAULT_MAX_TOOL_RESULT_BYTES = 2048
@@ -59,7 +66,11 @@ def truncate_tool_result_text(
     if head_bytes + tail_bytes >= len(text):
         return text
     omitted = len(text) - head_bytes - tail_bytes
-    return text[:head_bytes] + f"\n\n[...{omitted} bytes omitted...]\n\n" + text[-tail_bytes:]
+    return (
+        text[:head_bytes]
+        + f"\n\n[...{omitted} bytes omitted...]\n\n"
+        + text[-tail_bytes:]
+    )
 
 
 def truncate_messages(
@@ -70,7 +81,9 @@ def truncate_messages(
     out = []
     for m in messages:
         if m.get("role") == "tool" and len(m.get("content", "")) > max_bytes:
-            out.append({**m, "content": truncate_tool_result_text(m["content"], max_bytes)})
+            out.append(
+                {**m, "content": truncate_tool_result_text(m["content"], max_bytes)}
+            )
         else:
             out.append(m)
     return out
@@ -81,7 +94,7 @@ def extract_files(messages: List[dict]) -> List[str]:
     paths: set = set()
     for m in messages:
         for tc in m.get("tool_calls") or []:
-            args = tc.get("arguments")
+            args = tc.get("arguments", tc.get("function", {}).get("arguments"))
             if isinstance(args, str):
                 try:
                     args = json.loads(args)
@@ -119,7 +132,12 @@ def extract_tool_summary(messages: List[dict]) -> List[Dict[str, Any]]:
             }
         else:
             if cur is None:
-                cur = {"turn": len(out), "user": "", "tools": [], "has_tool_result": False}
+                cur = {
+                    "turn": len(out),
+                    "user": "",
+                    "tools": [],
+                    "has_tool_result": False,
+                }
             if role == "assistant" and m.get("tool_calls"):
                 for tc in m["tool_calls"]:
                     name = tc.get("name") or tc.get("function", {}).get("name")
