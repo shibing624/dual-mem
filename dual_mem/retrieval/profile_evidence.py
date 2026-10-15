@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Profile reverse path: VDB hits → supporting L6 schemas via graph DERIVED_FROM edges."""
+"""Profile reverse path: VDB hits → supporting L3 schemas via graph DERIVED_FROM edges."""
 import asyncio
 import logging
 
@@ -7,16 +7,16 @@ from dual_mem.types import Layer
 
 logger = logging.getLogger("dual_mem.retrieval.profile_evidence")
 
-_L6_LAYER = Layer.L6_SCHEMA.value
+_DERIVED_LAYER = Layer.L3_DERIVED.value
 
 
-async def reverse_lookup_l6(
+async def reverse_lookup_derived(
     graph_store,
     vdb_node_ids: list[str],
     *,
     limit: int = 50,
 ) -> list[dict]:
-    """Reverse-lookup L6 schemas that cite the given VDB node ids; rank by support count."""
+    """Reverse-lookup L3 schemas that cite the given VDB node ids; rank by support count."""
     if graph_store is None or not vdb_node_ids:
         return []
 
@@ -25,12 +25,12 @@ async def reverse_lookup_l6(
             graph_store.find_referencing_memories, vdb_node_ids, limit=limit
         )
     except Exception as exc:
-        logger.debug("[profile-evidence] reverse_lookup_l6 failed: %s", exc)
+        logger.debug("[profile-evidence] reverse_lookup_derived failed: %s", exc)
         return []
 
     grouped: dict[str, dict] = {}
     for row in rows or []:
-        if row.get("layer") != _L6_LAYER:
+        if row.get("layer") != _DERIVED_LAYER:
             continue
         nid = row.get("node_id")
         if not nid:
@@ -59,7 +59,7 @@ async def reverse_lookup_l6(
             {
                 "node_id": g["node_id"],
                 "content": g["content"],
-                "layer": _L6_LAYER,
+                "layer": _DERIVED_LAYER,
                 "score": support / max_support,
                 "source": "profile_reverse",
                 "confidence": g.get("confidence"),

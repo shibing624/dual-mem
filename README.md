@@ -24,9 +24,9 @@ JEV 判断 `ADD / DELETE / SKIP` 及 `OVERRIDE / MERGE / SUPPLEMENT / TEMPORAL /
 
 北京→上海→北京是对当前状态的更新；不会因为历史曾出现北京而跳过。相似度仅用于读侧检索，novelty 与 weak_candidate_score 不参与写入。所有 reconcile 保留原文与版本，通过 `is_latest` 区分当前表示。
 
-本分支为 SDK 破坏性设计迁移：`update()` 返回新版本 ID，`delete()` 归档；默认读取 latest。旧层元数据自动转换为四层，旧控制键兼容忽略。使用前配置 `jev_api_key`、`llm_api_key`、`embed_api_key`，或注入三个 provider。
+本分支为 SDK 破坏性设计迁移：`update()` 返回新版本 ID，`delete()` 归档；默认读取 latest。旧层名、旧存储自动迁移及旧控制键兼容已删除；配置只接受规范平铺键。使用前配置 `jev_api_key`、`llm_api_key`、`embed_api_key`，或注入三个 provider。
 
-[完整设计与迁移](docs/jev-memory-design.md) · [可交互流程页](docs/design/jev-memory-flow.html) · [层定义](docs/memory_layers.md)
+[完整设计与迁移](docs/jev-memory-design.md) · `docs/design/jev-memory-flow.html`（本地流程页，不提交） · [层定义](docs/memory_layers.md)
 
 ## 为什么选 dual-mem
 

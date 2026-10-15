@@ -68,7 +68,7 @@ async def test_reconcile_excludes_given_node_ids(tmp_storage, fake_embed):
     for nid in ("orig", "existing"):
         n = MemoryNode(
             content="用户喜欢喝美式咖啡",
-            layer=Layer.L2_FACT,
+            layer=Layer.L1_FACT,
             app_id="app",
             user_id="u",
             status=MemoryStatus.ACTIVE,
@@ -136,7 +136,7 @@ async def test_fast_write_embeds_in_single_batch(tmp_storage):
     await client.add(content="自我介绍若干", app_id="app", user_id="u")
 
     # The three extracted L2/L4 nodes are embedded via a single batch call rather than
-    # one embed_queued per node. (The L1_RAW node still uses embed_queued — that is a
+    # one embed_queued per node. (The L0_RAW node still uses embed_queued — that is a
     # single writer-level call and is expected, so we only assert fast-write didn't add
     # a per-fact queued call for each of the 3 extracted nodes.)
     assert embed.batch_calls >= 1

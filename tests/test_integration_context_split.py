@@ -1,4 +1,5 @@
 """Query-independent profile_block, prefetch facts-only, search tool limit."""
+
 import asyncio
 
 from dual_mem import MemoryClient
@@ -19,7 +20,9 @@ from conftest import FakeLLMClient
 
 def test_format_profile_block_is_stable_across_item_order():
     a = MemoryItem(memory_id="p1", content="用户叫张三", category="profile", score=0.1)
-    b = MemoryItem(memory_id="p0", content="用户住在上海", category="profile", score=0.9)
+    b = MemoryItem(
+        memory_id="p0", content="用户住在上海", category="profile", score=0.9
+    )
     first = format_profile_block([a, b])
     second = format_profile_block([b, a])
     assert first == second
@@ -146,7 +149,10 @@ def test_memory_search_returns_limit_reached_after_three_calls():
     class Backend:
         async def search(self, **kwargs):
             item = MemoryItem(
-                memory_id="m1", content="hit", category="fact", score=0.9,
+                memory_id="m1",
+                content="hit",
+                category="fact",
+                score=0.9,
             )
             return SearchResult(
                 success=True,
@@ -186,7 +192,9 @@ def test_rendered_memory_context_total_chars():
     assert ctx.total_chars == 5
 
 
-async def test_load_profile_block_includes_stable_topic_catalog(tmp_storage, fake_embed):
+async def test_load_profile_block_includes_stable_topic_catalog(
+    tmp_storage, fake_embed
+):
     client = MemoryClient(
         settings=Settings(mode="system1", storage_dir=tmp_storage),
         embed=fake_embed,
@@ -194,7 +202,7 @@ async def test_load_profile_block_includes_stable_topic_catalog(tmp_storage, fak
     )
     profile = MemoryNode(
         content="姓名: 张三",
-        layer=Layer.L0_BASIC_INFO,
+        layer=Layer.L2_PROFILE,
         app_id=client.settings.default_app_id,
         user_id="u",
         status=MemoryStatus.ACTIVE,
@@ -202,7 +210,7 @@ async def test_load_profile_block_includes_stable_topic_catalog(tmp_storage, fak
     profile.embedding = fake_embed.embed_sync(profile.content)
     fact = MemoryNode(
         content="用户在 A 公司做支付",
-        layer=Layer.L2_FACT,
+        layer=Layer.L1_FACT,
         app_id=client.settings.default_app_id,
         user_id="u",
         status=MemoryStatus.ACTIVE,
@@ -226,7 +234,10 @@ def test_conversation_search_tool_is_registered_and_limited():
     class Backend:
         async def search(self, **kwargs):
             item = MemoryItem(
-                memory_id="m1", content="hit", category="fact", score=0.9,
+                memory_id="m1",
+                content="hit",
+                category="fact",
+                score=0.9,
             )
             return SearchResult(
                 success=True,
@@ -237,7 +248,10 @@ def test_conversation_search_tool_is_registered_and_limited():
 
         async def search_conversation(self, **kwargs):
             item = MemoryItem(
-                memory_id="l1", content="原话：我爱咖啡", category="raw", score=0.8,
+                memory_id="l1",
+                content="原话：我爱咖啡",
+                category="raw",
+                score=0.8,
             )
             return SearchResult(
                 success=True,
@@ -254,7 +268,10 @@ def test_conversation_search_tool_is_registered_and_limited():
     assert out["status"] == "success"
     assert out["memories"][0]["content"] == "原话：我爱咖啡"
     for _ in range(2):
-        assert provider._dispatch_tool("memory_search", {"query": "x"})["status"] == "success"
+        assert (
+            provider._dispatch_tool("memory_search", {"query": "x"})["status"]
+            == "success"
+        )
     limited = provider._dispatch_tool("conversation_search", {"query": "x"})
     assert limited["status"] == "limit_reached"
 
@@ -267,7 +284,7 @@ async def test_load_profile_block_is_query_independent(tmp_storage, fake_embed):
     )
     node = MemoryNode(
         content="姓名: 张三",
-        layer=Layer.L0_BASIC_INFO,
+        layer=Layer.L2_PROFILE,
         app_id=client.settings.default_app_id,
         user_id="u",
         status=MemoryStatus.ACTIVE,

@@ -88,7 +88,7 @@ def build_mcp(
             include_derived=include_derived,
         )
 
-    @mcp.tool(description="检索 L1 原文（含提取后 SHADOW），用于核对原话/时间/来源。")
+    @mcp.tool(description="检索 L0 原文及保留的历史，用于核对原话/时间/来源。")
     async def conversation_search(
         query: str,
         user_id: str,
@@ -114,8 +114,7 @@ def build_mcp(
         limit: int = 100,
     ) -> list[dict]:
         return await ops.memory_list(
-            user_id=user_id,
-            app_id=app_id, agent_id=agent_id, limit=limit
+            user_id=user_id, app_id=app_id, agent_id=agent_id, limit=limit
         )
 
     @mcp.tool(description="按 memory_id 获取单条；不存在返回 null。")

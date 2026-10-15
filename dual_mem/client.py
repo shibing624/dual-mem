@@ -105,7 +105,7 @@ class MemoryClient:
         if settings is None:
             settings = Settings(**overrides)
         elif overrides:
-            settings = settings.model_copy(update=overrides)
+            settings = Settings.model_validate({**settings.model_dump(), **overrides})
         self.settings = settings
         self.mode = mode or settings.mode
 
@@ -140,7 +140,7 @@ class MemoryClient:
         llm=None,
         jev=None,
     ) -> MemoryClient:
-        """Create a client from a mem0/Hy-style config dict (see ``Settings.from_dict``).
+        """Create a client from a canonical flat config dict (see ``Settings.from_dict``).
 
         Usage::
 
@@ -244,7 +244,6 @@ class MemoryClient:
         )
         extractor = CodingMemoryExtractor(
             llm=self.factory.llm,
-            tool_result_max_bytes=self.settings.coding_tool_result_max_bytes,
         )
         self._coding_writer = CodingWriter(
             store=store,
@@ -560,7 +559,7 @@ class MemoryClient:
         created_after: int | None = None,
         request_id: str | None = None,
         debug: bool = False,
-        include_l6_fusion: bool = True,
+        include_derived_fusion: bool = True,
     ) -> SearchResult:
         """Semantic search; returns profile / proactive / normal groups.
 
@@ -575,16 +574,16 @@ class MemoryClient:
             agent_ids: 智能体隔离域（多 agent 共享同一 user 时用）/
                 agent scope (when several agents share one user).
             session_ids: 限定在某些会话内检索 / restrict recall to specific sessions.
-            limit: normal 路（L2/L3/L4）返回上限 /
-                cap on the normal route (L2/L3/L4 memories).
+            limit: normal 路（L1 facts）返回上限 /
+                cap on the normal route (L1 facts memories).
             min_score: normal 路最低融合分，低于此分丢弃 / min fused score for the normal route.
-            profile_limit: profile 路（L0/L4/L6 画像类）上限；省略时 System1
+            profile_limit: profile 路（L2/L3 画像类）上限；省略时 System1
                 关闭、dual 不限，显式 ``-1`` = 不限 / cap on the profile route;
                 defaults to disabled for System1 and unlimited for dual, explicit ``-1`` = unlimited.
             profile_min_score: profile 路最低分 / min score for the profile route.
-            intention_limit: proactive 路（L7 意图）返回条数，``0`` = 关闭。意图是“用户接下来
+            intention_limit: proactive 路（L1/L3 意图）返回条数，``0`` = 关闭。意图是“用户接下来
                 想做什么”的主动提醒，仅在需要主动推荐时才开；事实问答场景保持 0，以免意图噪声
-                挤占事实召回。 / proactive route (L7 intentions) size, ``0`` = OFF. Intentions
+                挤占事实召回。 / proactive route (L1/L3 intentions) size, ``0`` = OFF. Intentions
                 are forward-looking "what the user plans to do" nudges — only enable for
                 proactive recommendation; keep 0 for factual QA so intention noise does not
                 crowd out facts.
@@ -629,7 +628,7 @@ class MemoryClient:
             profile_min_score=profile_min_score,
             intention_limit=intention_limit,
             include_derived=resolved_include_derived,
-            include_l6_fusion=include_l6_fusion,
+            include_derived_fusion=include_derived_fusion,
             created_after=created_after,
             request_id=request_id,
             collect_trace=debug,

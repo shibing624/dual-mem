@@ -87,17 +87,17 @@ class CodingMemoryStore:
                 r[1]
                 for r in self._conn.execute("PRAGMA table_info(coding_memory_meta)")
             }
-            for name, definition in {
-                "is_latest": "INTEGER NOT NULL DEFAULT 1",
-                "supersedes": "TEXT NOT NULL DEFAULT '[]'",
-                "superseded_by": "TEXT NOT NULL DEFAULT '[]'",
-                "source_ids": "TEXT NOT NULL DEFAULT '[]'",
-                "published": "INTEGER NOT NULL DEFAULT 1",
-            }.items():
-                if name not in columns:
-                    self._conn.execute(
-                        f"ALTER TABLE coding_memory_meta ADD COLUMN {name} {definition}"
-                    )
+            required = {
+                "is_latest",
+                "supersedes",
+                "superseded_by",
+                "source_ids",
+                "published",
+            }
+            if not required <= columns:
+                raise CodingDecisionError(
+                    "unsupported coding schema; use a new storage directory"
+                )
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_coding_user ON coding_memory_meta (app_id,user_id,agent_id)"
             )
@@ -111,10 +111,10 @@ class CodingMemoryStore:
                 workspace_id TEXT, branch TEXT, indexed INTEGER NOT NULL DEFAULT 0
             )"""
             )
-            self._repair_history()
+            self._validate_history()
 
-    def _repair_history(self) -> None:
-        """Validate legacy links first, then repair only SQL retirement metadata."""
+    def _validate_history(self) -> None:
+        """Validate persisted history without rewriting links or visibility."""
         rows = self._conn.execute(
             "SELECT * FROM coding_memory_meta WHERE published=1"
         ).fetchall()
@@ -143,24 +143,12 @@ class CodingMemoryStore:
                     ready.append(child)
         if visited != len(memories):
             raise CodingDecisionError("cyclic coding history")
-        changed_scopes = set()
         for mid, mem in memories.items():
             links = list(dict.fromkeys(reverse[mid]))
-            if set(mem.superseded_by) - set(links):
-                raise CodingDecisionError("dangling coding reverse history link")
-            latest = False if links else mem.is_latest
-            if mem.superseded_by != links or mem.is_latest != latest:
-                self._conn.execute(
-                    "UPDATE coding_memory_meta SET superseded_by=?,is_latest=? WHERE memory_id=?",
-                    (json.dumps(links), int(latest), mid),
+            if set(mem.superseded_by) != set(links) or (links and mem.is_latest):
+                raise CodingDecisionError(
+                    "inconsistent coding reverse history or visibility"
                 )
-                changed_scopes.add(coding_scope(mem))
-        for scope in changed_scopes:
-            self._conn.execute(
-                "INSERT INTO coding_epochs (scope,epoch) VALUES (?,1) "
-                "ON CONFLICT(scope) DO UPDATE SET epoch=epoch+1",
-                (self._scope_key(scope),),
-            )
 
     @staticmethod
     def _vdb_app_id(app_id: str) -> str:

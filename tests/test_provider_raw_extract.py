@@ -68,7 +68,7 @@ async def test_first_turn_is_searchable_as_l1(tmp_storage, fake_embed):
             {"$and": [{"app_id": client.settings.default_app_id}, {"user_id": "u_p"}]},
             limit=20,
         )
-        if n.layer is Layer.L2_FACT
+        if n.layer is Layer.L1_FACT
     ]
     assert facts == []
     await client.aclose()
@@ -105,7 +105,7 @@ async def test_window_flush_extracts_and_shadows_turn_l1(tmp_storage, fake_embed
             },
             limit=20,
         )
-        if n.layer is Layer.L2_FACT
+        if n.layer is Layer.L1_FACT
     ]
     assert facts
     l1s = [
@@ -114,7 +114,7 @@ async def test_window_flush_extracts_and_shadows_turn_l1(tmp_storage, fake_embed
             {"$and": [{"app_id": client.settings.default_app_id}, {"user_id": "u_p"}]},
             limit=20,
         )
-        if n.layer is Layer.L1_RAW
+        if n.layer is Layer.L0_RAW
     ]
     assert l1s
     assert all(n.status is MemoryStatus.ACTIVE for n in l1s)
@@ -159,7 +159,7 @@ async def test_idle_flush_extracts(tmp_storage, fake_embed):
             },
             limit=20,
         )
-        if n.layer is Layer.L2_FACT
+        if n.layer is Layer.L1_FACT
     ]
     assert facts
     await client.aclose()
@@ -196,7 +196,7 @@ async def test_session_end_flushes_partial_window(tmp_storage, fake_embed):
             },
             limit=20,
         )
-        if n.layer is Layer.L2_FACT
+        if n.layer is Layer.L1_FACT
     ]
     assert facts
     await client.aclose()

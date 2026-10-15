@@ -318,6 +318,13 @@ class LLMClient:
         if self.usage_callback is None:
             return
         prompt_tokens, completion_tokens = tokens_from_usage(resp)
+        details = getattr(
+            getattr(resp, "usage", None), "completion_tokens_details", None
+        )
+        reasoning_tokens = getattr(details, "reasoning_tokens", None)
+        if not isinstance(reasoning_tokens, int):
+            reasoning_tokens = None
+        reasoning = getattr(resp.choices[0].message, "reasoning_content", None)
         self.usage_callback(
             UsageEvent(
                 kind=kind,
@@ -325,6 +332,8 @@ class LLMClient:
                 latency_ms=elapsed_ms,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                reasoning_tokens=reasoning_tokens,
+                reasoning_chars=len(reasoning) if isinstance(reasoning, str) else None,
             )
         )
 

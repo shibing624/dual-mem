@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""L7 intention recall from VDB (proactive route)."""
+"""L1/L3 intention recall from VDB (proactive route)."""
 import asyncio
 import logging
 
@@ -18,7 +18,7 @@ async def recall_intentions(
     agent_ids: list[str] | None = None,
     limit: int = 10,
 ) -> list[dict]:
-    """Recall ACTIVE L7_INTENTION nodes from the vector store."""
+    """Recall ACTIVE L1_FACT nodes from the vector store."""
     if limit <= 0:
         return []
     where = build_filter(

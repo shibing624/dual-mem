@@ -53,7 +53,7 @@ Agent / Cursor  ──MCP──▶  MCP Server（受 Skill 指导）  ──▶ 
 
 层定义见 [memory_layers.md](memory_layers.md)，调用契约与迁移见
 [jev-memory-design.md](jev-memory-design.md)，可交互流程见
-[jev-memory-flow.html](design/jev-memory-flow.html)。
+`docs/design/jev-memory-flow.html`（本地设计文件，Git 忽略）。
 
 | 层 | 含义 | 产生方 |
 | --- | --- | --- |

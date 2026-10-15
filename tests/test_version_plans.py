@@ -114,26 +114,12 @@ def test_link_failure_recovers_before_next_read_with_exact_final_audit(
 def test_direct_import_and_metadata_mutation_invalidate_material_snapshot(store):
     store.upsert([node("a")])
     epoch = store.scope_epoch(("app", "u", ""))
-    store.update_status("a", MemoryStatus.SHADOW)
+    assert apply(store, [], {"a": 0}, archives=["a"])
     assert store.get("a").revision == 1
     assert not apply(store, [node("b")], epoch=epoch)
     assert not apply(store, [node("b", supersedes=["a"])], {"a": 1})
     with pytest.raises(ValueError, match="immutable"):
         store.upsert([replace(node("a"), content="changed")])
-
-
-def test_four_layer_migration_repairs_keep_active_ancestors(store):
-    a, b = node("a", superseded_by=["b"]), node("b", supersedes=["a"])
-    store.upsert([a, b])
-    for n in (a, b):
-        meta = n.to_metadata()
-        meta["layer"] = "L2_FACT"
-        meta["layer_schema_version"] = 2
-        store.collection.update(ids=[n.node_id], metadatas=[meta])
-    store._migrate_layers()
-    assert not store.get("a").is_latest and store.get("b").is_latest
-    assert store.get("a").status == MemoryStatus.ACTIVE
-    assert store.get("a").layer == Layer.L1_FACT
 
 
 def test_double_consumption_and_forward_dependency_rejected_before_append(store):
@@ -185,19 +171,6 @@ def test_stale_import_replay_cannot_resurrect_version_head(store):
     assert store.scope_epoch(("app", "u", "")) == epoch
 
 
-def test_legacy_one_way_chain_is_repaired_before_migration_certification(store):
-    a, b = node("a"), node("b", supersedes=["a"])
-    store.upsert([a, b])
-    for n in (a, b):
-        meta = n.to_metadata()
-        meta["layer_schema_version"] = 3
-        store.collection.update(ids=[n.node_id], metadatas=[meta])
-    store._migrate_layers()
-    assert store.get("a").superseded_by == ["b"]
-    assert not store.get("a").is_latest and store.get("b").is_latest
-    assert store.get("a").to_metadata()["layer_schema_version"] == 4
-
-
 def test_large_retirement_chunks_and_recovers_partial_patch_failure(store, monkeypatch):
     store.upsert([node("a")])
     store.upsert(
@@ -230,3 +203,98 @@ def test_large_retirement_chunks_and_recovers_partial_patch_failure(store, monke
         store._journal.execute("SELECT count(*) FROM plans WHERE done=0").fetchone()[0]
         == 0
     )
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"layer_schema_version": 3},
+        {"layer": "L2_FACT"},
+        {"status": "SHADOW"},
+    ],
+)
+def test_unsupported_metadata_is_rejected_without_rewriting_history(store, patch):
+    a = node("a")
+    store.upsert([a])
+    meta = a.to_metadata()
+    meta.update(patch)
+    store.collection.update(ids=["a"], metadatas=[meta])
+    with pytest.raises(ValueError, match="unsupported memory schema"):
+        store._validate_schema()
+    row = store.collection.get(ids=["a"], include=["metadatas", "documents"])
+    assert row["metadatas"][0] == meta
+    assert row["documents"] == ["a"]
+
+
+@pytest.mark.parametrize("old_location", ["stored", "pending"])
+def test_initialization_rejects_old_schema_before_any_recovery(
+    store, tmp_storage, old_location
+):
+    import json
+
+    a, b = node("a"), node("b", supersedes=["a"])
+    store.upsert([a])
+    stored_meta = a.to_metadata()
+    pending_meta = b.to_metadata()
+    if old_location == "stored":
+        stored_meta.update(layer="L2_FACT", layer_schema_version=3)
+        store.collection.update(ids=["a"], metadatas=[stored_meta])
+    else:
+        pending_meta["layer_schema_version"] = 3
+    patch = a.to_metadata()
+    patch.update(is_latest=False, superseded_by="b", revision=1)
+    payload = {
+        "nodes": [
+            {"id": "b", "content": "b", "embedding": b.embedding, "meta": pending_meta}
+        ],
+        "patches": {"a": patch},
+        "audit": [
+            {
+                "event": "ADD",
+                "node_id": "b",
+                "user_id": "u",
+                "old": None,
+                "new": pending_meta,
+            }
+        ],
+    }
+    store._journal.execute(
+        "INSERT INTO plans(id,scope,epoch,payload) VALUES (?,?,?,?)",
+        ("pending", json.dumps(("app", "u", "")), 0, json.dumps(payload)),
+    )
+    store._journal.commit()
+    with pytest.raises(ValueError, match="unsupported memory schema"):
+        ChromaVectorStore(tmp_storage, history=store._history)
+    assert store.collection.get(ids=["b"])["ids"] == []
+    assert store.collection.get(ids=["a"], include=["metadatas"])["metadatas"] == [
+        stored_meta
+    ]
+    assert (
+        store._journal.execute("SELECT done FROM plans WHERE id='pending'").fetchone()[
+            0
+        ]
+        == 0
+    )
+    assert store._history.list_for_node("b") == []
+
+
+def test_current_schema_partial_plan_recovers_on_initialization(
+    store, tmp_storage, monkeypatch
+):
+    store.upsert([node("a")])
+    with monkeypatch.context() as m:
+        m.setattr(
+            store.collection,
+            "update",
+            lambda **kw: (_ for _ in ()).throw(OSError("crash")),
+        )
+        with pytest.raises(OSError):
+            apply(store, [node("b", supersedes=["a"])], {"a": 0})
+    reopened = ChromaVectorStore(tmp_storage, history=store._history)
+    try:
+        assert not reopened.get("a").is_latest
+        assert reopened.get("b").is_latest
+        assert reopened.get("a").superseded_by == ["b"]
+        assert len(store._history.list_for_node("b")) == 1
+    finally:
+        reopened.close()

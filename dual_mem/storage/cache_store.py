@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: SQLite-backed cache store holding profile caches, System2/intention/reconcile
-task queues, pipeline logs and memory-operation audit records.
+@description: SQLite-backed cache store holding profile caches, System2
+task queue, pipeline logs and memory-operation audit records.
 """
 import json
 import sqlite3
@@ -25,22 +25,6 @@ CREATE TABLE IF NOT EXISTS s2_queue (
     status    TEXT NOT NULL DEFAULT 'pending',
     ts        REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS reconcile_queue (
-    id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id  TEXT NOT NULL,
-    app_id   TEXT NOT NULL,
-    agent_id TEXT NOT NULL DEFAULT '',
-    node_ids TEXT NOT NULL,
-    status   TEXT NOT NULL DEFAULT 'pending',
-    ts       REAL NOT NULL
-);
-CREATE TABLE IF NOT EXISTS intention_queue (
-    id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT NOT NULL,
-    app_id  TEXT NOT NULL,
-    status  TEXT NOT NULL DEFAULT 'pending',
-    ts      REAL NOT NULL
-);
 CREATE TABLE IF NOT EXISTS pipeline_logs (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     request_id TEXT NOT NULL,
@@ -55,18 +39,11 @@ CREATE TABLE IF NOT EXISTS memory_operations (
     user_id TEXT NOT NULL,
     ts      REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS content_hash_cache (
-    iso_key      TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    outcome_json TEXT NOT NULL,
-    ts           REAL NOT NULL,
-    PRIMARY KEY (iso_key, content_hash)
-);
 """
 
 
 class CacheStore:
-    """SQLite store for caches, explicit task queues, pipeline logs and audit records."""
+    """SQLite store for caches, explicit task queue, pipeline logs and audit records."""
 
     def __init__(self, storage_dir: str):
         self._lock = threading.RLock()
@@ -132,106 +109,13 @@ class CacheStore:
             )
             self.conn.commit()
 
-    def mark_s2_scope_done(self, *, app_id: str, user_id: str, agent_id: str) -> None:
-        """Acknowledge a cognition scope after its explicit digest succeeds."""
-        with self._lock:
-            self.conn.execute(
-                "UPDATE s2_queue SET status = 'done' WHERE status = 'pending' "
-                "AND app_id = ? AND user_id = ? AND agent_id = ?",
-                (app_id, user_id, agent_id),
-            )
-            self.conn.commit()
-
-    # ---- Reconcile queue (asynchronous evolution chain merging) ---------------------
-
-    def enqueue_reconcile_task(
-        self, *, app_id: str, user_id: str, agent_id: str, node_ids: list[str]
-    ) -> None:
-        """Append a reconcile task carrying the freshly written node ids that need merging."""
-        if not node_ids:
-            return
-        with self._lock:
-            self.conn.execute(
-                "INSERT INTO reconcile_queue (app_id, user_id, agent_id, node_ids, status, ts) "
-                "VALUES (?, ?, ?, ?, 'pending', ?)",
-                (
-                    app_id,
-                    user_id,
-                    agent_id,
-                    json.dumps(node_ids, ensure_ascii=False),
-                    time.time(),
-                ),
-            )
-            self.conn.commit()
-
-    def list_pending_reconcile_scopes(self) -> list[dict]:
-        """Distinct (app_id, user_id, agent_id) with pending reconcile tasks."""
-        with self._lock:
-            rows = self.conn.execute(
-                "SELECT DISTINCT app_id, user_id, agent_id "
-                "FROM reconcile_queue WHERE status = 'pending'"
-            ).fetchall()
-            return [dict(row) for row in rows]
-
-    def list_pending_reconcile_tasks(
-        self,
-        *,
-        app_id: str | None = None,
-        user_id: str | None = None,
-        agent_id: str | None = None,
-    ) -> list[dict]:
-        """Return pending reconcile tasks without acknowledging them."""
-        with self._lock:
-            clauses = ["status = 'pending'"]
-            params: list = []
-            if app_id is not None:
-                clauses.append("app_id = ?")
-                params.append(app_id)
-            if user_id is not None:
-                clauses.append("user_id = ?")
-                params.append(user_id)
-            if agent_id is not None:
-                clauses.append("agent_id = ?")
-                params.append(agent_id)
-            sql = (
-                f"SELECT * FROM reconcile_queue WHERE {' AND '.join(clauses)} "
-                "ORDER BY id ASC"
-            )
-            rows = self.conn.execute(sql, params).fetchall()
-            tasks = [dict(row) for row in rows]
-            for task in tasks:
-                task["node_ids"] = (
-                    json.loads(task["node_ids"]) if task["node_ids"] else []
-                )
-            return tasks
-
-    def mark_reconcile_task_done(self, task_id: int) -> None:
-        """Acknowledge one reconcile task after it has completed successfully."""
-        with self._lock:
-            self.conn.execute(
-                "UPDATE reconcile_queue SET status = 'done' "
-                "WHERE id = ? AND status = 'pending'",
-                (task_id,),
-            )
-            self.conn.commit()
-
-    def reconcile_queue_size(self) -> int:
-        """Return how many reconcile tasks are still pending across all users."""
-        with self._lock:
-            row = self.conn.execute(
-                "SELECT COUNT(*) AS n FROM reconcile_queue WHERE status = 'pending'"
-            ).fetchone()
-            return int(row["n"]) if row else 0
-
     def purge_done_queues(self) -> int:
-        """Delete drained reconcile/s2 rows; return rows removed."""
+        """Delete drained System2 rows; return rows removed."""
         with self._lock:
-            cur = self.conn.execute("DELETE FROM reconcile_queue WHERE status = 'done'")
-            n_reconcile = cur.rowcount
             cur = self.conn.execute("DELETE FROM s2_queue WHERE status = 'done'")
             n_s2 = cur.rowcount
             self.conn.commit()
-            return n_reconcile + n_s2
+            return n_s2
 
     # ---- Pipeline logs --------------------------------------------------------------
 
@@ -269,38 +153,5 @@ class CacheStore:
             self.conn.execute(
                 "INSERT INTO memory_operations (op, node_id, user_id, ts) VALUES (?, ?, ?, ?)",
                 (op, node_id, user_id, time.time()),
-            )
-            self.conn.commit()
-
-    # ---- Content-hash write dedup ---------------------------------------------------
-
-    def get_content_hash_outcome(self, iso_key: str, content_hash: str) -> dict | None:
-        """Return cached WriterOutcome fields for (scope, content_hash), or None."""
-        with self._lock:
-            row = self.conn.execute(
-                "SELECT outcome_json FROM content_hash_cache WHERE iso_key = ? AND content_hash = ?",
-                (iso_key, content_hash),
-            ).fetchone()
-            if not row:
-                return None
-            return json.loads(row["outcome_json"])
-
-    def set_content_hash_outcome(
-        self,
-        iso_key: str,
-        content_hash: str,
-        outcome: dict,
-    ) -> None:
-        """Persist write outcome for duplicate-content short-circuit."""
-        with self._lock:
-            self.conn.execute(
-                "INSERT OR REPLACE INTO content_hash_cache (iso_key, content_hash, outcome_json, ts) "
-                "VALUES (?, ?, ?, ?)",
-                (
-                    iso_key,
-                    content_hash,
-                    json.dumps(outcome, ensure_ascii=False),
-                    time.time(),
-                ),
             )
             self.conn.commit()

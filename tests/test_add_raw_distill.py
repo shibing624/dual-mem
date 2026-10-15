@@ -24,7 +24,7 @@ async def test_add_raw_does_not_call_extract(tmp_storage, fake_embed):
     assert result.extracted_count == 0
     raw = client.factory.vector.get(result.memory_id)
     assert raw is not None
-    assert raw.layer is Layer.L1_RAW
+    assert raw.layer is Layer.L0_RAW
     assert raw.status is MemoryStatus.ACTIVE
     assert not any(
         c["type"] == "chat_json"
@@ -70,7 +70,7 @@ async def test_distill_extracts_and_shadows_source_l1(tmp_storage, fake_embed):
         for n in client.factory.vector.get_many(
             {"$and": [{"app_id": "app"}, {"user_id": "u_d"}]}, limit=20
         )
-        if n.layer is Layer.L1_RAW
+        if n.layer is Layer.L0_RAW
     ]
     assert len(l1s) == 2
     facts = [
@@ -79,7 +79,7 @@ async def test_distill_extracts_and_shadows_source_l1(tmp_storage, fake_embed):
             {"$and": [{"app_id": "app"}, {"user_id": "u_d"}, {"status": "ACTIVE"}]},
             limit=20,
         )
-        if n.layer is Layer.L2_FACT
+        if n.layer is Layer.L1_FACT
     ]
     assert facts
     assert (facts[0].custom or {}).get("source_node_id") == first.memory_id
@@ -114,7 +114,7 @@ async def test_get_returns_shadowed_l1_source(tmp_storage, fake_embed):
             {"$and": [{"app_id": "app"}, {"user_id": "u_src"}, {"status": "ACTIVE"}]},
             limit=20,
         )
-        if n.layer is Layer.L2_FACT
+        if n.layer is Layer.L1_FACT
     ]
     item = await client.get(facts[0].node_id)
     assert item.source_node_id == written.memory_id
@@ -152,7 +152,7 @@ async def test_dual_distill_enqueues_s2_and_does_not_write_second_l1(
         for n in client.factory.vector.get_many(
             {"$and": [{"app_id": "app"}, {"user_id": "u_dual"}]}, limit=20
         )
-        if n.layer is Layer.L1_RAW
+        if n.layer is Layer.L0_RAW
     ]
     assert len(l1s) == 1
     assert l1s[0].status is MemoryStatus.ACTIVE

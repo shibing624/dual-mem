@@ -21,7 +21,7 @@ def test_build_filter_all_options():
         user_id="u",
         agent_ids=["ag1"],
         session_ids=["s1", "s2"],
-        layers=[Layer.L2_FACT],
+        layers=[Layer.L1_FACT],
         statuses=[MemoryStatus.ACTIVE],
     )
     assert f["app_id"] == {"$in": ["a1"]}

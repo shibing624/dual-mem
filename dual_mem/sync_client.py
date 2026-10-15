@@ -78,7 +78,7 @@ class SyncMemoryClient:
         llm=None,
         jev=None,
     ) -> SyncMemoryClient:
-        """Blocking client from a mem0-style config dict (see ``MemoryClient.from_config``)."""
+        """Blocking client from a canonical flat config dict (see ``MemoryClient.from_config``)."""
         settings = Settings.from_dict(config_dict)
         if mode is not None:
             settings = settings.model_copy(update={"mode": mode})
@@ -215,7 +215,7 @@ class SyncMemoryClient:
         created_after: int | None = None,
         request_id: str | None = None,
         debug: bool = False,
-        include_l6_fusion: bool = True,
+        include_derived_fusion: bool = True,
     ) -> SearchResult:
         return self._run(
             self._client.search(
@@ -233,7 +233,7 @@ class SyncMemoryClient:
                 created_after=created_after,
                 request_id=request_id,
                 debug=debug,
-                include_l6_fusion=include_l6_fusion,
+                include_derived_fusion=include_derived_fusion,
             )
         )
 

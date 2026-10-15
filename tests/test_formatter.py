@@ -55,7 +55,10 @@ def test_format_include_superseded():
                 "content": "Currently obsessed with Sweet Baby Ray's",
                 "category": "fact",
                 "evolution_chain": [
-                    {"node_id": "a", "content": "Currently obsessed with Sweet Baby Ray's"},
+                    {
+                        "node_id": "a",
+                        "content": "Currently obsessed with Sweet Baby Ray's",
+                    },
                     {"node_id": "b", "content": "Likes Kansas City Masterpiece"},
                 ],
             },
@@ -79,8 +82,8 @@ def test_memory_item_to_search_result_omits_evolution():
         score=0.9,
         memory_at=1_700_000_000,
         evolution_chain=[
-            EvolutionItem(node_id="a", content="600 followers", layer="L2_FACT"),
-            EvolutionItem(node_id="b", content="500 followers", layer="L2_FACT"),
+            EvolutionItem(node_id="a", content="600 followers", layer="L1_FACT"),
+            EvolutionItem(node_id="b", content="500 followers", layer="L1_FACT"),
         ],
     )
     hit = item.to_search_result()
@@ -188,8 +191,16 @@ def test_format_override_omits_duration_without_merged_timestamps():
                 "category": "fact",
                 "memory_at": 1_700_000_000,
                 "evolution_chain": [
-                    {"node_id": "a", "content": "用户主力语言是 Python", "memory_at": 1_700_000_000},
-                    {"node_id": "b", "content": "用户主力语言是 Java", "memory_at": 1_600_000_000},
+                    {
+                        "node_id": "a",
+                        "content": "用户主力语言是 Python",
+                        "memory_at": 1_700_000_000,
+                    },
+                    {
+                        "node_id": "b",
+                        "content": "用户主力语言是 Java",
+                        "memory_at": 1_600_000_000,
+                    },
                 ],
             }
         ],
@@ -239,7 +250,11 @@ def test_format_search_hit_line_with_chain():
         "memory_at": 1_700_000_000,
         "evolution_chain": [
             {"node_id": "a", "content": "Now likes tea", "memory_at": 1_700_000_000},
-            {"node_id": "b", "content": "Used to like coffee", "memory_at": 1_600_000_000},
+            {
+                "node_id": "b",
+                "content": "Used to like coffee",
+                "memory_at": 1_600_000_000,
+            },
         ],
     }
     text = format_search_hit_line(hit, include_evolution=True)

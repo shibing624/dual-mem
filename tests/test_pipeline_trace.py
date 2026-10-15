@@ -52,7 +52,7 @@ async def test_search_logs_hybrid_stage(tmp_storage, fake_embed):
     # Seed one node so the read path actually has something to recall.
     node = MemoryNode(
         content="用户喜欢喝咖啡",
-        layer=Layer.L4_IDENTITY,
+        layer=Layer.L2_PROFILE,
         app_id="app",
         user_id="u",
         status=MemoryStatus.ACTIVE,

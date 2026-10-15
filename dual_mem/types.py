@@ -16,35 +16,13 @@ _LIST_SEP = "\x1f"
 class Layer(str, Enum):
     """Four processing layers; content kinds do not create additional layers.
 
-    Legacy member aliases are read/API compatibility only. Iteration exposes
-    exactly four layers and all new metadata uses the new canonical values.
+    Stored values use only the four canonical layer names.
     """
 
     L0_RAW = "L0_RAW"
     L1_FACT = "L1_FACT"
     L2_PROFILE = "L2_PROFILE"
     L3_DERIVED = "L3_DERIVED"
-
-    L1_RAW = L0_RAW
-    L2_FACT = L1_FACT
-    L0_BASIC_INFO = L2_PROFILE
-    L4_IDENTITY = L2_PROFILE
-    L3_SUMMARY = L3_DERIVED
-    L6_SCHEMA = L3_DERIVED
-    L7_INTENTION = L1_FACT
-
-    @classmethod
-    def _missing_(cls, value: object) -> "Layer | None":
-        legacy = {
-            "L1_RAW": cls.L0_RAW,
-            "L2_FACT": cls.L1_FACT,
-            "L0_BASIC_INFO": cls.L2_PROFILE,
-            "L4_IDENTITY": cls.L2_PROFILE,
-            "L3_SUMMARY": cls.L3_DERIVED,
-            "L6_SCHEMA": cls.L3_DERIVED,
-            "L7_INTENTION": cls.L1_FACT,
-        }
-        return legacy.get(str(value))
 
 
 class Category(str, Enum):
@@ -58,15 +36,11 @@ class Category(str, Enum):
 
 class MemoryStatus(str, Enum):
     ACTIVE = "ACTIVE"
-    SHADOW = "SHADOW"
-    SUPERSEDED = "SUPERSEDED"
-    DELETED = "DELETED"
 
 
 class ReconcileOp(str, Enum):
     ADD = "ADD"
     SKIP = "SKIP"
-    SUPERSEDE = "SUPERSEDE"  # legacy import compatibility
     DELETE = "DELETE"
 
 
@@ -119,11 +93,7 @@ class MemoryNode:
     @property
     def category(self) -> Category:
         """Routing category derived from the node's layer."""
-        kind = (
-            self.kind
-            or (self.custom or {}).get("kind")
-            or (self.custom or {}).get("memory_type")
-        )
+        kind = self.kind or (self.custom or {}).get("kind")
         if kind in Category._value2member_map_:
             return Category(kind)
         return LAYER_TO_CATEGORY[self.layer]
@@ -162,6 +132,9 @@ class MemoryNode:
     ) -> "MemoryNode":
         """Reconstruct a MemoryNode from stored content/metadata (inverse of to_metadata)."""
 
+        if meta.get("layer_schema_version") != 4:
+            raise ValueError("unsupported memory schema; use a new storage directory")
+
         def _split(value: str) -> list[str]:
             return value.split(_LIST_SEP) if value else []
 
@@ -171,18 +144,10 @@ class MemoryNode:
         return cls(
             content=content,
             layer=Layer(meta["layer"]),
-            kind=meta.get("kind")
-            or {
-                "L7_INTENTION": "intention",
-                "L3_SUMMARY": "summary",
-                "L6_SCHEMA": "schema",
-                "L0_BASIC_INFO": "profile",
-            }.get(meta["layer"], ""),
-            revision=int(meta.get("revision", 0)),
-            valid_from=None if meta.get("valid_from", -1) == -1 else meta["valid_from"],
-            valid_until=(
-                None if meta.get("valid_until", -1) == -1 else meta["valid_until"]
-            ),
+            kind=meta["kind"],
+            revision=int(meta["revision"]),
+            valid_from=None if meta["valid_from"] == -1 else meta["valid_from"],
+            valid_until=(None if meta["valid_until"] == -1 else meta["valid_until"]),
             app_id=meta["app_id"],
             user_id=meta["user_id"],
             agent_id=meta["agent_id"],
@@ -194,7 +159,7 @@ class MemoryNode:
             superseded_by=_split(meta["superseded_by"]),
             is_latest=meta["is_latest"],
             speculate=speculate if speculate != "" else None,
-            owner=meta.get("owner", ""),
+            owner=meta["owner"],
             memory_at=memory_at if memory_at != -1 else None,
             gmt_created=meta["gmt_created"],
             gmt_modified=gmt_modified if gmt_modified != -1 else None,

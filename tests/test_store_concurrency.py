@@ -23,7 +23,7 @@ async def test_chroma_parallel_query_under_lock(tmp_storage, fake_embed):
     )
     node = MemoryNode(
         content="parallel chroma query",
-        layer=Layer.L2_FACT,
+        layer=Layer.L1_FACT,
         app_id="app",
         user_id="u",
         status=MemoryStatus.ACTIVE,
@@ -46,8 +46,8 @@ async def test_chroma_parallel_query_under_lock(tmp_storage, fake_embed):
     assert all(c >= 1 for c in counts)
 
 
-async def test_mark_superseded_is_atomic_and_keeps_embedding(tmp_storage, fake_embed):
-    """mark_superseded flips is_latest/status, appends superseded_by, preserves the embedding."""
+async def test_version_plan_is_atomic_and_keeps_embedding(tmp_storage, fake_embed):
+    """Atomic plans append successors and preserve ancestors and embeddings."""
     factory = ComponentFactory(
         settings=Settings(mode="system1", storage_dir=tmp_storage),
         embed=fake_embed,
@@ -55,7 +55,7 @@ async def test_mark_superseded_is_atomic_and_keeps_embedding(tmp_storage, fake_e
     )
     old = MemoryNode(
         content="老事实",
-        layer=Layer.L2_FACT,
+        layer=Layer.L1_FACT,
         app_id="app",
         user_id="u",
         status=MemoryStatus.ACTIVE,
@@ -71,12 +71,20 @@ async def test_mark_superseded_is_atomic_and_keeps_embedding(tmp_storage, fake_e
         user_id="u",
         embedding=fake_embed.embed_sync("新事实"),
     )
-    factory.vector.upsert([successor])
+    successor.supersedes = [old.node_id]
 
-    ok = factory.vector.mark_superseded(old.node_id, superseded_by_id="new-1")
+    def commit():
+        return factory.vector.apply_version_plan(
+            nodes=[successor],
+            expected={old.node_id: 0},
+            archives=[],
+            scope=("app", "u", ""),
+        )
+
+    ok = commit()
     assert ok is True
     # Idempotent: appending the same superseder twice does not duplicate.
-    assert factory.vector.mark_superseded(old.node_id, superseded_by_id="new-1") is True
+    assert commit() is True
 
     reloaded = factory.vector.get(old.node_id)
     assert reloaded.is_latest is False
@@ -86,17 +94,13 @@ async def test_mark_superseded_is_atomic_and_keeps_embedding(tmp_storage, fake_e
     # embedding never rewritten (float32 round-trip, so compare approximately)
     assert reloaded.embedding == pytest.approx(old.embedding, rel=1e-4)
 
-    assert (
-        factory.vector.mark_superseded("does-not-exist", superseded_by_id="x") is False
-    )
-
 
 async def test_kuzu_parallel_query_under_lock(tmp_storage):
     graph = KuzuGraphStore(tmp_storage)
     graph.add_node(
         GraphNode(
             node_id="n1",
-            layer=Layer.L6_SCHEMA.value,
+            layer=Layer.L3_DERIVED.value,
             content="schema one",
             app_id="app",
             user_id="u",
@@ -107,7 +111,7 @@ async def test_kuzu_parallel_query_under_lock(tmp_storage):
     graph.add_node(
         GraphNode(
             node_id="n2",
-            layer=Layer.L7_INTENTION.value,
+            layer=Layer.L3_DERIVED.value,
             content="intention one",
             app_id="app",
             user_id="u",
@@ -119,7 +123,7 @@ async def test_kuzu_parallel_query_under_lock(tmp_storage):
     async def _schema() -> int:
         hits = await asyncio.to_thread(
             graph.query_by_embedding,
-            layer=Layer.L6_SCHEMA.value,
+            layer=Layer.L3_DERIVED.value,
             user_id="u",
             app_ids=["app"],
             embedding=[1.0, 0.0],
@@ -130,7 +134,7 @@ async def test_kuzu_parallel_query_under_lock(tmp_storage):
     async def _intention() -> int:
         hits = await asyncio.to_thread(
             graph.query_by_embedding,
-            layer=Layer.L7_INTENTION.value,
+            layer=Layer.L3_DERIVED.value,
             user_id="u",
             app_ids=["app"],
             embedding=[0.0, 1.0],
@@ -139,8 +143,8 @@ async def test_kuzu_parallel_query_under_lock(tmp_storage):
         return len(hits)
 
     schema_n, intention_n = await asyncio.gather(_schema(), _intention())
-    assert schema_n == 1
-    assert intention_n == 1
+    assert schema_n == 2
+    assert intention_n == 2
 
 
 async def test_cache_parallel_writes_under_lock(tmp_storage):
@@ -154,15 +158,14 @@ async def test_cache_parallel_writes_under_lock(tmp_storage):
             payload={"i": i},
         )
         await asyncio.to_thread(
-            cache.enqueue_reconcile_task,
+            cache.enqueue_s2_task,
             app_id="app",
             user_id="u",
             agent_id="ag",
-            node_ids=[f"node-{i}"],
         )
 
     await asyncio.gather(*[_touch(i) for i in range(16)])
-    assert cache.reconcile_queue_size() == 16
+    assert len(cache.list_pending_s2_scopes()) == 16
 
 
 async def test_history_parallel_append_under_lock(tmp_storage):

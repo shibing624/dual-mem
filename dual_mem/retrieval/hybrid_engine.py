@@ -5,8 +5,8 @@ Hybrid read engine (Hy-Memory parity, latency-optimized).
 Semantic recall + in-pool BM25 rerank + graph evidence fusion. The keyword signal is a
 re-rank over the already-recalled semantic pool (no full-collection BM25 scan), so an
 exact-term / rare-word / numeric match that semantic ranked low gets surfaced without a
-second store round-trip. profile = L0 (VDB) + L6 (graph forward/reverse RRF); L4 identity
-routes to normal; L7 to proactive when intention_limit > 0.
+second store round-trip. profile = L2 (VDB) + L3 (graph forward/reverse RRF); L2 identity
+routes to normal; intentions to proactive when intention_limit > 0.
 """
 import asyncio
 import logging
@@ -22,7 +22,7 @@ from dual_mem.retrieval.bm25 import (
 from dual_mem.retrieval.evolution import expand_evolution_chains
 from dual_mem.retrieval.hybrid_scoring import compute_evidence_boost, score_vdb_node
 from dual_mem.retrieval.intention_recall import recall_intentions
-from dual_mem.retrieval.profile_evidence import reverse_lookup_l6
+from dual_mem.retrieval.profile_evidence import reverse_lookup_derived
 from dual_mem.retrieval import rrf
 from dual_mem.sdk_models import EvolutionItem, MemoryItem, SearchMemories
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
@@ -33,7 +33,7 @@ logger = logging.getLogger("dual_mem.retrieval.hybrid")
 _PROFILE_LAYERS = [Layer.L2_PROFILE, Layer.L3_DERIVED]
 _VDB_PROFILE_LAYERS = [Layer.L2_PROFILE, Layer.L3_DERIVED]
 _VDB_RECALL_LAYERS = [Layer.L1_FACT, Layer.L2_PROFILE]
-# Note: L1_RAW excluded from VDB semantic recall (align hy_memory: raw fragments
+# Note: L0_RAW excluded from VDB semantic recall (align hy_memory: raw fragments
 #   are noisy and dilute top-k ranking; only extracted/curated layers are recalled).
 _PROFILE_RECALL_LIMIT = 10
 _PROFILE_LAYER_VALS = {layer.value for layer in _PROFILE_LAYERS}
@@ -47,11 +47,11 @@ def _layer_of(item: dict) -> str:
     return item.get("layer") or ""
 
 
-def _l6_to_item(graph_hit: dict) -> dict:
-    """Wrap a graph-only L6 hit as an item dict with a synthetic MemoryNode."""
+def _derived_to_item(graph_hit: dict) -> dict:
+    """Wrap a derived graph hit as an item dict with a synthetic MemoryNode."""
     node = MemoryNode(
         content=graph_hit.get("content", ""),
-        layer=Layer.L6_SCHEMA,
+        layer=Layer.L3_DERIVED,
         app_id="",
         user_id="",
         node_id=graph_hit["node_id"],
@@ -62,7 +62,7 @@ def _l6_to_item(graph_hit: dict) -> dict:
 
 def _item_to_memory(item: dict) -> MemoryItem:
     if item.get("node") is None:
-        item = _l6_to_item(item)
+        item = _derived_to_item(item)
     node = item["node"]
     chain = item.get("evolution_chain")
     evolution_chain = (
@@ -134,7 +134,7 @@ async def search_hybrid(
     intention_limit: int = 0,
     created_after: int | None = None,
     include_derived: bool = True,
-    include_l6_fusion: bool = True,
+    include_derived_fusion: bool = True,
 ) -> SearchMemories:
     """Run hybrid recall + fusion; return profile/proactive/normal groups."""
     vector = factory.vector
@@ -151,15 +151,12 @@ async def search_hybrid(
     final_limit = limit if limit > 0 else 10
     candidate_multiplier = max(1.0, float(settings.normal_candidate_multiplier))
     # v10: enlarge semantic recall to ~hy's combined sem+kw pool (45+60=105),
-    # compensating for ChromaDB's lack of native keyword index. L1_RAW excluded.
+    # compensating for ChromaDB's lack of native keyword index. L0_RAW excluded.
     vdb_sem_limit = max(int(math.ceil(final_limit * candidate_multiplier * 2.5)), 60)
     graph_limit = max(final_limit * 2, 20)
 
     use_derived = include_derived
-    # NOTE(dual_vs_hy): normal 路只召回 ACTIVE 事实 —— 被 reconcile/S2 shadow 的
-    # SUPERSEDED 旧版本不再注入 QA（否则旧记忆与新记忆同时出现，污染事实证据；
-    # 实测 badcase 里 62% 记忆带 superseded_by 链）。S2 深层证据改由
-    # fused_l6 / profile 路单独承载，不在 normal 事实路混入旧版本。
+    # Current facts/profiles serve normal recall; derived evidence uses profile fusion.
     recall_statuses = [MemoryStatus.ACTIVE]
 
     normal_where = build_filter(
@@ -212,7 +209,7 @@ async def search_hybrid(
             return []
         hits = await asyncio.to_thread(
             graph.query_by_embedding,
-            layer=Layer.L6_SCHEMA.value,
+            layer=Layer.L3_DERIVED.value,
             user_id=user_id,
             app_ids=app_ids,
             embedding=query_embedding,
@@ -343,10 +340,15 @@ async def search_hybrid(
         )
     vdb_scored.sort(key=lambda x: x["score"], reverse=True)
 
-    # Forward L6: batch the evidence-count lookup into a single graph round-trip instead of
+    # Forward derived: batch the evidence-count lookup into a single graph round-trip instead of
     # one evidence_of() call per schema (the previous serial loop dominated read latency).
-    forward_l6: list[dict] = []
-    if use_derived and include_l6_fusion and graph is not None and graph_schema_hits:
+    forward_derived: list[dict] = []
+    if (
+        use_derived
+        and include_derived_fusion
+        and graph is not None
+        and graph_schema_hits
+    ):
         schema_ids = [row["node_id"] for row in graph_schema_hits]
         try:
             ev_counts = await asyncio.to_thread(graph.evidence_counts, schema_ids)
@@ -357,33 +359,33 @@ async def search_hybrid(
             ev_count = ev_counts.get(row["node_id"], 0)
             ev_boost = compute_evidence_boost(ev_count, ev_saturate, ev_boost_max)
             internal_score = row["score"] * (1.0 + ev_boost)
-            forward_l6.append(
+            forward_derived.append(
                 {
                     "node_id": row["node_id"],
                     "node": None,
                     "content": row.get("content", ""),
                     "score": row["score"],
                     "source": "profile_forward",
-                    "layer": row.get("layer", Layer.L6_SCHEMA.value),
+                    "layer": row.get("layer", Layer.L3_DERIVED.value),
                     "confidence": row.get("confidence", row["score"]),
                     "_internal": internal_score,
                     "_evidence_count": ev_count,
                 }
             )
-        forward_l6.sort(key=lambda x: x["_internal"], reverse=True)
+        forward_derived.sort(key=lambda x: x["_internal"], reverse=True)
 
-    reverse_l6: list[dict] = []
-    if use_derived and include_l6_fusion and graph is not None and vdb_scored:
-        reverse_l6 = await reverse_lookup_l6(
+    reverse_derived: list[dict] = []
+    if use_derived and include_derived_fusion and graph is not None and vdb_scored:
+        reverse_derived = await reverse_lookup_derived(
             graph,
             [v["node_id"] for v in vdb_scored],
             limit=graph_limit,
         )
 
-    fused_l6: list[dict] = []
-    if forward_l6 or reverse_l6:
+    fused_derived: list[dict] = []
+    if forward_derived or reverse_derived:
         by_id: dict[str, dict] = {}
-        for item in forward_l6 + reverse_l6:
+        for item in forward_derived + reverse_derived:
             head = vector.get(item["node_id"])
             if (
                 head is None
@@ -397,20 +399,20 @@ async def search_hybrid(
             by_id.setdefault(item["node_id"], item)
         fused = rrf.rrf_fuse(
             {
-                "forward": [i for i in forward_l6 if i["node_id"] in by_id],
-                "reverse": [i for i in reverse_l6 if i["node_id"] in by_id],
+                "forward": [i for i in forward_derived if i["node_id"] in by_id],
+                "reverse": [i for i in reverse_derived if i["node_id"] in by_id],
             }
         )
         for f_item in fused:
             src = by_id.get(f_item["node_id"], {})
-            fused_l6.append(
+            fused_derived.append(
                 {
                     "node_id": f_item["node_id"],
                     "node": src.get("node"),
                     "content": src.get("content", ""),
-                    "layer": src.get("layer", Layer.L6_SCHEMA.value),
+                    "layer": src.get("layer", Layer.L3_DERIVED.value),
                     "score": float(f_item.get("rrf_score", 0.0)),
-                    "source": "profile_l6",
+                    "source": "profile_derived",
                     "confidence": src.get("confidence"),
                 }
             )
@@ -419,7 +421,7 @@ async def search_hybrid(
     meta_by_nid: dict[str, dict] = {
         it["node_id"]: it for it in expandable if it.get("node_id")
     }
-    # NOTE(dual_vs_hy): evolution-chain 展开只作用于 profile/L6 桶 —— normal 路保持
+    # NOTE(dual_vs_hy): evolution-chain 展开只作用于 profile/L3 桶 —— normal 路保持
     # ACTIVE 纯事实（S1 原始记忆保真），S2 深层证据（chain/schema）单独进 profile 桶。
     # 实测 62-74% 检索结果被 chain 挤占导致事实丢失，分段后事实路与 s1 一致。
     if use_derived and expandable:
@@ -444,7 +446,7 @@ async def search_hybrid(
                 merged["is_evolved"] = True
             else:
                 merged["is_evolved"] = False
-            # 只让 L6/L7 或 profile 层的 chain 保持展开，normal fact 不携带 chain 标记
+            # 只让 L3 或 profile 层的 chain 保持展开，normal fact 不携带 chain 标记
             if merged["is_evolved"] and _layer_of(merged) in _NORMAL_SOURCES:
                 merged["evolution_chain"] = None
                 merged["is_evolved"] = False
@@ -468,12 +470,12 @@ async def search_hybrid(
     normal_results.sort(key=lambda x: x.get("score", 0), reverse=True)
     normal_results = normal_results[:final_limit]
 
-    l0_results = [it for it in expanded if _layer_of(it) in _PROFILE_LAYER_VALS]
-    l0_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    profile_results = [it for it in expanded if _layer_of(it) in _PROFILE_LAYER_VALS]
+    profile_results.sort(key=lambda x: x.get("score", 0), reverse=True)
     profile_results = list(
         {
             it["node"].node_id: it
-            for it in l0_results + (fused_l6 if use_derived else [])
+            for it in profile_results + (fused_derived if use_derived else [])
             if it.get("node")
         }.values()
     )
@@ -489,8 +491,8 @@ async def search_hybrid(
         len(vdb_semantic_hits),
         len(bm25_by_nid),
         len(profile_hits),
-        len(forward_l6),
-        len(reverse_l6),
+        len(forward_derived),
+        len(reverse_derived),
         len(normal_results),
         len(profile_results),
         len(intention_hits),

@@ -150,10 +150,8 @@ class EmbedService:
         """Embed a list of texts and return one vector per input; empty list short-circuits.
 
         Texts longer than ``embed_max_tokens`` (via char budget) are head-truncated to the
-        budget before the API call. Over-budget inputs are L1_RAW raw-dialogue anchors that
-        turn SHADOW the moment the extractor emits L2/L4 children (and SHADOW nodes are out of
-        the recall pool), so the dropped tail never affects retrieval; the full text is still
-        stored as the L1 document and read by the extractor.
+        budget before the API call. Full source documents remain stored and are passed
+        to candidate generation; raw anchors are excluded from normal recall.
         """
         if not texts:
             return []

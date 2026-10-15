@@ -88,7 +88,7 @@ class GraphStore(ABC):
     def find_referencing_memories(
         self, vdb_node_ids: list[str], *, limit: int = 50
     ) -> list[dict]:
-        """Reverse lookup: L6 schemas whose DERIVED_FROM cites any of the VDB ids."""
+        """Reverse lookup: L3 schemas whose DERIVED_FROM cites any of the VDB ids."""
         raise NotImplementedError
 
     @abstractmethod
@@ -119,33 +119,6 @@ class KuzuGraphStore(GraphStore):
         with self._lock:
             for ddl in _SCHEMA_DDL:
                 self.conn.execute(ddl)
-
-    def legacy_nodes(self) -> list[GraphNode]:
-        """Export old graph-only memories for one-time VDB migration."""
-        with self._lock:
-            result = self.conn.execute(
-                "MATCH (m:Memory) WHERE m.layer IN ['L6_SCHEMA','L7_INTENTION'] "
-                "RETURN m.node_id,m.content,m.app_id,m.user_id,m.agent_id,"
-                "m.embedding,m.tags,m.gmt_created,m.custom,m.layer"
-            )
-            nodes: list[GraphNode] = []
-            while result.has_next():
-                row = result.get_next()
-                nodes.append(
-                    GraphNode(
-                        node_id=row[0],
-                        content=row[1],
-                        app_id=row[2],
-                        user_id=row[3],
-                        agent_id=row[4],
-                        embedding=row[5],
-                        tags=row[6],
-                        gmt_created=row[7],
-                        custom=json.loads(row[8] or "{}"),
-                        layer=row[9],
-                    )
-                )
-            return nodes
 
     def close(self) -> None:
         """Release the embedded Kuzu connection + database (avoids stale lock files on crash)."""
@@ -296,7 +269,7 @@ class KuzuGraphStore(GraphStore):
     def find_referencing_memories(
         self, vdb_node_ids: list[str], *, limit: int = 50
     ) -> list[dict]:
-        """Return L6 Memory rows referencing any of the given VDB fact ids."""
+        """Return L3 Memory rows referencing any of the given VDB fact ids."""
         if not vdb_node_ids:
             return []
         with self._lock:
@@ -307,7 +280,7 @@ class KuzuGraphStore(GraphStore):
                 "LIMIT $limit",
                 {
                     "ids": vdb_node_ids,
-                    "layer": "L6_SCHEMA",
+                    "layer": "L3_DERIVED",
                     "limit": limit,
                 },
             )

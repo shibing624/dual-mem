@@ -12,7 +12,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class UsageEvent:
-    """One completed LLM or embedding API call."""
+    """One provider API attempt; latency excludes queueing and retry backoff."""
 
     kind: str
     model: str
@@ -21,6 +21,11 @@ class UsageEvent:
     completion_tokens: int = 0
     text_chars: int = 0
     batch_size: int = 0
+    success: bool = True
+    attempt: int = 1
+    status_code: int | None = None
+    reasoning_tokens: int | None = None
+    reasoning_chars: int | None = None
 
 
 UsageCallback = Callable[[UsageEvent], None]
@@ -28,7 +33,7 @@ UsageCallback = Callable[[UsageEvent], None]
 
 def tokens_from_usage(resp: Any) -> tuple[int, int]:
     """Read prompt/completion token counts from an OpenAI chat completion response.
-    
+
     Args:
         resp: OpenAI chat completion response
 

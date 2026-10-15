@@ -46,7 +46,7 @@ class SearchRequest(BaseModel):
 
 
 class ConversationSearchRequest(BaseModel):
-    """Request body for L1_RAW evidence search."""
+    """Request body for L0_RAW evidence search."""
 
     query: str
     app_ids: list[str] | None = None

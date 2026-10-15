@@ -1,4 +1,5 @@
 import dataclasses
+import pytest
 
 from dual_mem.types import (
     LAYER_TO_CATEGORY,
@@ -10,24 +11,19 @@ from dual_mem.types import (
 )
 
 
-def test_four_canonical_layers_with_legacy_read_aliases():
+def test_four_canonical_layers():
     assert {m.name for m in Layer} == {"L0_RAW", "L1_FACT", "L2_PROFILE", "L3_DERIVED"}
-    assert Layer("L2_FACT") == Layer.L1_FACT
-    assert Layer.L4_IDENTITY == Layer.L2_PROFILE
-    assert Layer("L6_SCHEMA") == Layer.L3_DERIVED
+    for old in ("L1_RAW", "L2_FACT", "L4_IDENTITY", "L6_SCHEMA", "L7_INTENTION"):
+        with pytest.raises(ValueError):
+            Layer(old)
 
 
 def test_reconcile_actions_include_skip():
-    assert {m.name for m in ReconcileOp} == {"ADD", "DELETE", "SKIP", "SUPERSEDE"}
+    assert {m.name for m in ReconcileOp} == {"ADD", "DELETE", "SKIP"}
 
 
 def test_status_members():
-    assert {m.name for m in MemoryStatus} == {
-        "ACTIVE",
-        "SHADOW",
-        "SUPERSEDED",
-        "DELETED",
-    }
+    assert {m.name for m in MemoryStatus} == {"ACTIVE"}
 
 
 def test_category_uses_kind_with_four_layer_routing():
@@ -57,7 +53,7 @@ def test_category_uses_kind_with_four_layer_routing():
 
 
 def test_node_defaults_and_category():
-    n = MemoryNode(content="hi", layer=Layer.L2_FACT, app_id="app", user_id="u")
+    n = MemoryNode(content="hi", layer=Layer.L1_FACT, app_id="app", user_id="u")
     assert n.status == MemoryStatus.ACTIVE
     assert n.is_latest is True
     assert n.node_id
@@ -68,11 +64,11 @@ def test_node_defaults_and_category():
 
 def test_score_not_in_eq():
     a = MemoryNode(
-        content="x", layer=Layer.L1_RAW, app_id="a", user_id="u", node_id="fixed"
+        content="x", layer=Layer.L0_RAW, app_id="a", user_id="u", node_id="fixed"
     )
     b = MemoryNode(
         content="x",
-        layer=Layer.L1_RAW,
+        layer=Layer.L0_RAW,
         app_id="a",
         user_id="u",
         node_id="fixed",
@@ -85,7 +81,7 @@ def test_score_not_in_eq():
 def test_to_metadata_scalar_only():
     n = MemoryNode(
         content="c",
-        layer=Layer.L2_FACT,
+        layer=Layer.L1_FACT,
         app_id="app",
         user_id="u",
         tags=["t1", "t2"],
@@ -104,7 +100,7 @@ def test_to_metadata_scalar_only():
 def test_roundtrip_from_storage():
     n = MemoryNode(
         content="content text",
-        layer=Layer.L7_INTENTION,
+        layer=Layer.L1_FACT,
         app_id="app",
         user_id="u",
         agent_id="ag",
@@ -134,7 +130,7 @@ def test_roundtrip_from_storage():
 
 
 def test_roundtrip_none_fields():
-    n = MemoryNode(content="c", layer=Layer.L1_RAW, app_id="app", user_id="u")
+    n = MemoryNode(content="c", layer=Layer.L0_RAW, app_id="app", user_id="u")
     restored = MemoryNode.from_storage(n.content, n.to_metadata())
     assert restored.memory_at is None
     assert restored.gmt_modified is None

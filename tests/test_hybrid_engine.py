@@ -55,7 +55,7 @@ class _ScriptedEmbed:
 def _seed_fact(client, *, node_id: str, content: str, cosine: float) -> None:
     node = MemoryNode(
         content=content,
-        layer=Layer.L2_FACT,
+        layer=Layer.L1_FACT,
         app_id="app",
         user_id="u",
         node_id=node_id,
@@ -162,8 +162,12 @@ async def test_ubiquitous_term_does_not_force_weak_hits_through_gate(tmp_storage
         llm=FakeLLMClient(),
     )
 
-    _seed_fact(client, node_id="one", content="project status meeting notes", cosine=0.3)
-    _seed_fact(client, node_id="two", content="order status remains unchanged", cosine=0.3)
+    _seed_fact(
+        client, node_id="one", content="project status meeting notes", cosine=0.3
+    )
+    _seed_fact(
+        client, node_id="two", content="order status remains unchanged", cosine=0.3
+    )
 
     result = await client.search(query=query, app_ids=["app"], user_id="u")
     assert result.memories.normal == []
@@ -178,7 +182,7 @@ async def test_dual_l6_schema_recalled_into_profile(tmp_storage, fake_embed):
 
     fact = MemoryNode(
         content="用户在上海的人工智能实验室做研究",
-        layer=Layer.L2_FACT,
+        layer=Layer.L1_FACT,
         app_id="app",
         user_id="u",
         node_id="f1",
@@ -189,7 +193,7 @@ async def test_dual_l6_schema_recalled_into_profile(tmp_storage, fake_embed):
 
     schema = GraphNode(
         node_id="s1",
-        layer=Layer.L6_SCHEMA.value,
+        layer=Layer.L3_DERIVED.value,
         content="用户从事人工智能研究",
         app_id="app",
         user_id="u",

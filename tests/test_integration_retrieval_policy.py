@@ -1,4 +1,5 @@
 """Integration recall policy: every non-empty query reaches retrieval."""
+
 import asyncio
 from types import SimpleNamespace
 
@@ -39,7 +40,7 @@ def test_sync_provider_short_nonempty_query_is_retrieved() -> None:
             item = MemoryItem(
                 memory_id="m1",
                 content="用户喜欢咖啡",
-                category="L2_FACT",
+                category="L1_FACT",
                 score=0.9,
             )
             return SearchResult(

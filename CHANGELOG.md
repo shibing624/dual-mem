@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — JEV memory redesign
+
+- Replace write-side semantic rules and similarity routing with batched JEV decisions.
+- Keep four canonical layers and only system1 / dual modes; retain linked history.
+- Remove legacy layers/statuses, deferred reconcile worker, nested config adapters and automatic migrations.
+- Add per-attempt JEV latency and generation reasoning telemetry; hy3 smoke explicitly uses no_think.
+
 本文件记录 **dual-mem SDK** 中会影响 **延迟、LLM 调用次数、召回/写入效果** 的变更。  
 Benchmark 对比或线上行为异常时，优先查此表 + 对应 `Settings` / `config.default.yaml` 开关。
 

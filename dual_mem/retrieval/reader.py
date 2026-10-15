@@ -33,7 +33,7 @@ class Reader:
         profile_min_score: float = 0.3,
         intention_limit: int = 0,
         include_derived: bool = True,
-        include_l6_fusion: bool = True,
+        include_derived_fusion: bool = True,
         created_after: int | None = None,
         request_id: str | None = None,
         collect_trace: bool = False,
@@ -58,7 +58,7 @@ class Reader:
             profile_min_score=profile_min_score,
             intention_limit=intention_limit,
             include_derived=include_derived,
-            include_l6_fusion=include_l6_fusion,
+            include_derived_fusion=include_derived_fusion,
             created_after=created_after,
         )
 
@@ -98,15 +98,15 @@ class Reader:
         min_score: float = 0.0,
         created_after: int | None = None,
     ) -> SearchMemories:
-        """Recall L1_RAW (ACTIVE + SHADOW) as evidence. Never mixed into default search."""
+        """Recall L0_RAW (retained source history) as evidence. Never mixed into default search."""
         query_embedding = await self.factory.embed.embed(query)
         where = build_filter(
             app_ids=app_ids,
             user_id=user_id,
             agent_ids=agent_ids,
             session_ids=session_ids,
-            layers=[Layer.L1_RAW],
-            statuses=[MemoryStatus.ACTIVE, MemoryStatus.SHADOW],
+            layers=[Layer.L0_RAW],
+            statuses=[MemoryStatus.ACTIVE],
             created_after=created_after,
         )
         top_k = max(limit, 10)

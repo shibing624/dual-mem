@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: Async summarizer that produces L3_SUMMARY text for long conversations,
+@description: Async summarizer that produces L3_DERIVED text for long conversations,
 skipping inputs shorter than a configurable minimum length threshold.
 """
 import logging
@@ -34,5 +34,7 @@ class Summarizer:
                 build_system=_build_system,
             )
         ).strip()
-        logger.debug("summarize content_len=%d summary_len=%d", len(content), len(summary))
+        logger.debug(
+            "summarize content_len=%d summary_len=%d", len(content), len(summary)
+        )
         return summary or None

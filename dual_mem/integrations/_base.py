@@ -805,7 +805,7 @@ class _SyncMemoryProvider:
             {
                 "name": "conversation_search",
                 "description": (
-                    "Search original conversation text (L1_RAW) to verify quotes, "
+                    "Search original conversation text (L0_RAW) to verify quotes, "
                     "time, or source. Do not use for default fact recall."
                 ),
                 "parameters": {

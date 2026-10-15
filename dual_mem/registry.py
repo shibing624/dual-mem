@@ -11,7 +11,6 @@ from dual_mem.providers.embedding import EmbedService
 from dual_mem.providers.llm import LLMClient
 from dual_mem.providers.jev import DecisionProvider, JevClient
 from dual_mem.locks import LockRegistry
-from dual_mem.types import Layer, MemoryNode
 from dual_mem.storage.cache_store import CacheStore
 from dual_mem.storage.graph_store import KuzuGraphStore
 from dual_mem.storage.history_store import HistoryStore
@@ -117,34 +116,6 @@ class ComponentFactory:
                 if self.settings.enable_graph
                 else None
             )
-            if self._graph is not None:
-                for old in self._graph.legacy_nodes():
-                    if self.vector.get(old.node_id) is None:
-                        kind = "intention" if old.layer == "L7_INTENTION" else "schema"
-                        raw = MemoryNode(
-                            node_id=old.node_id,
-                            content=old.content,
-                            layer=Layer.L3_DERIVED,
-                            kind=kind,
-                            app_id=old.app_id,
-                            user_id=old.user_id,
-                            agent_id=old.agent_id,
-                            tags=old.tags,
-                            embedding=old.embedding,
-                            gmt_created=old.gmt_created,
-                            custom={
-                                **(old.custom or {}),
-                                "source_ids": self._graph.evidence_of(old.node_id),
-                                "legacy_graph": True,
-                            },
-                        )
-                        if not raw.embedding:
-                            raise ValueError(
-                                "legacy graph memory lacks embedding; migrate explicitly"
-                            )
-                        self.vector.upsert([raw])
-                    old.layer = Layer.L3_DERIVED.value
-                    self._graph.add_node(old)
         return self._graph
 
     def close(self) -> None:

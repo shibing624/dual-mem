@@ -109,6 +109,7 @@ async def test_invalid_response_never_becomes_a_write_decision(payload):
 
 async def test_transient_retry_and_context_rejection():
     calls = 0
+    events = []
 
     def handler(req):
         nonlocal calls
@@ -116,9 +117,20 @@ async def test_transient_retry_and_context_rejection():
         return httpx.Response(503) if calls == 1 else reply(req)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as transport:
-        jev = JevClient(endpoint="https://test", api_key="test", http_client=transport)
+        jev = JevClient(
+            endpoint="https://test",
+            api_key="test",
+            http_client=transport,
+            usage_callback=events.append,
+        )
         await jev.evaluate(state={}, questions=questions(1))
         assert calls == 2
+        assert len(events) == 2
+        assert [e.success for e in events] == [False, True]
+        assert [e.status_code for e in events] == [503, 200]
+        assert [e.attempt for e in events] == [1, 2]
+        assert events[1].prompt_tokens == 12
+        assert all(e.batch_size == 1 and e.latency_ms >= 0 for e in events)
         jev.max_question_chars = 100
         with pytest.raises(ValueError, match="context budget"):
             await jev.evaluate(state={"long": "x" * 200}, questions=questions(1))

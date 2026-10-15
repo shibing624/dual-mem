@@ -1,4 +1,5 @@
 """Structured messages input is normalized and sent intact to L1 and Extractor."""
+
 from dual_mem.client import MemoryClient, _format_dialogue, _normalize_messages
 from dual_mem.config import Settings
 from dual_mem.sdk_models import ChatMessage
@@ -18,13 +19,15 @@ _EMPTY_EXTRACT = {
 
 def test_normalize_messages_dict_and_chatmessage_mixed():
     """dict 和 ChatMessage 混用，role 默认 user，content 空白丢弃。"""
-    out = _normalize_messages([
-        {"role": "user", "content": "hi"},
-        ChatMessage(role="assistant", content="hello"),
-        {"role": "user", "content": ""},        # dropped
-        {"role": "system", "content": "  "},    # dropped
-        {"content": "无 role"},                  # role 默认 user
-    ])
+    out = _normalize_messages(
+        [
+            {"role": "user", "content": "hi"},
+            ChatMessage(role="assistant", content="hello"),
+            {"role": "user", "content": ""},  # dropped
+            {"role": "system", "content": "  "},  # dropped
+            {"content": "无 role"},  # role 默认 user
+        ]
+    )
     assert [(m.role, m.content) for m in out] == [
         ("user", "hi"),
         ("assistant", "hello"),
@@ -33,11 +36,13 @@ def test_normalize_messages_dict_and_chatmessage_mixed():
 
 
 def test_format_dialogue_uses_role_labels():
-    msgs = _normalize_messages([
-        {"role": "user", "content": "今天累死了"},
-        {"role": "assistant", "content": "辛苦了"},
-        {"role": "user", "content": "明天还要加班"},
-    ])
+    msgs = _normalize_messages(
+        [
+            {"role": "user", "content": "今天累死了"},
+            {"role": "assistant", "content": "辛苦了"},
+            {"role": "user", "content": "明天还要加班"},
+        ]
+    )
     text = _format_dialogue(msgs)
     assert text == "[user]: 今天累死了\n[assistant]: 辛苦了\n[user]: 明天还要加班"
 
@@ -69,7 +74,7 @@ async def test_messages_input_reaches_l1_and_extractor(tmp_storage, fake_embed):
     )
 
     assert result.success
-    # L1_RAW 存的是带 role 标记的完整对话
+    # L0_RAW 存的是带 role 标记的完整对话
     raw = client.factory.vector.get(result.memory_id)
     assert raw is not None
     assert "[user]: 我刚搬到北京" in raw.content
@@ -81,7 +86,9 @@ async def test_messages_input_reaches_l1_and_extractor(tmp_storage, fake_embed):
     await client.aclose()
 
 
-async def test_messages_input_preserves_all_messages_as_current(tmp_storage, fake_embed):
+async def test_messages_input_preserves_all_messages_as_current(
+    tmp_storage, fake_embed
+):
     settings = Settings(
         mode="system1",
         storage_dir=tmp_storage,
@@ -119,7 +126,9 @@ async def test_messages_input_preserves_all_messages_as_current(tmp_storage, fak
     await client.aclose()
 
 
-async def test_messages_input_compatible_with_chat_message_objects(tmp_storage, fake_embed):
+async def test_messages_input_compatible_with_chat_message_objects(
+    tmp_storage, fake_embed
+):
     """ChatMessage dataclass 直接传也能跑通。"""
     settings = Settings(mode="system1", storage_dir=tmp_storage)
     client = MemoryClient(

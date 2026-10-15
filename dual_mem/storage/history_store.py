@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS history (
     user_id TEXT NOT NULL,
     old     TEXT,
     new     TEXT,
-    ts      REAL NOT NULL
+    ts      REAL NOT NULL,
+    event_key TEXT UNIQUE
 );
 """
 
@@ -40,7 +41,11 @@ class HistoryStore:
                     r[1] for r in self.conn.execute("PRAGMA table_info(history)")
                 }
                 if "event_key" not in columns:
-                    self.conn.execute("ALTER TABLE history ADD COLUMN event_key TEXT")
+                    self.conn.close()
+                    self.conn = None
+                    raise ValueError(
+                        "unsupported audit schema; use a new storage directory"
+                    )
                 self.conn.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS history_event_key ON history(event_key)"
                 )

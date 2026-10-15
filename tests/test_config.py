@@ -110,40 +110,6 @@ def test_ensure_storage_dir_creates_nested(tmp_path):
     assert target.is_dir()
 
 
-def test_settings_from_dict_mem0_style():
-    s = Settings.from_dict(
-        {
-            "mode": "dual",
-            "default_app_id": "agentica",
-            "llm": {
-                "model": "deepseek-chat",
-                "api_key": "sk-llm",
-                "base_url": "https://api.example/v1",
-            },
-            "embedder": {
-                "model": "text-embedding-v3",
-                "api_key": "sk-embed",
-                "base_url": "https://embed.example/v1",
-            },
-            "vector_store": {
-                "persist_directory": "/data/mem",
-                "embedding_dims": 768,
-            },
-            "graph_store": {"provider": "neo4j"},
-        }
-    )
-    assert s.mode == "dual"
-    assert s.default_app_id == "agentica"
-    assert s.llm_model == "deepseek-chat"
-    assert s.llm_api_key == "sk-llm"
-    assert s.llm_base_url == "https://api.example/v1"
-    assert s.embed_model == "text-embedding-v3"
-    assert s.embed_api_key == "sk-embed"
-    assert s.embed_base_url == "https://embed.example/v1"
-    assert s.storage_dir == "/data/mem"
-    assert s.embed_dim == 768
-
-
 def test_preset_default_equals_code_defaults():
     s = Settings()
     assert s.preset == "default"
@@ -187,47 +153,6 @@ def test_invalid_preset_raises(bad_preset):
         Settings(preset=bad_preset)
 
 
-def test_settings_from_dict_mem0_config_blocks():
-    s = Settings.from_dict(
-        {
-            "embedder": {
-                "provider": "openai",
-                "config": {
-                    "model": "text-embedding-3-small",
-                    "embedding_dims": 1024,
-                },
-            },
-            "vector_store": {
-                "provider": "qdrant",
-                "config": {
-                    "embedding_model_dims": 1024,
-                    "persist_directory": "/data/nested",
-                },
-            },
-        }
-    )
-    assert s.embed_model == "text-embedding-3-small"
-    assert s.embed_dim == 1024
-    assert s.storage_dir == "/data/nested"
-
-
-def test_nested_jev_config_and_removed_controls():
-    s = Settings.from_dict(
-        {
-            "jev": {
-                "api_key": "test-jev",
-                "model": "jev-1.13.0",
-                "endpoint": "https://example.test/v1/systemone",
-            },
-            "reconcile_sync": True,
-            "reconcile_skip_llm": True,
-            "reconcile_weak_candidate_score": 0.4,
-        }
-    )
-    assert s.jev_api_key == "test-jev" and s.jev_endpoint.endswith("/v1/systemone")
-    assert not hasattr(s, "reconcile_sync") and not hasattr(s, "reconcile_skip_llm")
-
-
 def test_missing_jev_credentials_fails_before_network(
     tmp_storage, fake_embed, fake_llm, monkeypatch
 ):
@@ -241,3 +166,35 @@ def test_missing_jev_credentials_fails_before_network(
             embed=fake_embed,
             llm=fake_llm,
         )
+
+
+def test_flat_jev_config():
+    s = Settings.from_dict(
+        {"jev_api_key": "test-jev", "jev_endpoint": "https://example.test/v1/systemone"}
+    )
+    assert s.jev_api_key == "test-jev" and s.jev_endpoint.endswith("/v1/systemone")
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "reconcile_sync",
+        "reconcile_skip_llm",
+        "reconcile_weak_candidate_score",
+        "llm",
+        "embedder",
+        "vector_store",
+        "jev",
+    ],
+)
+def test_removed_controls_and_nested_config_are_rejected(key):
+    with pytest.raises(ValueError):
+        Settings.from_dict({key: True})
+
+
+def test_old_yaml_controls_are_rejected(tmp_path, monkeypatch):
+    cfg = tmp_path / "old-config.yaml"
+    cfg.write_text("reconcile_sync: true\n")
+    monkeypatch.setenv("DUAL_MEM_CONFIG_FILE", str(cfg))
+    with pytest.raises(ValueError):
+        Settings()

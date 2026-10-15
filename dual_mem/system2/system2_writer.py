@@ -6,7 +6,6 @@ import asyncio
 import time
 
 from dual_mem.sdk_models import ChatMessage
-from dual_mem.system2.reconciler_worker import ReconcilerWorker
 from dual_mem.registry import ComponentFactory
 from dual_mem.system2.system2_agent import System2Agent
 from dual_mem.writer.memory_writer import MemoryWriter, WriterOutcome
@@ -98,9 +97,6 @@ class System2Writer:
 
     async def digest_pending(self) -> int:
         async with self._digest_lock:
-            worker = ReconcilerWorker(factory=self.factory)
-            for scope in self.factory.cache.list_pending_reconcile_scopes():
-                await worker.reconcile_pending(**scope)
             tasks = self.factory.cache.list_pending_s2_scopes()
             scopes: dict[tuple[str, str, str], list[int]] = {}
             for task in tasks:

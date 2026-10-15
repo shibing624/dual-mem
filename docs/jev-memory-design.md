@@ -1,6 +1,6 @@
 # JEV 记忆决策与迁移
 
-可交互流程页：[JEV memory flow](design/jev-memory-flow.html)。实现只保留 system1 和 dual。
+本地可交互流程页：`docs/design/jev-memory-flow.html`（Git 忽略，不随仓库分发）。实现只保留 system1 和 dual。
 
 ## 写入
 
@@ -35,7 +35,7 @@ SKIP 是“当前事实已覆盖”，RAW_ONLY 是“没有持久增量”。原
 来源更新后，引用该来源的旧推导变成非 latest，其余证据恢复 fresh；下次 digest 重建。
 图投影待处理记录与版本同一提交；投影失败时，下次 digest 先恢复，已处理证据不会导致漏补图。
 新到达的 task IDs 不会被旧水位确认。失败 scope 保留 pending，成功 scope 可独立确认。
-旧 reconcile 队列经同一 JEV 协议迁移，不能直接清空。
+旧 reconcile 队列和迁移 worker 已删除；新目录仅登记显式 digest 任务。
 
 ## 历史、恢复与公共 API
 
@@ -48,13 +48,13 @@ SKIP 是“当前事实已覆盖”，RAW_ONLY 是“没有持久增量”。原
 - `add(..., request_id=...)` 允许相同输入幂等重试；另一个事件必须使用另一 request_id。
   重试恢复 durable plan，重复文本不依赖 content hash 去重。
 - `versions.db` 保存完整计划与审计事件；`versions.lock` 协调本机进程。进入存储读操作先
-  恢复未完成计划。非法向量在写日志前拒绝。跨机器共享目录/分布式事务不在此实现中。
+  先校验现存 schema 与全部待回放计划的 schema，再恢复未完成计划；旧格式拒绝且不改写。非法向量在写日志前拒绝。跨机器共享目录/分布式事务不在此实现中。
 - `persist_history` 控制附加审计库；版本内容和恢复日志始终保留。
 
 ## 配置与限制
 
 JEV 可使用 `jev=` 注入 provider，或配置 `jev_api_key` / `jev_endpoint` / `jev_model`。
-`Settings.from_dict({"jev": {...}})` 支持嵌套配置。Venus token 只在环境变量/注入中提供。
+`Settings.from_dict({"jev_api_key": ..., "jev_endpoint": ...})` 只接受规范平铺配置。Venus token 只在环境变量/注入中提供。
 默认并发 4，HTTP 客户端复用，429/529/502/503/504 有限重试；按问题数量和字符预算拆包。
 字符预算是保守配置，不是 tokenizer 实测 token 数。
 
@@ -64,7 +64,7 @@ JEV 可使用 `jev=` 注入 provider，或配置 `jev_api_key` / `jev_endpoint` 
 
 删除配置：reconcile_sync、reconcile_skip_llm、reconcile_weak_candidate_score、
 reconcile_policy、reconcile_non_destructive、content_hash_dedup 以及 cluster 写入门控。
-旧键由 Settings 的 unknown-key 兼容忽略，运行行为不会重新启用旧分支。
+旧键及嵌套 mem0 配置不再兼容，Settings 校验直接报错。旧存储不自动迁移。
 
 ## 验证
 
@@ -79,11 +79,8 @@ Smoke 通过 MemoryClient 验证演化、已知判断、四个并行 scope 和�
 文本生成与 embedding 使用确定性适配器，JEV 是真实接口；这是接口/版本协议验证，
 不等于业务 accuracy 的对比基准。
 
-2026-10-15 最新实际结果：JEV 写入四步 561.5 / 408.3 / 556.5 / 500.8 ms；
-四个独立 scope 并发写入 631.7 ms；5 个 scope digest 完成，全部 JEV HTTP 请求 18。
-其中 digest 生成器输出带来源的摘要，并经真实 JEV 校验。另以真实 hy3 生成模型 + Venus
-完成四步写入与 digest，写入约 12–28 秒；embedding 仍为确定性适配器。
-尚无生产 embedding 联调、质量 A/B、稳定性/吞吐统计；单次演示不能证明效果或速度提升。
+真实验证使用确定性 embedding，生成与裁决分别计时。最新版数据见下方最终本地验证；
+历史报告均保留在本地 docs/design/validation，不进入 Git。
 
 ## Coding 工具来源
 
@@ -98,19 +95,44 @@ SQLite 以 published/is_latest 决定可见性；所有向量写入确认与 sco
 
 ## 最终本地验证
 
-2026-10-15：完整 pytest 为 378 passed / 1 skipped；28 条既有 FastAPI on_event
-弃用警告。API AST 检查、compileall、diff whitespace、桌面/移动端流程页布局和交互均通过。
-真实 Venus smoke 报告见 design/validation/venus-jev-smoke.json。
-真实生成模型初次联调通过，但后续重复运行暴露空候选、coverage 拒绝和重复目标计划；
-后两类非法提交均被阻止。重复目标允许有限次带约束反馈的 JEV 重决策；原文保留。
-此联调记录需要与最终测试配置区分，不能将单次通过作为模型质量已验证的结论。
+2026-10-15，main 合并后清理全部旧兼容路径。全量 pytest：390 passed、1 skipped；127 个 Python 文件的 AST 检查、compileall
+和 diff 检查通过（28 条既有 FastAPI 弃用警告）。所有自动化测试 mock 模型与网络，真实接口验证仅由 tmp smoke 执行。
 
-最终明确关系选项后，真实 hy3 + Venus 四步耗时 6.805 / 10.002 / 15.356 / 7.751 秒，
-每步一次 JEV；状态回北京为 OVERRIDE、重复当前为 SKIP、只有一个 latest profile，
-digest 也完成。核心状态断言通过，报告见 design/validation/venus-real-generation-final.json。
-同次运行仍把两个独立搬家事件用 OVERRIDE 相连；原文历史保留，但事件关系质量尚未通过
-评测。以上通过只指核心状态断言，不能推广为全部事实关系准确。保留负例报告以便后续评测。
+hy3 当前接口不能通过不传 reasoning_effort 关闭思考。实测只传
+`extra_body={"thinking":{"type":"disabled"}}` 仍产生 314 reasoning tokens。
+非思考验证显式使用：
 
-复跑真实生成 smoke：配置 GENERATION_API_KEY / GENERATION_BASE_URL / GENERATION_MODEL
-和 VENUS_TOKEN，再运行 `python tmp/jev_generation_smoke.py --output /tmp/generation.json`。
-脚本以核心语义断言决定退出状态，不能用 HTTP 请求成功替代断言。
+```python
+extra_body={"reasoning_effort": "no_think", "thinking": {"type": "disabled"}}
+```
+
+这里的 extra_body 是 OpenAI SDK 合并到请求顶层的扩展参数；全部五次 hy3 返回
+reasoning_content 为空，reasoning token 计数未提供。不能把缺少计数当成服务器已报告 0。
+
+| 步骤 | hy3 API ms | JEV API ms | 端到端 ms | 调用数 hy3 / JEV |
+| --- | ---: | ---: | ---: | --- |
+| 我目前住在北京。 | 1234.2 | 494.1 | 1753 | 1 / 1 |
+| 我从北京搬到上海了，现在住在上海。 | 1483.7 | 438.3 | 1953 | 1 / 1 |
+| 我又搬回北京了，目前住在北京。 | 1355.7 | 465.0 | 1846 | 1 / 1 |
+| 我目前住在北京。 | 1093.6 | 461.0 | 1568 | 1 / 1 |
+| 显式 digest | 2819.3 | 1210.1 | 4139.0 | 1 / 3 |
+
+每次写入一次候选生成、一次批量 JEV 裁决。digest 含推导生成、来源校验及关系裁决，
+本次还触发多目标选择，共三次 JEV。API ms 为各实际调用的延迟之和；并行时不等于墙钟
+耗时。JEV 计时覆盖每次 HTTP 尝试，不包含排队和重试等待；端到端时间包含这些开销。
+
+独立 JEV 真实接口 smoke 也通过：四个 scope 并发写入 553.0 ms，5 个 scope digest
+完成，合计 18 次 JEV 请求。生成与向量使用确定性适配器，不能与真实生成时延混算。
+
+真实 smoke 六项断言全部通过：无思考内容、返回旧值为 OVERRIDE、重复为 SKIP、
+两个独立搬家事件保持 current、三代画像保留、只有一个 current 画像。
+报告：本地 design/validation/venus-hy3-disabled-smoke.json。早期负例也保留；本次通过
+不证明业务准确率或速度普遍提升。尚无生产 embedding 联调或业务质量 A/B。
+
+```bash
+python tmp/jev_smoke.py --offline
+# 配置 GENERATION_API_KEY / GENERATION_BASE_URL / GENERATION_MODEL=hy3 / VENUS_TOKEN
+python tmp/jev_generation_smoke.py --output /tmp/generation.json
+```
+
+脚本同时校验模型行为与版本语义，断言失败时退出非零；接口成功不等于 smoke 通过。

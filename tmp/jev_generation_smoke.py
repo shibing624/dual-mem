@@ -7,6 +7,7 @@ This is a four-sample smoke, not a quality or speed benchmark.
 
 from __future__ import annotations
 import argparse
+from dataclasses import asdict
 import asyncio
 import json
 import os
@@ -21,6 +22,34 @@ from dual_mem import MemoryClient
 from dual_mem.config import Settings
 from dual_mem.providers.jev import JevClient
 from dual_mem.providers.llm import LLMClient
+from dual_mem.providers.usage import UsageEvent
+
+
+def summarize(events: list[UsageEvent]) -> dict:
+    return {
+        name: {
+            "requests": len(
+                selected := [
+                    event
+                    for event in events
+                    if (event.kind == "jev") == (name == "jev")
+                ]
+            ),
+            "api_sum_ms": round(sum(event.latency_ms for event in selected), 1),
+            "failed_attempts": sum(not event.success for event in selected),
+            "reasoning_tokens": [
+                event.reasoning_tokens
+                for event in selected
+                if event.reasoning_tokens is not None
+            ],
+            "reasoning_chars": [
+                event.reasoning_chars
+                for event in selected
+                if event.reasoning_chars is not None
+            ],
+        }
+        for name in ("generation", "jev")
+    }
 
 
 async def run(args: argparse.Namespace) -> dict:
@@ -34,14 +63,22 @@ async def run(args: argparse.Namespace) -> dict:
         raise RuntimeError(
             "Provide Venus and generation credentials via environment/stdin"
         )
+    events: list[UsageEvent] = []
+    no_think = {"reasoning_effort": "no_think", "thinking": {"type": "disabled"}}
+    if os.environ["GENERATION_MODEL"] != "hy3":
+        raise RuntimeError("This smoke verifies hy3 with explicit no_think")
     generator = LLMClient(
         base_url=os.environ["GENERATION_BASE_URL"],
         api_key=generation_key,
         model=os.environ["GENERATION_MODEL"],
-        timeout=60,
+        timeout=90,
+        extra_body=no_think,
+        usage_callback=events.append,
     )
     jev = JevClient(
-        endpoint="http://v2.open.venus.oa.com/llmproxy/v1/systemone", api_key=token
+        endpoint="http://v2.open.venus.oa.com/llmproxy/v1/systemone",
+        api_key=token,
+        usage_callback=events.append,
     )
     writes = []
     with tempfile.TemporaryDirectory() as directory:
@@ -59,6 +96,7 @@ async def run(args: argparse.Namespace) -> dict:
                 "我目前住在北京。",
             ]:
                 before = jev.request_count
+                event_offset = len(events)
                 started = time.perf_counter()
                 result = await client.add(content=source, user_id="generation-smoke")
                 writes.append(
@@ -66,19 +104,41 @@ async def run(args: argparse.Namespace) -> dict:
                         "source": source,
                         "elapsed_ms": round((time.perf_counter() - started) * 1000),
                         "jev_requests": jev.request_count - before,
+                        "timings": summarize(events[event_offset:]),
                         "decisions": [d.to_dict() for d in result.decisions],
                     }
                 )
+            event_offset = len(events)
+            digest_started = time.perf_counter()
             digest = await client.digest()
+            digest_timing = {
+                "elapsed_ms": round((time.perf_counter() - digest_started) * 1000, 1),
+                "timings": summarize(events[event_offset:]),
+            }
             nodes = client.factory.vector.get_many(
                 {"user_id": "generation-smoke"}, limit=100
             )
             assertions = {
+                "hy3_no_reasoning": bool(events)
+                and all(
+                    event.reasoning_chars == 0 and event.reasoning_tokens in (None, 0)
+                    for event in events
+                    if event.kind != "jev"
+                ),
                 "return_is_override": any(
                     d.get("update_type") == "OVERRIDE" for d in writes[2]["decisions"]
                 ),
                 "repeat_is_skip": bool(writes[3]["decisions"])
                 and all(d["action"] == "SKIP" for d in writes[3]["decisions"]),
+                "distinct_events_remain_current": sum(
+                    n.layer.value == "L1_FACT" and n.kind == "fact" and n.is_latest
+                    for n in nodes
+                )
+                >= 2,
+                "profile_versions_retained": sum(
+                    n.layer.value == "L2_PROFILE" for n in nodes
+                )
+                >= 3,
                 "one_latest_profile": sum(
                     n.is_latest and n.layer.value == "L2_PROFILE" for n in nodes
                 )
@@ -88,6 +148,7 @@ async def run(args: argparse.Namespace) -> dict:
                 "passed": all(assertions.values()),
                 "assertions": assertions,
                 "digest_processed": digest.processed,
+                "digest_timing": digest_timing,
                 "nodes": [
                     {
                         "id": n.node_id,
@@ -109,6 +170,9 @@ async def run(args: argparse.Namespace) -> dict:
         jev="jev-1.13.0",
         embedding="deterministic smoke adapter",
         writes=writes,
+        thinking_request=no_think,
+        usage=[asdict(event) for event in events],
+        totals=summarize(events),
     )
     return report
 
@@ -117,9 +181,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--token-stdin", action="store_true")
     parser.add_argument("--output", type=Path)
-    result = asyncio.run(run(parser.parse_args()))
+    args = parser.parse_args()
+    result = asyncio.run(run(args))
     rendered = json.dumps(result, ensure_ascii=False, indent=2)
-    if output := parser.parse_args().output:
+    if output := args.output:
         output.write_text(rendered + "\n")
     print(rendered)
     sys.exit(0 if result["passed"] else 1)

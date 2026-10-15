@@ -159,7 +159,7 @@ class MemoryItem:
     merged_timestamps: list[int] | None = None
     # 写侧关系：OVERRIDE / MERGE / SUPPLEMENT / …；无则 None
     update_type: str | None = None
-    # 源 L1_RAW 节点 id（extract / reconcile 写入 custom.source_node_id）
+    # 源 L0_RAW 节点 id（extract / reconcile 写入 custom.source_node_id）
     source_node_id: str | None = None
 
     layer: str = ""
@@ -234,11 +234,11 @@ class MemoryItem:
 class SearchMemories:
     """Three-route recall groups from the reader (routing, not storage layers)."""
 
-    # 画像路：L0/L4/L6 等身份与 schema
+    # 画像路：L2/L3 等身份与 schema
     profile: list[MemoryItem] = field(default_factory=list)
-    # 主动路：L7 意图/计划（intention_limit=0 时常为空）
+    # 主动路：L1/L3 意图/计划（intention_limit=0 时常为空）
     proactive: list[MemoryItem] = field(default_factory=list)
-    # 常规路：L2/L3/L4 等事实、摘要与身份记忆
+    # 常规路：L1 facts 等事实、摘要与身份记忆
     normal: list[MemoryItem] = field(default_factory=list)
 
     def to_dict(self) -> dict:

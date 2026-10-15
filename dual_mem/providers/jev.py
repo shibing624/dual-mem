@@ -15,6 +15,8 @@ from typing import Any, Protocol
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from dual_mem.providers.usage import UsageCallback, UsageEvent
+
 
 class JevAnswer(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -68,6 +70,7 @@ class JevClient:
         timeout: float = 30,
         retry_attempts: int = 3,
         http_client: httpx.AsyncClient | None = None,
+        usage_callback: UsageCallback | None = None,
     ) -> None:
         if not api_key:
             raise ValueError(
@@ -102,6 +105,7 @@ class JevClient:
             timeout=timeout,
             headers={"Authorization": f"Bearer {api_key}"},
         )
+        self.usage_callback = usage_callback
         self.request_count = 0
         self.input_tokens = 0
         self.output_tokens = 0
@@ -153,6 +157,9 @@ class JevClient:
             for attempt in range(self.retry_attempts):
                 started = time.perf_counter()
                 self.request_count += 1
+                response = None
+                usage: dict = {}
+                success = False
                 try:
                     response = await self._client.post(
                         self.endpoint,
@@ -188,7 +195,7 @@ class JevClient:
                     usage = payload.get("usage") or {}
                     self.input_tokens += int(usage.get("input_tokens", 0))
                     self.output_tokens += int(usage.get("output_tokens", 0))
-                    self.last_latency_ms = (time.perf_counter() - started) * 1000
+                    success = True
                     return answers
                 except (httpx.TransportError, httpx.HTTPStatusError) as exc:
                     if isinstance(
@@ -211,7 +218,27 @@ class JevClient:
                             )
                         except ValueError:
                             pass
-                    await asyncio.sleep(delay)
+                finally:
+                    self.last_latency_ms = (time.perf_counter() - started) * 1000
+                    if self.usage_callback:
+                        self.usage_callback(
+                            UsageEvent(
+                                kind="jev",
+                                model=self.model,
+                                latency_ms=self.last_latency_ms,
+                                prompt_tokens=int(usage.get("input_tokens", 0)),
+                                completion_tokens=int(usage.get("output_tokens", 0)),
+                                batch_size=len(questions),
+                                success=success,
+                                attempt=attempt + 1,
+                                status_code=(
+                                    response.status_code
+                                    if response is not None
+                                    else None
+                                ),
+                            )
+                        )
+                await asyncio.sleep(delay)
         raise RuntimeError("Jev retry budget exhausted")
 
     async def aclose(self) -> None:

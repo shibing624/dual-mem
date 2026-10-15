@@ -534,7 +534,7 @@ async def test_missing_answer_coverage_fails_closed(store):
 
 
 @pytest.mark.parametrize("broken", ["missing", "foreign", "cycle"])
-async def test_migration_rejects_missing_foreign_or_cyclic_history(store, broken):
+async def test_reopen_rejects_corrupted_history(store, broken):
     await store.add_many([memory("a"), memory("b")])
     if broken == "missing":
         store._conn.execute(
@@ -557,22 +557,16 @@ async def test_migration_rejects_missing_foreign_or_cyclic_history(store, broken
         CodingMemoryStore(db_path=store.db_path, vector=store.vector, embed=store.embed)
 
 
-async def test_migration_repairs_old_parent_latest_and_reverse_links(store):
+async def test_reopen_rejects_one_way_links_without_rewriting(store):
     await store.add_many([memory("a"), memory("b")])
     store._conn.execute(
         "UPDATE coding_memory_meta SET supersedes='[\"a\"]' WHERE memory_id='b'"
     )
     store._conn.commit()
-    second = CodingMemoryStore(
-        db_path=store.db_path, vector=store.vector, embed=store.embed
-    )
-    try:
-        assert not second.get("a").is_latest
-        assert second.get("a").superseded_by == ["b"]
-        assert second.get("a").solution == memory().solution
-        assert second.snapshot(user_id="u")[2]["b"][0]["memory_id"] == "a"
-    finally:
-        second.close()
+    with pytest.raises(CodingDecisionError, match="inconsistent"):
+        CodingMemoryStore(db_path=store.db_path, vector=store.vector, embed=store.embed)
+    assert store.get("a").is_latest
+    assert store.get("a").superseded_by == []
 
 
 async def test_live_snapshot_rejects_missing_history_and_reverse_links(store):

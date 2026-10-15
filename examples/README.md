@@ -45,7 +45,7 @@ python examples/04_cli.py        # CLI：dual-mem 子命令调用（system1 档�
 
 - `MemoryClient.add` / `search` 全部 **async**，返回 `WriteResult` / `SearchResult`
   等 dataclass，访问字段用 `res.memory_id`、`out.memories.normal[i].content`。
-- `add(messages=[{"role": "user", "content": "..."}, ...])` 直接收多轮对话；L1_RAW 与
+- `add(messages=[{"role": "user", "content": "..."}, ...])` 直接收多轮对话；L0_RAW 与
   Extractor 都接收带角色标记的完整内容（`01_system1.py` 演示）。
 - 没有"无 LLM"模式：缺失 `llm_api_key` / `embed_api_key` 时 `MemoryClient(...)` 直接抛
   `MissingCredentialsError`（fail-fast，比静默降级更直白）。

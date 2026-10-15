@@ -105,7 +105,7 @@ PRESET_NAMES = tuple(PRESETS.keys())
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="DUAL_MEM_",
-        extra="ignore",
+        extra="forbid",
     )
 
     # Both modes append System1 facts/profiles using Jev decisions.
@@ -198,7 +198,7 @@ class Settings(BaseSettings):
     # Drop reconcile/s2 queue rows after digest drains them (keeps cache.db small).
     purge_done_queues: bool = True
 
-    # Hybrid read fusion tunables (semantic vs in-pool BM25 rerank weight; graph L6 evidence
+    # Hybrid read fusion tunables (semantic vs in-pool BM25 rerank weight; graph derived evidence
     # boost). Sum of the two weights need not be 1; evidence boost saturates at the given count.
     hybrid_w_sem: float = 0.6
     hybrid_w_bm25: float = 0.4
@@ -211,7 +211,6 @@ class Settings(BaseSettings):
     # go to a separate SQLite+VDB store with task/search_keys/solution schema.
     coding_enabled: bool = False  # opt-in; experimental
     coding_db_path: str = ""  # empty = auto: {storage_dir}/coding_memory.db
-    coding_tool_result_max_bytes: int = 2048
 
     @field_validator(
         "jev_timeout",
@@ -324,18 +323,8 @@ class Settings(BaseSettings):
 
     @classmethod
     def from_dict(cls, config_dict: dict[str, Any]) -> Settings:
-        """Build ``Settings`` from a mem0/Hy-style nested dict (flat keys also accepted).
-
-        Nested sections:
-
-        - ``llm``: ``api_key`` / ``base_url`` / ``model`` → ``llm_*``
-        - ``embedder`` or ``embed``: same → ``embed_*``
-        - ``vector_store.persist_directory`` → ``storage_dir`` (when set)
-
-        Unknown top-level keys are ignored (``extra="ignore"``).
-        """
-        flat = _flatten_config_dict(config_dict)
-        return cls(**flat)
+        """Build Settings from canonical flat keys; reject unknown keys."""
+        return cls(**config_dict)
 
 
 class _PresetSettingsSource(PydanticBaseSettingsSource):
@@ -378,81 +367,3 @@ class _PresetSettingsSource(PydanticBaseSettingsSource):
             valid = ", ".join(PRESET_NAMES)
             raise ValueError(f"Unknown preset {name!r}. Valid presets: {valid}.")
         return dict(preset)
-
-
-def _flatten_config_dict(config_dict: dict[str, Any]) -> dict[str, Any]:
-    """Map mem0/Hy nested provider blocks onto flat ``Settings`` field names."""
-    flat = dict(config_dict)
-
-    llm = flat.pop("llm", None)
-    if isinstance(llm, dict):
-        _map_provider_section(llm, flat, prefix="llm")
-
-    embed_section = flat.pop("embedder", None)
-    if embed_section is None:
-        embed_section = flat.pop("embed", None)
-    if isinstance(embed_section, dict):
-        _map_provider_section(embed_section, flat, prefix="embed")
-
-    jev = flat.pop("jev", None)
-    if isinstance(jev, dict):
-        for key, value in jev.items():
-            flat.setdefault(f"jev_{key}", value)
-
-    vector_store = flat.pop("vector_store", None)
-    if isinstance(vector_store, dict):
-        vector_config = vector_store.get("config")
-        if isinstance(vector_config, dict):
-            vector_store = {**vector_config, **vector_store}
-        persist = vector_store.get("persist_directory")
-        if persist:
-            flat.setdefault("storage_dir", persist)
-        dims = vector_store.get("embedding_dims")
-        if dims is None:
-            dims = vector_store.get("embedding_model_dims")
-        if dims is not None:
-            flat.setdefault("embed_dim", dims)
-
-    for drop_key in (
-        "graph_store",
-        "enable_graph",
-        "cache",
-        "history_store",
-        "providers",
-    ):
-        flat.pop(drop_key, None)
-
-    return flat
-
-
-def _map_provider_section(
-    section: dict[str, Any], flat: dict[str, Any], *, prefix: str
-) -> None:
-    """Copy provider keys into ``{prefix}_*`` Settings fields."""
-    provider_config = section.get("config")
-    if isinstance(provider_config, dict):
-        section = {**provider_config, **section}
-
-    mapping = {
-        "api_key": f"{prefix}_api_key",
-        "base_url": f"{prefix}_base_url",
-        "model": f"{prefix}_model",
-        "json_mode": f"{prefix}_json_mode",
-        "extra_body": "extra_body",
-        "timeout": f"{prefix}_timeout",
-        "retry_attempts": f"{prefix}_retry_attempts",
-        "retry_base_delay": f"{prefix}_retry_base_delay",
-        "chars_per_token": "chars_per_token",
-    }
-    if prefix == "llm":
-        mapping["context_window"] = "llm_context_window"
-        mapping["max_model_len"] = "llm_context_window"
-        mapping["completion_reserve"] = "llm_completion_reserve"
-        mapping["extra_headers"] = "extra_headers"
-    if prefix == "embed":
-        mapping["max_tokens"] = "embed_max_tokens"
-        mapping["embedding_dims"] = "embed_dim"
-    for src, dst in mapping.items():
-        val = section.get(src)
-        if val is not None and val != "":
-            flat.setdefault(dst, val)

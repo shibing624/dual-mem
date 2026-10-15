@@ -21,7 +21,7 @@ MEMORY_TOOL_CONTRACTS: list[dict[str, Any]] = [
     },
     {
         "name": "conversation_search",
-        "summary": "Search L1_RAW originals (including SHADOW)",
+        "summary": "Search L0_RAW originals (retained history)",
         "http": {"method": "POST", "path": "/v1/memories/search_conversation"},
     },
     {

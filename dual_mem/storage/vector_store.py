@@ -60,19 +60,6 @@ class VectorStore(ABC):
     def update_payload_many(self, patches: dict[str, dict]) -> None: ...
 
     @abstractmethod
-    def update_status(self, node_id: str, status: MemoryStatus) -> None: ...
-
-    @abstractmethod
-    def mark_superseded(
-        self, node_id: str, *, superseded_by_id: str, keep_active: bool = False
-    ) -> bool: ...
-
-    @abstractmethod
-    def link_supersedes(
-        self, *, new_id: str, old_id: str, keep_active: bool = False
-    ) -> bool: ...
-
-    @abstractmethod
     def delete(self, node_ids: list[str]) -> None: ...
 
 
@@ -108,11 +95,16 @@ class ChromaVectorStore(VectorStore):
             metadata={"hnsw:space": "cosine"},
         )
 
-        with self._guard():
-            self._migrate_layers()
+        try:
+            with self._guard(recover=False):
+                self._validate_schema()
+                self._recover_pending()
+        except BaseException:
+            self._journal.close()
+            raise
 
     @contextmanager
-    def _guard(self) -> Iterator[None]:
+    def _guard(self, *, recover: bool = True) -> Iterator[None]:
         """Serialize cooperating processes and recover before exposing any read."""
         with self._lock:
             if getattr(self._local, "inside", False):
@@ -122,16 +114,37 @@ class ChromaVectorStore(VectorStore):
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
                 self._local.inside = True
                 try:
-                    for plan_id, scope_key, epoch, payload in self._journal.execute(
-                        "SELECT id, scope, epoch, payload FROM plans WHERE done=0 ORDER BY rowid"
-                    ).fetchall():
-                        self._finish_plan(
-                            plan_id, scope_key, epoch, json.loads(payload)
-                        )
+                    if recover:
+                        self._recover_pending()
                     yield
                 finally:
                     self._local.inside = False
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _check_metadata_schema(meta: dict) -> None:
+        if (
+            meta.get("layer_schema_version") != 4
+            or meta.get("layer") not in Layer._value2member_map_
+            or meta.get("status") != MemoryStatus.ACTIVE.value
+        ):
+            raise ValueError("unsupported memory schema; use a new storage directory")
+
+    def _recover_pending(self) -> None:
+        """Validate every pending payload before recovering any of them."""
+        pending = [
+            (plan_id, scope, epoch, json.loads(payload))
+            for plan_id, scope, epoch, payload in self._journal.execute(
+                "SELECT id, scope, epoch, payload FROM plans WHERE done=0 ORDER BY rowid"
+            ).fetchall()
+        ]
+        for _, _, _, payload in pending:
+            for row in payload["nodes"]:
+                self._check_metadata_schema(row["meta"])
+            for meta in payload["patches"].values():
+                self._check_metadata_schema(meta)
+        for plan_id, scope, epoch, payload in pending:
+            self._finish_plan(plan_id, scope, epoch, payload)
 
     def _finish_plan(
         self, plan_id: str, scope_key: str, epoch: int, payload: dict
@@ -181,97 +194,16 @@ class ChromaVectorStore(VectorStore):
                 (json.dumps(scope),),
             )
 
-    def _migrate_layers(self) -> None:
-        """Migrate legacy metadata without touching embeddings or documents."""
-        all_meta: dict[str, dict] = {}
+    def _validate_schema(self) -> None:
+        """Reject unsupported stored metadata without mutating historical rows."""
         offset = 0
         while True:
             rows = self.collection.get(limit=500, offset=offset, include=["metadatas"])
             if not rows["ids"]:
-                break
-            all_meta.update(zip(rows["ids"], rows["metadatas"]))
+                return
+            for meta in rows["metadatas"]:
+                self._check_metadata_schema(meta)
             offset += len(rows["ids"])
-        if all(m.get("layer_schema_version") == 4 for m in all_meta.values()):
-            return
-
-        def links(meta: dict, key: str) -> list[str]:
-            return [x for x in (meta.get(key) or "").split(_LIST_SEP) if x]
-
-        # Validate the entire chain before certifying any migrated row. Recover a
-        # legacy append-before-link crash by restoring the missing reciprocal link.
-        parents = {nid: links(meta, "supersedes") for nid, meta in all_meta.items()}
-        successors = {
-            nid: links(meta, "superseded_by") for nid, meta in all_meta.items()
-        }
-        for nid, meta in all_meta.items():
-            scope = tuple(meta[k] for k in ("app_id", "user_id", "agent_id"))
-            for target in [*parents[nid], *successors[nid]]:
-                other = all_meta.get(target)
-                if (
-                    other is None
-                    or tuple(other[k] for k in ("app_id", "user_id", "agent_id"))
-                    != scope
-                ):
-                    raise ValueError(
-                        "broken legacy evolution link; migration requires repair"
-                    )
-            for target in successors[nid]:
-                if nid not in parents[target]:
-                    raise ValueError(
-                        "broken legacy evolution link; migration requires repair"
-                    )
-            for parent in parents[nid]:
-                if nid not in successors[parent]:
-                    successors[parent].append(nid)
-        pending = {nid: len(set(p)) for nid, p in parents.items()}
-        roots = [nid for nid, count in pending.items() if count == 0]
-        visited = 0
-        while roots:
-            nid = roots.pop()
-            visited += 1
-            for child in successors[nid]:
-                pending[child] -= 1
-                if pending[child] == 0:
-                    roots.append(child)
-        if visited != len(all_meta):
-            raise ValueError("cyclic legacy evolution link; migration requires repair")
-        migrated = {}
-        for nid, original in all_meta.items():
-            meta = dict(original)
-            old_layer = meta["layer"]
-            meta["layer"] = Layer(old_layer).value
-            meta["kind"] = {
-                "L7_INTENTION": "intention",
-                "L3_SUMMARY": "summary",
-                "L6_SCHEMA": "schema",
-                "L0_BASIC_INFO": "profile",
-                "L4_IDENTITY": "profile",
-            }.get(old_layer, meta.get("kind", ""))
-            meta["layer_schema_version"] = 4
-            meta["superseded_by"] = _LIST_SEP.join(successors[nid])
-            if successors[nid]:
-                meta["is_latest"] = False
-            meta.setdefault("revision", 0)
-            if meta.get("status") == MemoryStatus.SUPERSEDED.value:
-                meta["status"] = MemoryStatus.ACTIVE.value
-                meta["is_latest"] = False
-            elif meta.get("status") in (
-                MemoryStatus.SHADOW.value,
-                MemoryStatus.DELETED.value,
-            ):
-                meta["status"] = MemoryStatus.ACTIVE.value
-                meta["is_latest"] = False
-                custom = json.loads(meta.get("custom") or "{}")
-                custom["archived"] = True
-                meta["custom"] = json.dumps(custom)
-            migrated[nid] = meta
-        ids = list(migrated)
-        cap = min(500, self.client.get_max_batch_size())
-        for offset in range(0, len(ids), cap):
-            chunk = ids[offset : offset + cap]
-            self.collection.update(
-                ids=chunk, metadatas=[migrated[nid] for nid in chunk]
-            )
 
     def upsert(self, nodes: list[MemoryNode]) -> None:
         """Insert or update the given nodes (embeddings, content and metadata)."""
@@ -455,57 +387,6 @@ class ChromaVectorStore(VectorStore):
                 new_ids.append(nid)
                 new_metas.append(merged)
             self.collection.update(ids=new_ids, metadatas=new_metas)
-
-    def update_status(self, node_id: str, status: MemoryStatus) -> None:
-        """Update only the status field of a node."""
-        self.update_payload(node_id, {"status": status.value})
-
-    def mark_superseded(
-        self, node_id: str, *, superseded_by_id: str, keep_active: bool = False
-    ) -> bool:
-        """Compatibility alias: link the retained ancestor and retire its head."""
-        return self.link_supersedes(new_id=superseded_by_id, old_id=node_id)
-
-    def link_supersedes(
-        self, *, new_id: str, old_id: str, keep_active: bool = False
-    ) -> bool:
-        """Link retained versions; legacy keep_active no longer changes visibility."""
-        if new_id == old_id:
-            raise ValueError("a version cannot supersede itself")
-        with self._guard():
-            nodes = self.get_by_ids([new_id, old_id])
-            if set(nodes) != {new_id, old_id}:
-                return False
-            new, old = nodes[new_id], nodes[old_id]
-            scope = (new.app_id, new.user_id, new.agent_id)
-            if scope != (old.app_id, old.user_id, old.agent_id):
-                raise ValueError("version link crosses tenant scope")
-            if old_id in new.supersedes and new_id in old.superseded_by:
-                return True
-            if not new.is_latest or not old.is_latest:
-                raise ValueError("link requires current versions")
-            pending, seen = [old_id], set()
-            while pending:
-                nid = pending.pop()
-                if nid == new_id:
-                    raise ValueError("cyclic version link")
-                if nid in seen:
-                    continue
-                seen.add(nid)
-                ancestor = self.get(nid)
-                if ancestor:
-                    pending.extend(ancestor.supersedes)
-            new.supersedes = list(dict.fromkeys([*new.supersedes, old_id]))
-            old.superseded_by = list(dict.fromkeys([*old.superseded_by, new_id]))
-            old.is_latest = False
-            old.status = MemoryStatus.ACTIVE
-            new.revision += 1
-            old.revision += 1
-            self.collection.update(
-                ids=[new_id, old_id], metadatas=[new.to_metadata(), old.to_metadata()]
-            )
-            self._bump_epoch(scope)
-            return True
 
     def delete(self, node_ids: list[str]) -> None:
         """Physically remove the given node ids from the collection."""

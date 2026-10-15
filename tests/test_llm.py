@@ -62,7 +62,9 @@ async def test_chat_json_sends_json_mode_by_default():
     import json as _json
 
     route = respx.post("https://api.test/v1/chat/completions").mock(
-        return_value=httpx.Response(200, json=_completion({"role": "assistant", "content": "{}"}))
+        return_value=httpx.Response(
+            200, json=_completion({"role": "assistant", "content": "{}"})
+        )
     )
     await _make_client().chat_json(system="s", user="u")
     body = _json.loads(route.calls.last.request.content)
@@ -104,8 +106,19 @@ async def test_chat_json_usage_callback():
         return_value=httpx.Response(
             200,
             json={
-                **_completion({"role": "assistant", "content": '{"facts": []}'}),
-                "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+                **_completion(
+                    {
+                        "role": "assistant",
+                        "content": '{"facts": []}',
+                        "reasoning_content": "",
+                    }
+                ),
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 7,
+                    "total_tokens": 18,
+                    "completion_tokens_details": {"reasoning_tokens": 0},
+                },
             },
         )
     )
@@ -123,6 +136,8 @@ async def test_chat_json_usage_callback():
     assert events[0].prompt_tokens == 11
     assert events[0].completion_tokens == 7
     assert events[0].latency_ms >= 0
+    assert events[0].reasoning_tokens == 0
+    assert events[0].reasoning_chars == 0
 
 
 @respx.mock
@@ -130,11 +145,16 @@ async def test_chat_json_disabled_json_mode_omits_response_format():
     import json as _json
 
     route = respx.post("https://api.test/v1/chat/completions").mock(
-        return_value=httpx.Response(200, json=_completion({"role": "assistant", "content": "[]"}))
+        return_value=httpx.Response(
+            200, json=_completion({"role": "assistant", "content": "[]"})
+        )
     )
     # client-level json_mode off
     await LLMClient(
-        base_url="https://api.test/v1", api_key="sk-x", model="gpt-test", json_mode=False
+        base_url="https://api.test/v1",
+        api_key="sk-x",
+        model="gpt-test",
+        json_mode=False,
     ).chat_json(system="s", user="u")
     body = _json.loads(route.calls.last.request.content)
     assert "response_format" not in body
@@ -190,7 +210,9 @@ async def test_chat_json_chunks_oversized_content():
         idx = len(calls)
         letter = chr(ord("a") + idx - 1)
         content = f'{{"facts": [{{"content": "fact-{letter}", "tags": []}}]}}'
-        return httpx.Response(200, json=_completion({"role": "assistant", "content": content}))
+        return httpx.Response(
+            200, json=_completion({"role": "assistant", "content": content})
+        )
 
     respx.post("https://api.test/v1/chat/completions").mock(side_effect=_record)
     client = LLMClient(

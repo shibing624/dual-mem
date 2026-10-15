@@ -14,7 +14,7 @@ def factory(tmp_storage, fake_embed):
 
 
 def _seed(factory, content):
-    node = MemoryNode(content=content, layer=Layer.L2_FACT, app_id="app", user_id="u")
+    node = MemoryNode(content=content, layer=Layer.L1_FACT, app_id="app", user_id="u")
     node.embedding = factory.embed.embed_sync(content)
     factory.vector.upsert([node])
     return node

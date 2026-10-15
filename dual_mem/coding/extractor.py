@@ -29,10 +29,8 @@ An empty array is permitted but will be checked by JEV for missed information.
 
 
 class CodingMemoryExtractor:
-    def __init__(self, *, llm: LLMClient, tool_result_max_bytes: int = 2048) -> None:
+    def __init__(self, *, llm: LLMClient) -> None:
         self.llm = llm
-        # Constructor compatibility only. Semantic evidence is never truncated.
-        self.tool_result_max_bytes = tool_result_max_bytes
 
     async def extract(
         self,

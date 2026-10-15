@@ -183,8 +183,10 @@ async def test_from_config(tmp_storage, fake_embed, fake_llm, monkeypatch):
         {
             "storage_dir": tmp_storage,
             "default_app_id": "cfg_app",
-            "llm": {"api_key": "k", "model": "m"},
-            "embedder": {"api_key": "e", "model": "em"},
+            "llm_api_key": "k",
+            "llm_model": "m",
+            "embed_api_key": "e",
+            "embed_model": "em",
         },
         embed=fake_embed,
         llm=fake_llm,
@@ -195,3 +197,15 @@ async def test_from_config(tmp_storage, fake_embed, fake_llm, monkeypatch):
     added = await client.add(content="from_config 写入", user_id="u")
     listed = await client.list(user_id="u")
     assert len(listed) >= 1
+
+
+def test_explicit_mode_override_is_validated(tmp_storage, fake_embed, fake_llm):
+    import pytest
+
+    with pytest.raises(ValueError):
+        MemoryClient(
+            settings=Settings(storage_dir=tmp_storage),
+            mode="legacy",
+            embed=fake_embed,
+            llm=fake_llm,
+        )

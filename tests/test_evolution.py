@@ -16,7 +16,7 @@ class FakeVector:
 def _node(node_id, gmt, *, is_latest, supersedes=(), superseded_by=(), content=""):
     return MemoryNode(
         content=content or node_id,
-        layer=Layer.L2_FACT,
+        layer=Layer.L1_FACT,
         app_id="app",
         user_id="u",
         node_id=node_id,

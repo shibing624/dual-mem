@@ -11,7 +11,7 @@ def gstore(tmp_storage):
 def _gnode(fake_embed, nid, content, tags=None):
     return GraphNode(
         node_id=nid,
-        layer="L6_SCHEMA",
+        layer="L3_DERIVED",
         content=content,
         app_id="app",
         user_id="u",
@@ -25,7 +25,7 @@ def test_add_and_query_by_embedding(gstore, fake_embed):
     gstore.add_node(_gnode(fake_embed, "s2", "用户喜欢详细的长篇解释"))
 
     res = gstore.query_by_embedding(
-        layer="L6_SCHEMA",
+        layer="L3_DERIVED",
         user_id="u",
         app_ids=["app"],
         embedding=fake_embed.embed_sync("用户偏好简洁回答"),
@@ -78,7 +78,7 @@ def test_list_by_layer_and_custom_roundtrip(gstore, fake_embed):
     gstore.add_node(basic)
     gstore.add_node(core)
 
-    nodes = gstore.list_by_layer(layer="L6_SCHEMA", user_id="u", app_ids=["app"])
+    nodes = gstore.list_by_layer(layer="L3_DERIVED", user_id="u", app_ids=["app"])
     assert {n.node_id for n in nodes} == {"s1", "s2"}
     by_id = {n.node_id: n for n in nodes}
     assert by_id["s1"].custom is None

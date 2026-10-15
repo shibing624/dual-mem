@@ -31,7 +31,6 @@ async def test_dual_evidence_derived_recall_and_history(tmp_storage, fake_embed)
         jev=FakeJev(),
     )
     written = await c.add(content="User prepares talk with diagrams", user_id="u")
-    assert c.factory.cache.reconcile_queue_size() == 0
     assert (await c.digest()).processed == 1
     found = await c.search(
         query="User prepares carefully",

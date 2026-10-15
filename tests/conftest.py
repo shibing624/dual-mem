@@ -246,7 +246,7 @@ def fake_jev():
 
 
 @pytest.fixture(autouse=True)
-def mock_decisions_for_legacy_fixtures(monkeypatch):
+def mock_decisions_for_sdk_fixtures(monkeypatch):
     """All SDK fixtures are offline; new protocol tests inject their own script."""
     from dual_mem.registry import ComponentFactory
 

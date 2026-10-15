@@ -228,3 +228,25 @@ async def test_model_validity_iso_normalized_to_epoch(store, fake_embed):
             agent_id="",
             current_time="2026-10-15",
         )
+
+
+async def test_target_choices_include_representation_time_and_source(store, fake_embed):
+    profile = MemoryNode(
+        node_id="profile",
+        content="User lives in Shanghai",
+        layer=Layer.L2_PROFILE,
+        kind="profile",
+        app_id="app",
+        user_id="u",
+        embedding=fake_embed.embed_sync("profile"),
+        memory_at=123,
+        custom={"source_ids": ["raw"]},
+    )
+    store.upsert([profile])
+    jev = FakeJev({"p0:action": "ADD_OVERRIDE", "p0:target": "profile"})
+    await decide(store, fake_embed, jev)
+    import json
+
+    choice = json.loads(jev.calls[0]["questions"]["p0:target"]["criteria"]["profile"])
+    assert choice["layer"] == "L2_PROFILE" and choice["kind"] == "profile"
+    assert choice["source_ids"] == ["raw"] and choice["memory_at"] == 123

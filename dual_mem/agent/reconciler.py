@@ -15,14 +15,14 @@ from dual_mem.storage.vector_store import VectorStore
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
 _ACTIONS = {
-    "ADD_OVERRIDE": "Same person's explicit CURRENT state change replaces that dimension. 'Moved back/again/now/不再/改为' supplies change evidence, even if an ancestor has the new value. Relocation event itself is a separate SUPPLEMENT; current residence overrides old residence.",
+    "ADD_OVERRIDE": "Replace a corresponding PERSISTENT STATE VALUE or explicitly correct a prior claim. Current residence replaces previous residence, even when returning to an ancestor value. NEVER replace a different completed event: two moves are two retained events.",
     "ADD_MERGE": "Complementary fragments about ONE object; preserve every number, source and distinct event.",
-    "ADD_SUPPLEMENT": "New compatible dimension or distinct completed event. A relocation event is independent of a current-residence profile. Initial current residence with no baseline is SUPPLEMENT, not TEMPORAL.",
+    "ADD_SUPPLEMENT": "Append a new dimension or a DISTINCT OCCURRENCE. A genuinely different completed move/purchase/visit is an independent event, even when it changes a state or repeats an earlier value. Repeating a report of the SAME occurrence is SKIP, not a new event. Keep all earlier events. Initial state without baseline also belongs here.",
     "ADD_TEMPORAL": "Explicit LIMITED exception (this week/temporarily/until a date) coexisting with a long-term baseline. 'Currently/目前/现在' alone is not a limited exception.",
     "ADD_NEGATE": "Explicit termination or denial of an existing claim.",
     "ADD_CONFLICT": "Competing SIMULTANEOUS incompatible claims with no explicit change, correction, ordering or authority. A user's explicit move/change/back is OVERRIDE, not CONFLICT. Different sequential events are SUPPLEMENT, not CONFLICT.",
     "RAW_ONLY": "No durable fact, event, profile or intention; retain source evidence only.",
-    "SKIP": "A corresponding current head or earlier proposal fully covers this proposal; NEVER skip because it appears in the new source or history; no changed state, event, number or time scope.",
+    "SKIP": "A corresponding current head or earlier proposal ALREADY FULLY COVERS this exact claim, including any reported change/event and time scope. Repeating “moved back/again” does not create a new move when it reports the SAME occurrence and current state. Prefer SKIP over OVERRIDE when all content and state are already current. Ancestors and the incoming source alone cannot establish knownness.",
     "DELETE": "Explicit retraction or redundant representation with a retained canonical source; archive, not erase.",
     "INVALID": "Candidate is unsupported by source, invented or incorrectly attributed; reject extraction.",
     "NEED_CONTEXT": "Evidence is insufficient or inconsistent; never guess based on insertion time.",
@@ -298,15 +298,20 @@ class Reconciler:
             for offset, item in enumerate(proposals):
                 pid = item["id"]
                 earlier = meta[: start + offset]
-                target_ids = {n.node_id: n.content for n in existing}
-                target_ids.update({p["id"]: p["content"] for p in earlier})
+                target_ids = {
+                    n.node_id: json.dumps(self._context_node(n), ensure_ascii=False)
+                    for n in existing
+                }
+                target_ids.update(
+                    {p["id"]: json.dumps(p, ensure_ascii=False) for p in earlier}
+                )
                 if len(target_ids) > 253:
                     raise DecisionContextError(
                         "proposal target choices exceed Jev budget; split source into smaller writes"
                     )
                 questions[f"{pid}:action"] = {
                     "type": "choice",
-                    "instructions": f"Decide the executable action for proposals id={pid}. The source is incoming NEW evidence used only to verify support. The incoming source and stored user claims refer to the SAME scoped user. Explicit change/back/now in the source resolves the changed dimension; event records and state profiles are separate. Only current heads (or earlier proposals) represent stored knowledge; the proposal itself and matching source text NEVER make it already known. First verify source faithfulness (INVALID if invented or incorrectly attributed) and durable persistence value, then compare current heads, history and earlier proposals. Past occurrence is not current knowledge. Preserve unrelated dimensions and every distinct event. Do not infer truth from store time. If a current target contains multiple dimensions, choose NEED_CONTEXT unless a lossless merge preserves the unaffected dimensions.",
+                    "instructions": f"Decide the executable action for proposals id={pid}. The source is incoming NEW evidence used only to verify support. The incoming source and stored user claims refer to the SAME scoped user. First check whether a current head fully covers this proposal including reported event and state: an already recorded change is SKIP, never OVERRIDE just because text says moved/again. Source arrival or new source ID is not evidence of a new occurrence. Compare THIS proposal only, not all incoming proposals: a completed move is an event, whereas where the user currently lives is a state. Example: old event A-to-B plus new event B-to-A => SUPPLEMENT/NONE; old state lives B plus new state lives A => OVERRIDE/old-state-ID. Only current heads (or earlier proposals) represent stored knowledge; the proposal itself and matching source text NEVER make it already known. First verify source faithfulness (INVALID if invented or incorrectly attributed) and durable persistence value, then compare current heads, history and earlier proposals. Past occurrence is not current knowledge. Preserve unrelated dimensions and every distinct event. Do not infer truth from store time. If a current target contains multiple dimensions, choose NEED_CONTEXT unless a lossless merge preserves the unaffected dimensions.",
                     "criteria": {
                         key: description
                         for key, description in _ACTIONS.items()
@@ -335,7 +340,7 @@ class Reconciler:
                 if target_ids:
                     questions[f"{pid}:target"] = {
                         "type": "choice",
-                        "instructions": f"For proposal id={pid}, select the ONE corresponding current target or earlier proposal; do not select an ancestor merely because its content matches. Match the same dimension: residence to residence; a distinct relocation event does not target an old relocation event just because both mention cities. Choose NONE for independent events. Choose MULTIPLE if more than one is required. Questions are evaluated independently.",
+                        "instructions": f"For proposal id={pid}, select the ONE corresponding current target or earlier proposal; do not select an ancestor merely because its content matches. Match the SAME representation and dimension: a residence state must target a residence state, never a move event. A completed event targets NONE unless explicitly correcting that SAME occurrence. A-to-B then B-to-A are different events; choose NONE. For repeated residence, select the residence profile that covers the claim, not a move mentioning that city. Choose MULTIPLE if more than one is required. Questions are evaluated independently.",
                         "criteria": {
                             **target_ids,
                             "NONE": "No corresponding existing target",
@@ -367,7 +372,10 @@ class Reconciler:
                     raise DecisionContextError(f"Jev requested more context for {pid}")
                 target_answer = answers.get(f"{pid}:target")
                 target = target_answer.choice if target_answer else "NONE"
-                target_ids = {n.node_id: n.content for n in existing}
+                target_ids = {
+                    n.node_id: json.dumps(self._context_node(n), ensure_ascii=False)
+                    for n in existing
+                }
                 target_ids.update({p["id"]: p["content"] for p in meta[: int(pid[1:])]})
                 if target not in (*target_ids, "NONE", "MULTIPLE"):
                     raise DecisionContextError(

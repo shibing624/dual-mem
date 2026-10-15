@@ -7,7 +7,7 @@ def compute_evidence_boost(
     saturate: int = 5,
     max_boost: float = 0.3,
 ) -> float:
-    """Linear evidence boost for graph L6 intra-pool ranking."""
+    """Linear evidence boost for graph derived intra-pool ranking."""
     if evidence_count <= 0 or saturate <= 0:
         return 0.0
     return min(evidence_count / float(saturate), 1.0) * max_boost

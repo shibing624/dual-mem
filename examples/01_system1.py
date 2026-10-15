@@ -3,7 +3,7 @@
 场景：用户偏好随时间变化，记忆系统应自动用新认知"取代"旧认知，并保留可追溯的演化链。
 system1 档每次 `add` 会跑一次 Extractor LLM：提交判定 → fast-write 直落 L0/L2/L4。
 每次写入都用 JEV 判断版本关系，同时
-演示 `add(messages=[...])`：L1_RAW 与 Extractor 都接收带角色标记的完整对话。
+演示 `add(messages=[...])`：L0_RAW 与 Extractor 都接收带角色标记的完整对话。
 
 环境要求：`jev_*` + `llm_*` + `embed_*` 全部齐全；会产生真实 LLM 调用与少量费用。
 

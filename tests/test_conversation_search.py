@@ -1,4 +1,4 @@
-"""L1_RAW evidence search is opt-in and never mixed into default QA search."""
+"""L0_RAW evidence search is opt-in and never mixed into default QA search."""
 
 from dual_mem import MemoryClient
 from dual_mem.config import Settings
@@ -30,7 +30,7 @@ async def test_search_conversation_finds_shadowed_l1(tmp_storage, fake_embed):
     )
     raw = client.factory.vector.get(written.memory_id)
     assert raw is not None
-    assert raw.layer is Layer.L1_RAW
+    assert raw.layer is Layer.L0_RAW
     assert raw.status is MemoryStatus.ACTIVE
 
     qa = await client.search(

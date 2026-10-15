@@ -31,10 +31,10 @@ def _seed(factory, content, layer, *, gmt_created=None, **kw):
 
 
 async def test_three_key_structure_and_profile_full(factory):
-    p0 = _seed(factory, "用户叫张三", Layer.L0_BASIC_INFO)
-    p4 = _seed(factory, "用户是工程师", Layer.L4_IDENTITY)
-    f1 = _seed(factory, "用户喜欢喝咖啡", Layer.L2_FACT)
-    f2 = _seed(factory, "用户住在北京", Layer.L2_FACT)
+    p0 = _seed(factory, "用户叫张三", Layer.L2_PROFILE)
+    p4 = _seed(factory, "用户是工程师", Layer.L2_PROFILE)
+    f1 = _seed(factory, "用户喜欢喝咖啡", Layer.L1_FACT)
+    f2 = _seed(factory, "用户住在北京", Layer.L1_FACT)
 
     reader = Reader(factory=factory)
     res, _ = await reader.search(
@@ -57,7 +57,7 @@ async def test_three_key_structure_and_profile_full(factory):
 
 async def test_normal_respects_limit(factory):
     for i in range(5):
-        _seed(factory, f"事实条目 {i}", Layer.L2_FACT)
+        _seed(factory, f"事实条目 {i}", Layer.L1_FACT)
 
     reader = Reader(factory=factory)
     res, _ = await reader.search(
@@ -69,19 +69,19 @@ async def test_normal_respects_limit(factory):
 async def test_evolution_chain_returned(factory):
     # A(latest) -> B -> C(oldest)
     c = _seed(
-        factory, "旧版偏好：喜欢茶", Layer.L2_FACT, gmt_created=100, is_latest=False
+        factory, "旧版偏好：喜欢茶", Layer.L1_FACT, gmt_created=100, is_latest=False
     )
     b = _seed(
         factory,
         "中间版偏好：喜欢茶和咖啡",
-        Layer.L2_FACT,
+        Layer.L1_FACT,
         gmt_created=200,
         is_latest=False,
     )
     a = _seed(
         factory,
         "最新偏好：喜欢咖啡",
-        Layer.L2_FACT,
+        Layer.L1_FACT,
         gmt_created=300,
         is_latest=True,
     )
@@ -114,8 +114,8 @@ async def test_evolution_chain_returned(factory):
 
 
 async def test_created_after_filter(factory):
-    old = _seed(factory, "去年的旧事实", Layer.L2_FACT, gmt_created=1000)
-    new = _seed(factory, "今天的新事实", Layer.L2_FACT, gmt_created=9_000_000_000)
+    old = _seed(factory, "去年的旧事实", Layer.L1_FACT, gmt_created=1000)
+    new = _seed(factory, "今天的新事实", Layer.L1_FACT, gmt_created=9_000_000_000)
 
     reader = Reader(factory=factory)
     res, _ = await reader.search(

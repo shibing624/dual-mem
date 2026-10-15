@@ -41,13 +41,13 @@ def _make_client() -> SimpleNamespace:
                 MemoryItem(
                     memory_id="mem-001",
                     content="用户喜欢燕麦拿铁",
-                    category="L2_FACT",
+                    category="L1_FACT",
                     score=0.9,
                 ),
                 MemoryItem(
                     memory_id="mem-002",
                     content="用户住在北京",
-                    category="L0_BASIC_INFO",
+                    category="L2_PROFILE",
                     score=0.8,
                 ),
             ]
