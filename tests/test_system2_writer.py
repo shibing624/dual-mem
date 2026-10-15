@@ -1,116 +1,102 @@
+import asyncio
+import json
 import pytest
-
-from conftest import FakeLLMClient
-
+from conftest import FakeLLMClient, FakeJev
+from dual_mem import MemoryClient
 from dual_mem.config import Settings
-from dual_mem.registry import ComponentFactory
-from dual_mem.system2.system2_writer import System2Writer
+from dual_mem.system2.system2_agent import System2Agent
 
 
-def _pending_count(factory) -> int:
-    row = factory.cache.conn.execute(
-        "SELECT COUNT(*) FROM s2_queue WHERE status = 'pending'"
-    ).fetchone()
-    return row[0]
+def make(tmp_storage, embed):
+    def response(system, user):
+        ids = [f["id"] for f in json.loads(user)["facts"]]
+        return {"memories": [], "processed_ids": ids}
 
-
-def _dual_factory(tmp_storage, fake_embed):
-    return ComponentFactory(
-        settings=Settings(mode="dual", storage_dir=tmp_storage),
-        embed=fake_embed,
-        llm=FakeLLMClient(responses={"json": []}),
-    )
-
-
-def _basic_info_only_factory(tmp_storage, fake_embed):
-    return ComponentFactory(
-        settings=Settings(mode="dual", storage_dir=tmp_storage),
-        embed=fake_embed,
-        llm=FakeLLMClient(
-            responses={
-                "extract": {
-                    "is_ephemeral": False,
-                    "identity": [],
-                    "facts": [],
-                    "intentions": [],
-                    "basic_info": {"name": "Alice"},
-                }
-            }
+    return MemoryClient(
+        settings=Settings(
+            mode="dual", storage_dir=tmp_storage, purge_done_queues=False
         ),
+        embed=embed,
+        llm=FakeLLMClient({"json": response}),
+        jev=FakeJev(),
     )
 
 
-async def test_dual_write_enqueues_then_pending_processes(tmp_storage, fake_embed):
-    factory = _dual_factory(tmp_storage, fake_embed)
-    writer = System2Writer(factory=factory)
-
-    await writer.write(
-        content="用户喜欢喝咖啡",
-        app_id="app",
-        user_id="u",
-        agent_id="",
-        session_id="",
-        request_id="r1",
+async def test_dual_only_cognizes_after_explicit_digest(tmp_storage, fake_embed):
+    c = make(tmp_storage, fake_embed)
+    await c.add(content="fact", user_id="u")
+    assert (
+        len(c.factory.llm.calls) == 1
+        and len(c.factory.cache.list_pending_s2_scopes()) == 1
     )
-    assert _pending_count(factory) == 1
-
-    processed = await writer.digest_pending()
-    assert processed == 1
-    assert _pending_count(factory) == 0
-
-
-async def test_digest_pending_empty_queue(tmp_storage, fake_embed):
-    factory = _dual_factory(tmp_storage, fake_embed)
-    writer = System2Writer(factory=factory)
-    assert await writer.digest_pending() == 0
+    assert (await c.digest()).processed == 1
+    assert not c.factory.cache.list_pending_s2_scopes()
+    assert len(c.factory.llm.calls) == 2
+    await c.aclose()
 
 
-async def test_basic_info_only_write_does_not_enqueue_system2(tmp_storage, fake_embed):
-    factory = _basic_info_only_factory(tmp_storage, fake_embed)
-    writer = System2Writer(factory=factory)
+async def test_digest_watermark_preserves_new_arrivals(
+    tmp_storage, fake_embed, monkeypatch
+):
+    c = make(tmp_storage, fake_embed)
+    c.factory.cache.enqueue_s2_task("u", "default")
 
-    await writer.write(
-        content="我叫 Alice",
-        app_id="app",
-        user_id="u",
-        agent_id="",
-        session_id="s",
-        request_id="r1",
-    )
+    async def run(self, **kwargs):
+        c.factory.cache.enqueue_s2_task("u", "default")
+        return {}
 
-    assert factory.cache.list_pending_s2_scopes() == []
-
-
-async def test_content_hash_hit_does_not_reenqueue_system2(tmp_storage, fake_embed):
-    factory = _dual_factory(tmp_storage, fake_embed)
-    writer = System2Writer(factory=factory)
-    kwargs = {
-        "content": "用户喜欢喝咖啡",
-        "app_id": "app",
-        "user_id": "u",
-        "agent_id": "",
-        "session_id": "s",
-        "request_id": "r1",
-    }
-
-    await writer.write(**kwargs)
-    await writer.digest_pending()
-    await writer.write(**kwargs)
-
-    assert factory.cache.list_pending_s2_scopes() == []
+    monkeypatch.setattr(System2Agent, "run", run)
+    assert (await c.digest()).processed == 1
+    pending = c.factory.cache.list_pending_s2_scopes()
+    assert len(pending) == 1 and pending[0]["id"] == 2
+    await c.aclose()
 
 
-async def test_failed_digest_keeps_scope_pending(tmp_storage, fake_embed, monkeypatch):
-    factory = _dual_factory(tmp_storage, fake_embed)
-    writer = System2Writer(factory=factory)
-    factory.cache.enqueue_s2_task("u", "app")
+async def test_partial_scope_failure_acks_only_successful_scopes(
+    tmp_storage, fake_embed, monkeypatch
+):
+    c = make(tmp_storage, fake_embed)
+    for uid in ("good", "bad"):
+        c.factory.cache.enqueue_s2_task(uid, "default")
 
-    async def _fail(**kwargs):
-        raise RuntimeError("digest failed")
+    async def run(self, **kwargs):
+        if kwargs["user_id"] == "bad":
+            raise RuntimeError("failed scope")
+        return {}
 
-    monkeypatch.setattr(writer, "_digest_user", _fail)
-    with pytest.raises(RuntimeError, match="digest failed"):
-        await writer.digest_pending()
-    assert factory.cache.list_pending_s2_scopes() == [
-        {"app_id": "app", "user_id": "u", "agent_id": ""}
-    ]
+    monkeypatch.setattr(System2Agent, "run", run)
+    with pytest.raises(RuntimeError, match="failed scope"):
+        await c.digest()
+    assert [t["user_id"] for t in c.factory.cache.list_pending_s2_scopes()] == ["bad"]
+    await c.aclose()
+
+
+async def test_digest_scopes_use_configured_parallelism(
+    tmp_storage, fake_embed, monkeypatch
+):
+    c = make(tmp_storage, fake_embed)
+    c.settings.reconcile_concurrency = 3
+    for i in range(8):
+        c.factory.cache.enqueue_s2_task(str(i), "default")
+    active = peak = 0
+
+    async def run(self, **kwargs):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return {}
+
+    monkeypatch.setattr(System2Agent, "run", run)
+    assert (await c.digest()).processed == 8 and peak == 3
+    await c.aclose()
+
+
+async def test_profile_only_update_queues_cognition(tmp_storage, fake_embed):
+    c = make(tmp_storage, fake_embed)
+    c.factory.llm.responses["extract"] = {"basic_info": {"location": "Beijing"}}
+    c.factory.jev.responses = {"p0:representation": "PROFILE"}
+    result = await c.add(content="Beijing", user_id="u")
+    assert result.extracted_count == 1 and c.factory.cache.list_pending_s2_scopes()
+    await c.aclose()

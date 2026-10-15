@@ -1,4 +1,5 @@
 """L1_RAW evidence search is opt-in and never mixed into default QA search."""
+
 from dual_mem import MemoryClient
 from dual_mem.config import Settings
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
@@ -10,15 +11,17 @@ async def test_search_conversation_finds_shadowed_l1(tmp_storage, fake_embed):
     client = MemoryClient(
         settings=Settings(mode="system1", storage_dir=tmp_storage),
         embed=fake_embed,
-        llm=FakeLLMClient(responses={
-            "extract": {
-                "is_ephemeral": False,
-                "identity": [],
-                "facts": [{"content": "用户喜欢喝美式咖啡", "tags": ["饮品"]}],
-                "intentions": [],
-                "basic_info": {},
+        llm=FakeLLMClient(
+            responses={
+                "extract": {
+                    "is_ephemeral": False,
+                    "identity": [],
+                    "facts": [{"content": "用户喜欢喝美式咖啡", "tags": ["饮品"]}],
+                    "intentions": [],
+                    "basic_info": {},
+                }
             }
-        }),
+        ),
     )
     written = await client.add(
         content="我超爱美式咖啡，每天早上都喝",
@@ -28,13 +31,18 @@ async def test_search_conversation_finds_shadowed_l1(tmp_storage, fake_embed):
     raw = client.factory.vector.get(written.memory_id)
     assert raw is not None
     assert raw.layer is Layer.L1_RAW
-    assert raw.status is MemoryStatus.SHADOW
+    assert raw.status is MemoryStatus.ACTIVE
 
-    qa = await client.search(query="美式咖啡", app_ids=["app"], user_id="u_raw", min_score=0.0)
+    qa = await client.search(
+        query="美式咖啡", app_ids=["app"], user_id="u_raw", min_score=0.0
+    )
     assert all(item.memory_id != written.memory_id for item in qa.memories.flatten())
 
     conv = await client.search_conversation(
-        query="美式咖啡", app_ids=["app"], user_id="u_raw", min_score=0.0,
+        query="美式咖啡",
+        app_ids=["app"],
+        user_id="u_raw",
+        min_score=0.0,
     )
     ids = [item.memory_id for item in conv.memories.normal]
     assert written.memory_id in ids
@@ -42,19 +50,23 @@ async def test_search_conversation_finds_shadowed_l1(tmp_storage, fake_embed):
     await client.aclose()
 
 
-async def test_search_conversation_keeps_active_l1_when_no_derived(tmp_storage, fake_embed):
+async def test_search_conversation_keeps_active_l1_when_no_derived(
+    tmp_storage, fake_embed
+):
     client = MemoryClient(
         settings=Settings(mode="system1", storage_dir=tmp_storage),
         embed=fake_embed,
-        llm=FakeLLMClient(responses={
-            "extract": {
-                "is_ephemeral": True,
-                "identity": [],
-                "facts": [],
-                "intentions": [],
-                "basic_info": {},
+        llm=FakeLLMClient(
+            responses={
+                "extract": {
+                    "is_ephemeral": True,
+                    "identity": [],
+                    "facts": [],
+                    "intentions": [],
+                    "basic_info": {},
+                }
             }
-        }),
+        ),
     )
     written = await client.add(
         content="随便聊聊天气",
@@ -64,7 +76,10 @@ async def test_search_conversation_keeps_active_l1_when_no_derived(tmp_storage, 
     raw = client.factory.vector.get(written.memory_id)
     assert raw.status is MemoryStatus.ACTIVE
     conv = await client.search_conversation(
-        query="天气", app_ids=["app"], user_id="u_ephemeral", min_score=0.0,
+        query="天气",
+        app_ids=["app"],
+        user_id="u_ephemeral",
+        min_score=0.0,
     )
     assert written.memory_id in [item.memory_id for item in conv.memories.normal]
     await client.aclose()

@@ -49,33 +49,35 @@ Agent / Cursor  ──MCP──▶  MCP Server（受 Skill 指导）  ──▶ 
 > 复用 `MemoryClient`），但**职责上与 SDK 并列**——它们只做协议转换，不含业务逻辑。
 > 这与 Mem0 等项目把 `mem0` 核心与 `openmemory`(MCP) 同仓并存的取舍一致。
 
-## 七个实现层（SDK 内部）
+## 四个处理阶段
 
-各层语义、产生方、读路径归属的权威说明见 [`memory_layers.md`](./memory_layers.md)。
+层定义见 [memory_layers.md](memory_layers.md)，调用契约与迁移见
+[jev-memory-design.md](jev-memory-design.md)，可交互流程见
+[jev-memory-flow.html](design/jev-memory-flow.html)。
 
-| 层 | 含义（对标 hy_memory） | 产生方 |
-|---|---|---|
-| L0_BASIC_INFO | 基础信息层：结构化基础画像（姓名/年龄/所在地…） | System1 `BasicProfile` |
-| L1_RAW | 原始对话层：写入即落、Append-Only | 写入即落 |
-| L2_FACT | 原子事实层：抽取的离散、版本化事实 | System1 抽取 |
-| L3_SUMMARY | 会话摘要层：超过配置阈值的长文本摘要（默认关闭） | System1 摘要 |
-| L4_IDENTITY | 身份画像层：身份/长期偏好 | System1 抽取 + 整理 |
-| L6_SCHEMA | 心智模型层：跨证据归纳的行为模式 | System2 聚类 |
-| L7_INTENTION | 前瞻意图层：用户的具体未来意图 | System2 |
+| 层 | 含义 | 产生方 |
+| --- | --- | --- |
+| L0_RAW | 原始来源证据 | 写入即保留 |
+| L1_FACT | 明确事实、独立事件、明确意图 | 生成候选 → JEV 裁决 |
+| L2_PROFILE | 身份、画像、状态维度 | JEV representation |
+| L3_DERIVED | 跨证据模式、摘要、推导意图 | 显式 digest → 生成 + JEV |
 
-- **System1（写侧）**：L1_RAW 先落盘 → Extractor（1 次 LLM，输出 identity/facts/intentions/basic_info 与 `is_ephemeral`）→ 提交判定 → fast-write 直接落 L0/L2/L4。摘要默认关闭；开启后长文本可写 L3。System1 不产生无人消费的 reconcile 队列；`reconcile_sync=true` 是显式强一致选项。
-- **System2（仅 dual）**：写入登记待处理 scope；只有 `await client.digest()` 才依次运行 `ReconcilerWorker` 与 `System2Agent`。后者对新鲜 L2/L4 做 DBSCAN 聚类，再通过 single-shot 或 ReAct 工具调用写 L6 Schema、L7 Intention 与图边。SDK 不启动 per-write 或 scheduled 后台任务。
-- **混合召回（读侧）**：不调用 LLM，但会调用 Embedding API。管线并行召回语义 VDB、L0 profile 和 L6 graph schema，在语义召回池内做 BM25 重排，融合图证据与演化链后按 profile / proactive / normal 分组。时间窗与派生层分别由 `created_after`、`include_derived` 显式控制，不从 query 猜测意图。
+System1 两种模式共用：保留来源 → 一次生成候选 → 批量 JEV action/target/representation
+→ 批量 embedding → 校验 scope epoch/revision → durable append/link。
+MERGE 才增加文本合并及无损校验。默认 latest 读取，历史可显式查看。
 
-## 两档模式
+dual 写入后登记 scope；digest 按证据数和字符预算分页，准确确认 processed_ids，
+生成与 JEV 校验后提交 L3。不同 scope 默认并行 4，同 scope 有序处理。失败任务保留 pending。
+版本提交与图投影之间通过持久待处理记录恢复，图只作为证据关系投影。
 
-| 维度 | system1（默认） | dual |
-|---|---|---|
-| 写侧 LLM 调用 | Extract（显式启用后长文本 +1 summarize） | 同 system1；digest 时 reconcile + S2 |
-| 写入层 | L0–L4 | L0–L4、L6–L7 |
-| System2 / 图库 | ✗ | ✓ |
-| proactive 召回 | 空 | 有 L7 意图 |
+混合检索调用 Embedding，不调用语义决策模型。画像与事实只召回 latest；
+图结果须对照 VDB 最新状态。关键词保留在读侧重排，与写入判断无关。
 
-> 读路径说明：关键词通道只重排语义召回池，不做全库扫描。融合权重与证据加成由 `hybrid_w_sem`、`hybrid_w_bm25`、`hybrid_evidence_boost_max`、`hybrid_evidence_saturate` 控制；`client.search(debug=True)` 返回精简的 `ReadResult`。
+| 维度 | system1 | dual |
+| --- | --- | --- |
+| 写入 | 同一生成 + JEV 管线 | 同左 |
+| 产物 | L0 / L1 / L2 | 同左，digest 增加 L3 |
+| System2 / 图库 | 关闭 | 显式 digest |
+| 版本保留 | 全部保留 | 全部保留 |
 
-更多接入与部署细节见 [`mcp_integration.md`](./mcp_integration.md)。
+更多接入与部署细节见 [mcp_integration.md](mcp_integration.md)。

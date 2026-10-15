@@ -73,7 +73,9 @@ class AsyncRunner:
             target=self._loop.run_forever, daemon=True, name="dual-mem-loop"
         )
         self._thread.start()
-        logger.debug("[runner] loop thread started, is_running=%s", self._loop.is_running())
+        logger.debug(
+            "[runner] loop thread started, is_running=%s", self._loop.is_running()
+        )
 
     def run(self, coro: Any) -> Any:
         logger.debug("[runner] submit coroutine")
@@ -132,8 +134,12 @@ def format_memories_for_prompt(
             head = chain[0]
             head_when = _fmt_time(head.memory_at)
             head_content = (head.content or mem.content or "").strip()
-            lines.append(f"  [Latest] {head_when + '  ' if head_when else ''}{head_content}")
-            entry = f"- [{idx + 1}] [Evolved, {len(chain)} versions]\n" + "\n".join(lines)
+            lines.append(
+                f"  [Latest] {head_when + '  ' if head_when else ''}{head_content}"
+            )
+            entry = f"- [{idx + 1}] [Evolved, {len(chain)} versions]\n" + "\n".join(
+                lines
+            )
         else:
             content = (mem.content or "").strip()
             if not content:
@@ -209,11 +215,13 @@ def format_topic_catalog(
     max_chars: int = 800,
 ) -> str:
     """Query-independent topic / schema directory for the stable system tail."""
-    items = sorted({
-        str(item).strip()
-        for item in (*tags, *(schemas or ()))
-        if item and str(item).strip()
-    })
+    items = sorted(
+        {
+            str(item).strip()
+            for item in (*tags, *(schemas or ()))
+            if item and str(item).strip()
+        }
+    )
     if not items:
         return ""
     out: list[str] = []
@@ -383,8 +391,12 @@ class MemoryBackend:
         return await self.client.get(memory_id)
 
     async def list(
-        self, *, user_id: str, app_id: Optional[str] = None,
-        agent_id: str = "", limit: int = 100,
+        self,
+        *,
+        user_id: str,
+        app_id: Optional[str] = None,
+        agent_id: str = "",
+        limit: int = 100,
     ) -> list:
         return await self.client.list(
             app_id=app_id, user_id=user_id, agent_id=agent_id, limit=limit
@@ -397,8 +409,12 @@ class MemoryBackend:
         return await self.client.delete(memory_id)
 
     async def delete_scope(
-        self, *, confirm: bool, app_id: Optional[str] = None,
-        user_id: Optional[str] = None, agent_id: Optional[str] = None,
+        self,
+        *,
+        confirm: bool,
+        app_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
     ) -> Any:
         return await self.client.delete_bulk(
             app_id=app_id, user_id=user_id, agent_id=agent_id, confirm=confirm
@@ -423,32 +439,44 @@ class MemoryBackend:
         where = build_filter(
             app_ids=[resolved],
             user_id=user_id,
-            layers=[Layer.L0_BASIC_INFO],
+            layers=[Layer.L2_PROFILE],
             statuses=[MemoryStatus.ACTIVE],
+            latest_only=True,
         )
-        nodes = await asyncio.to_thread(self.client.factory.vector.get_many, where, limit)
+        nodes = await asyncio.to_thread(
+            self.client.factory.vector.get_many, where, limit
+        )
         fact_where = build_filter(
             app_ids=[resolved],
             user_id=user_id,
-            layers=[Layer.L2_FACT, Layer.L4_IDENTITY],
+            layers=[Layer.L1_FACT, Layer.L2_PROFILE],
             statuses=[MemoryStatus.ACTIVE],
+            latest_only=True,
         )
         fact_nodes = await asyncio.to_thread(
-            self.client.factory.vector.get_many, fact_where, 200,
+            self.client.factory.vector.get_many,
+            fact_where,
+            200,
         )
         tags = [tag for node in fact_nodes for tag in node.tags]
         schemas: list[str] = []
-        graph = self.client.factory.graph
-        if graph is not None:
-            for schema in graph.list_by_layer(
-                layer=Layer.L6_SCHEMA.value,
-                user_id=user_id,
-                app_ids=[resolved],
-                limit=40,
-            ):
-                title = (schema.content or "").strip().splitlines()[0][:40]
-                if title:
-                    schemas.append(title)
+        if self.client.settings.enable_graph:
+            derived = await asyncio.to_thread(
+                self.client.factory.vector.get_many,
+                build_filter(
+                    app_ids=[resolved],
+                    user_id=user_id,
+                    layers=[Layer.L3_DERIVED],
+                    statuses=[MemoryStatus.ACTIVE],
+                    latest_only=True,
+                ),
+                40,
+            )
+            schemas = [
+                n.content.strip().splitlines()[0][:40]
+                for n in derived
+                if n.content.strip()
+            ]
         parts = [
             format_profile_block(
                 [Reader.memory_node_to_item(node) for node in nodes],
@@ -472,13 +500,21 @@ class MemoryBackend:
         """Stable L0 dump + this-turn normal-route facts."""
         app_id = app_ids[0] if app_ids else None
         stable = await self.load_profile_block(
-            user_id=user_id, app_id=app_id, max_chars=max_chars,
+            user_id=user_id,
+            app_id=app_id,
+            max_chars=max_chars,
         )
         result = await self.search(
-            query=query, user_id=user_id, app_ids=app_ids,
-            agent_ids=agent_ids, limit=limit, **kwargs,
+            query=query,
+            user_id=user_id,
+            app_ids=app_ids,
+            agent_ids=agent_ids,
+            limit=limit,
+            **kwargs,
         )
-        dynamic = format_memories_for_prompt(result.memories.normal, max_chars=max_chars)
+        dynamic = format_memories_for_prompt(
+            result.memories.normal, max_chars=max_chars
+        )
         return RenderedMemoryContext(
             stable_block=stable,
             dynamic_block=dynamic,
@@ -498,8 +534,12 @@ class MemoryBackend:
     ) -> str:
         """Search, then render the matched memories as a prompt injection block."""
         result = await self.search(
-            query=query, user_id=user_id, app_ids=app_ids,
-            agent_ids=agent_ids, limit=limit, **kwargs,
+            query=query,
+            user_id=user_id,
+            app_ids=app_ids,
+            agent_ids=agent_ids,
+            limit=limit,
+            **kwargs,
         )
         items = result.memories.flatten(limit=limit)
         return format_memories_for_prompt(items, max_chars=max_chars)
@@ -508,6 +548,7 @@ class MemoryBackend:
 # ============================================================================
 # 共享同步 Provider 基类（Hermes / OpenClaw 同源 MemoryProvider 契约）
 # ============================================================================
+
 
 class _SyncMemoryProvider:
     """Common lifecycle for agent-framework memory providers.
@@ -573,8 +614,10 @@ class _SyncMemoryProvider:
                 return
             self._session_id = session_id or self._session_id
             backend = MemoryBackend(
-                settings=self._settings, storage_dir=self._storage_dir,
-                mode=self._mode, **self._client_kwargs,
+                settings=self._settings,
+                storage_dir=self._storage_dir,
+                mode=self._mode,
+                **self._client_kwargs,
             )
             logger.debug("[provider] backend built")
             self._backend = backend
@@ -601,8 +644,10 @@ class _SyncMemoryProvider:
         async def _timed_search():
             return await asyncio.wait_for(
                 self._backend.search(
-                    query=q, user_id=self._user_id,
-                    agent_ids=[self._agent_id], limit=10,
+                    query=q,
+                    user_id=self._user_id,
+                    agent_ids=[self._agent_id],
+                    limit=10,
                 ),
                 timeout=self._max_prefetch_timeout_ms / 1000.0,
             )
@@ -627,7 +672,9 @@ class _SyncMemoryProvider:
         return "\n\n".join(parts)
 
     # ---- 写入节流（sync_turn） -------------------------------------------
-    def sync_turn(self, user_message: str, assistant_response: str, **kwargs: Any) -> None:
+    def sync_turn(
+        self, user_message: str, assistant_response: str, **kwargs: Any
+    ) -> None:
         if not self._backend or not self._runner or not user_message:
             return
         cleaned = strip_memory_injection(user_message)
@@ -641,8 +688,10 @@ class _SyncMemoryProvider:
         try:
             raw = self._runner.run(
                 self._backend.add_raw(
-                    messages=turn, user_id=self._user_id,
-                    agent_id=self._agent_id, session_id=session_id,
+                    messages=turn,
+                    user_id=self._user_id,
+                    agent_id=self._agent_id,
+                    session_id=session_id,
                 )
             )
         except Exception as exc:
@@ -663,7 +712,9 @@ class _SyncMemoryProvider:
         self._cancel_idle(session_id)
         if self._idle_timeout_sec <= 0:
             return
-        timer = threading.Timer(self._idle_timeout_sec, self._idle_flush, args=(session_id,))
+        timer = threading.Timer(
+            self._idle_timeout_sec, self._idle_flush, args=(session_id,)
+        )
         timer.daemon = True
         timer.start()
         self._idle_timers[session_id] = timer
@@ -685,9 +736,11 @@ class _SyncMemoryProvider:
         try:
             self._runner.run(
                 self._backend.distill(
-                    messages=msgs, user_id=self._user_id,
+                    messages=msgs,
+                    user_id=self._user_id,
                     source_node_ids=l1_ids,
-                    agent_id=self._agent_id, session_id=session_id,
+                    agent_id=self._agent_id,
+                    session_id=session_id,
                 )
             )
         except Exception as exc:
@@ -712,7 +765,9 @@ class _SyncMemoryProvider:
     def on_pre_compress(self, messages: list[dict], **kwargs: Any) -> None:
         self.on_session_end(messages, **kwargs)
 
-    def on_memory_write(self, action: str, target: str, content: str, **kwargs: Any) -> None:
+    def on_memory_write(
+        self, action: str, target: str, content: str, **kwargs: Any
+    ) -> None:
         if not self._backend or not self._runner or not content:
             return
         if action == "delete":
@@ -720,8 +775,10 @@ class _SyncMemoryProvider:
         try:
             self._runner.run(
                 self._backend.add(
-                    content=content, user_id=self._user_id,
-                    agent_id=self._agent_id, session_id=self._session_id,
+                    content=content,
+                    user_id=self._user_id,
+                    agent_id=self._agent_id,
+                    session_id=self._session_id,
                 )
             )
         except Exception as exc:
@@ -737,7 +794,10 @@ class _SyncMemoryProvider:
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "Search query"},
-                        "limit": {"type": "integer", "description": "Max results (default 10)"},
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max results (default 10)",
+                        },
                     },
                     "required": ["query"],
                 },
@@ -752,7 +812,10 @@ class _SyncMemoryProvider:
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "Search query"},
-                        "limit": {"type": "integer", "description": "Max results (default 10)"},
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max results (default 10)",
+                        },
                     },
                     "required": ["query"],
                 },
@@ -785,7 +848,10 @@ class _SyncMemoryProvider:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "limit": {"type": "integer", "description": "Max results (default 20)"},
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max results (default 20)",
+                        },
                     },
                 },
             },
@@ -793,6 +859,7 @@ class _SyncMemoryProvider:
 
     def handle_tool_call(self, name: str, args: dict) -> str:
         import json
+
         return json.dumps(self._dispatch_tool(name, args), ensure_ascii=False)
 
     def _dispatch_tool(self, name: str, args: dict) -> dict:
@@ -813,8 +880,10 @@ class _SyncMemoryProvider:
                 )
                 result = self._runner.run(
                     search(
-                        query=args.get("query", ""), user_id=self._user_id,
-                        agent_ids=[self._agent_id], limit=int(args.get("limit") or 10),
+                        query=args.get("query", ""),
+                        user_id=self._user_id,
+                        agent_ids=[self._agent_id],
+                        limit=int(args.get("limit") or 10),
                     )
                 )
                 items = result.memories.flatten(limit=int(args.get("limit") or 10))
@@ -822,7 +891,11 @@ class _SyncMemoryProvider:
                     "status": "success",
                     "count": len(items),
                     "memories": [
-                        {"memory_id": m.memory_id, "content": m.content, "score": m.score}
+                        {
+                            "memory_id": m.memory_id,
+                            "content": m.content,
+                            "score": m.score,
+                        }
                         for m in items
                     ],
                 }
@@ -832,8 +905,10 @@ class _SyncMemoryProvider:
                     return {"error": "content is required"}
                 res = self._runner.run(
                     self._backend.add(
-                        content=content, user_id=self._user_id,
-                        agent_id=self._agent_id, session_id=self._session_id,
+                        content=content,
+                        user_id=self._user_id,
+                        agent_id=self._agent_id,
+                        session_id=self._session_id,
                     )
                 )
                 return {"status": "success", "memory_id": res.memory_id}
@@ -846,14 +921,17 @@ class _SyncMemoryProvider:
             if name == "memory_list":
                 items = self._runner.run(
                     self._backend.list(
-                        user_id=self._user_id, agent_id=self._agent_id,
+                        user_id=self._user_id,
+                        agent_id=self._agent_id,
                         limit=int(args.get("limit") or 20),
                     )
                 )
                 return {
                     "status": "success",
                     "count": len(items),
-                    "memories": [{"memory_id": m.memory_id, "content": m.content} for m in items],
+                    "memories": [
+                        {"memory_id": m.memory_id, "content": m.content} for m in items
+                    ],
                 }
             return {"error": f"Unknown tool: {name}"}
         except Exception as exc:

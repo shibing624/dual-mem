@@ -36,6 +36,14 @@ class HistoryStore:
                 self.conn = connect_sqlite(f"{storage_dir}/history.db")
                 self.conn.row_factory = sqlite3.Row
                 self.conn.executescript(_DDL)
+                columns = {
+                    r[1] for r in self.conn.execute("PRAGMA table_info(history)")
+                }
+                if "event_key" not in columns:
+                    self.conn.execute("ALTER TABLE history ADD COLUMN event_key TEXT")
+                self.conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS history_event_key ON history(event_key)"
+                )
                 self.conn.commit()
 
     def append(
@@ -46,14 +54,15 @@ class HistoryStore:
         user_id: str,
         old: dict | None,
         new: dict | None,
+        event_key: str | None = None,
     ) -> None:
         """Append one history event with optional old/new metadata snapshots."""
         if not self._persist or self.conn is None:
             return
         with self._lock:
             self.conn.execute(
-                "INSERT INTO history (event, node_id, user_id, old, new, ts) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO history (event, node_id, user_id, old, new, ts, event_key) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     event,
                     node_id,
@@ -61,6 +70,7 @@ class HistoryStore:
                     json.dumps(old, ensure_ascii=False) if old is not None else None,
                     json.dumps(new, ensure_ascii=False) if new is not None else None,
                     time.time(),
+                    event_key,
                 ),
             )
             self.conn.commit()
@@ -76,7 +86,11 @@ class HistoryStore:
             result = []
             for row in rows:
                 item = dict(row)
-                item["old"] = json.loads(item["old"]) if item["old"] is not None else None
-                item["new"] = json.loads(item["new"]) if item["new"] is not None else None
+                item["old"] = (
+                    json.loads(item["old"]) if item["old"] is not None else None
+                )
+                item["new"] = (
+                    json.loads(item["new"]) if item["new"] is not None else None
+                )
                 result.append(item)
             return result

@@ -48,13 +48,30 @@ class ChatMessage:
 
 
 @dataclass
-class CommitResult:
-    """Extractor-backed decision on whether a raw write should produce derived memories."""
+class MemoryDecision:
+    """Executable Jev decision returned to the caller, including skip reasons."""
 
-    # 是否存在值得沉淀到 L0/L2+ 的结构化记忆；False 时只保留 L1_RAW
+    action: str
+    update_type: str | None = None
+    targets: list[str] = field(default_factory=list)
+    proposal_ids: list[str] = field(default_factory=list)
+    source_ids: list[str] = field(default_factory=list)
+    reason: str = ""
+    confidence: float | None = None
+
+    def to_dict(self) -> dict:
+        return _omit_none(asdict(self))
+
+
+@dataclass
+class CommitResult:
+    """Jev-backed decision on whether a raw write should produce derived memories."""
+
+    # 是否追加结构化版本；False 时保留 L0_RAW 来源
     passed: bool
     # 可读的提交/跳过原因
     reason: str = ""
+    decisions: list[MemoryDecision] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Flatten this commit decision into a dict for logging or contract responses."""
@@ -65,22 +82,23 @@ class CommitResult:
 class WriteResult:
     """Outcome of a single MemoryClient.add call."""
 
-    # 写入是否成功（仅保留 L1_RAW 时仍为 True，见 is_ephemeral）
+    # 写入是否成功（仅保留 L0_RAW 时仍为 True，见 is_ephemeral）
     success: bool
-    # 本次写入的 L1_RAW 节点 id（主 raw id）
+    # 本次写入的 L0_RAW 节点 id（主 raw id）
     memory_id: str
     # 请求追踪 id（日志/REST 对齐）
     request_id: str
     # 端到端处理耗时（毫秒）
     processing_time_ms: float
-    # Extractor 是否产出了值得沉淀到 L0/L2+ 的结构化记忆
+    # Jev 是否提交结构化版本或归档动作
     commit_passed: bool = True
-    # 本次写入产生的 L0/L2/L3/L4/L7 等衍生节点数量
+    # 本次写入产生的 L1/L2（digest 为 L3）版本数量
     extracted_count: int = 0
-    # 除 L1 raw 外写入的节点 id 列表
+    # 除 L0 raw 外写入的节点 id 列表
     extra_node_ids: list[str] = field(default_factory=list)
-    # True 表示 Extractor 判定为纯寒暄/无信息量，仅落 L1
+    # True 表示 Jev 判定 RAW_ONLY，仅保留来源
     is_ephemeral: bool = False
+    decisions: list[MemoryDecision] = field(default_factory=list)
     # REST 风格错误码；成功时为 None
     error_code: int | None = None
     # 错误描述；成功时为 None
@@ -99,7 +117,7 @@ class EvolutionItem:
     node_id: str
     # 该版本文本
     content: str
-    # 存储层代号，如 L2_FACT / L4_IDENTITY
+    # 存储层代号，如 L1_FACT / L2_PROFILE
     layer: str
     # 语义时间：用户说这话/事件发生的 Unix 秒（UTC）；未知为 None
     memory_at: int | None = None
@@ -144,6 +162,16 @@ class MemoryItem:
     # 源 L1_RAW 节点 id（extract / reconcile 写入 custom.source_node_id）
     source_node_id: str | None = None
 
+    layer: str = ""
+    kind: str = ""
+    is_latest: bool = True
+    revision: int = 0
+    source_ids: list[str] = field(default_factory=list)
+    supersedes: list[str] = field(default_factory=list)
+    conflicts_with: list[str] = field(default_factory=list)
+    valid_from: int | None = None
+    valid_until: int | None = None
+
     def to_dict(self) -> dict:
         """Serialize this memory item with its (optional) evolution chain expanded."""
         out: dict[str, Any] = {
@@ -153,7 +181,18 @@ class MemoryItem:
             "score": round(self.score, 4),
             "tags": list(self.tags),
             "session_id": self.session_id,
+            "layer": self.layer,
+            "kind": self.kind,
+            "is_latest": self.is_latest,
+            "revision": self.revision,
+            "source_ids": list(self.source_ids),
+            "supersedes": list(self.supersedes),
+            "conflicts_with": list(self.conflicts_with),
         }
+        if self.valid_from is not None:
+            out["valid_from"] = self.valid_from
+        if self.valid_until is not None:
+            out["valid_until"] = self.valid_until
         if self.memory_at is not None:
             out["memory_at"] = self.memory_at
         if self.gmt_created is not None:

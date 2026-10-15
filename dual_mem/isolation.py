@@ -21,6 +21,7 @@ def build_filter(
     layers: list[Layer] | None = None,
     statuses: list[MemoryStatus] | None = None,
     created_after: int | None = None,
+    latest_only: bool = False,
 ) -> dict:
     """Build a metadata where-filter from scope, layer, status and time constraints."""
     where: dict = {
@@ -37,4 +38,6 @@ def build_filter(
         where["status"] = {"$in": [status.value for status in statuses]}
     if created_after is not None:
         where["gmt_created"] = {"$gte": created_after}
+    if latest_only:
+        where["is_latest"] = True
     return where

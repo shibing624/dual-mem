@@ -11,6 +11,7 @@ import logging
 import time
 
 from openai import AsyncOpenAI
+import httpx
 
 from dual_mem.config import (
     CHARS_PER_TOKEN,
@@ -75,7 +76,12 @@ class EmbedService:
                 "set embed_dim to the model's output size for vector store alignment.",
                 model,
             )
-        self.client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        self.client = AsyncOpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            http_client=httpx.AsyncClient(timeout=timeout),
+        )
 
         self._cache: dict[str, list[float]] = {}
         self._cache_size = cache_size
@@ -96,6 +102,9 @@ class EmbedService:
         if len(self._cache) >= self._cache_size:
             return
         self._cache[self._cache_key(text)] = vector
+
+    async def aclose(self) -> None:
+        await self.client.close()
 
     async def _embed_prepared_batch(self, prepared: list[str]) -> list[list[float]]:
         """Call the embeddings API for *prepared* strings (already chunked)."""
@@ -124,7 +133,7 @@ class EmbedService:
             except Exception as exc:
                 last_exc = exc
                 if attempt < self.retry_attempts - 1:
-                    delay = self.retry_base_delay * (2 ** attempt)
+                    delay = self.retry_base_delay * (2**attempt)
                     logger.warning(
                         "embed_batch attempt %d/%d failed (%s: %s); retry in %.1fs",
                         attempt + 1,

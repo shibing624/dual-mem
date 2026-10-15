@@ -10,24 +10,15 @@ from dual_mem.types import (
 )
 
 
-def test_layer_has_seven_members():
-    assert len(Layer) == 7
-    expected = {
-        "L0_BASIC_INFO",
-        "L1_RAW",
-        "L2_FACT",
-        "L3_SUMMARY",
-        "L4_IDENTITY",
-        "L6_SCHEMA",
-        "L7_INTENTION",
-    }
-    assert {m.name for m in Layer} == expected
-    for m in Layer:
-        assert m.value == m.name
+def test_four_canonical_layers_with_legacy_read_aliases():
+    assert {m.name for m in Layer} == {"L0_RAW", "L1_FACT", "L2_PROFILE", "L3_DERIVED"}
+    assert Layer("L2_FACT") == Layer.L1_FACT
+    assert Layer.L4_IDENTITY == Layer.L2_PROFILE
+    assert Layer("L6_SCHEMA") == Layer.L3_DERIVED
 
 
-def test_reconcile_op_only_three():
-    assert {m.name for m in ReconcileOp} == {"ADD", "SUPERSEDE", "DELETE"}
+def test_reconcile_actions_include_skip():
+    assert {m.name for m in ReconcileOp} == {"ADD", "DELETE", "SKIP", "SUPERSEDE"}
 
 
 def test_status_members():
@@ -39,14 +30,30 @@ def test_status_members():
     }
 
 
-def test_layer_to_category_map():
-    assert LAYER_TO_CATEGORY[Layer.L0_BASIC_INFO] == Category.profile
-    assert LAYER_TO_CATEGORY[Layer.L1_RAW] == Category.raw
-    assert LAYER_TO_CATEGORY[Layer.L2_FACT] == Category.fact
-    assert LAYER_TO_CATEGORY[Layer.L3_SUMMARY] == Category.summary
-    assert LAYER_TO_CATEGORY[Layer.L4_IDENTITY] == Category.profile
-    assert LAYER_TO_CATEGORY[Layer.L6_SCHEMA] == Category.schema
-    assert LAYER_TO_CATEGORY[Layer.L7_INTENTION] == Category.intention
+def test_category_uses_kind_with_four_layer_routing():
+    assert LAYER_TO_CATEGORY[Layer.L0_RAW] == Category.raw
+    assert LAYER_TO_CATEGORY[Layer.L1_FACT] == Category.fact
+    assert LAYER_TO_CATEGORY[Layer.L2_PROFILE] == Category.profile
+    assert (
+        MemoryNode(
+            content="plan",
+            layer=Layer.L1_FACT,
+            kind="intention",
+            app_id="a",
+            user_id="u",
+        ).category
+        == Category.intention
+    )
+    assert (
+        MemoryNode(
+            content="summary",
+            layer=Layer.L3_DERIVED,
+            kind="summary",
+            app_id="a",
+            user_id="u",
+        ).category
+        == Category.summary
+    )
 
 
 def test_node_defaults_and_category():
@@ -60,9 +67,17 @@ def test_node_defaults_and_category():
 
 
 def test_score_not_in_eq():
-    a = MemoryNode(content="x", layer=Layer.L1_RAW, app_id="a", user_id="u", node_id="fixed")
-    b = MemoryNode(content="x", layer=Layer.L1_RAW, app_id="a", user_id="u", node_id="fixed",
-                   gmt_created=a.gmt_created)
+    a = MemoryNode(
+        content="x", layer=Layer.L1_RAW, app_id="a", user_id="u", node_id="fixed"
+    )
+    b = MemoryNode(
+        content="x",
+        layer=Layer.L1_RAW,
+        app_id="a",
+        user_id="u",
+        node_id="fixed",
+        gmt_created=a.gmt_created,
+    )
     b.score = 9.9
     assert a == b
 

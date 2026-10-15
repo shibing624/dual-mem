@@ -45,7 +45,7 @@ def test_chain_hit_returns_head_with_full_chain():
     assert item["score"] == 0.8
     chain_ids = [c["node_id"] for c in item["evolution_chain"]]
     assert chain_ids == ["A", "B", "C"]
-    assert item["evolution_chain"][0]["layer"] == "L2_FACT"
+    assert item["evolution_chain"][0]["layer"] == "L1_FACT"
 
 
 def test_plain_node_passes_through():

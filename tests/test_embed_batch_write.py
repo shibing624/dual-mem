@@ -1,167 +1,54 @@
-"""L1 queued embedding and post-extract structured-memory batching."""
-from dual_mem.agent.mem_agent import MemAgent
+from conftest import FakeEmbedService, FakeLLMClient, FakeJev
+from dual_mem import MemoryClient
 from dual_mem.config import Settings
-from dual_mem.registry import ComponentFactory
-from dual_mem.types import Layer, MemoryNode
-from dual_mem.writer.memory_writer import MemoryWriter
-
-from conftest import FakeEmbedService, FakeLLMClient
 
 
 class CountingEmbed(FakeEmbedService):
-    def __init__(self, dim: int = 64):
-        super().__init__(dim=dim)
-        self.batch_calls: list[list[str]] = []
-        self.queued_calls: list[str] = []
+    def __init__(self):
+        super().__init__()
+        self.batches = []
+        self.direct = []
 
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        self.batch_calls.append(list(texts))
+    async def embed(self, text):
+        self.direct.append(text)
+        return await super().embed(text)
+
+    async def embed_batch(self, texts):
+        self.batches.append(texts)
         return await super().embed_batch(texts)
 
-    async def embed_queued(self, text: str) -> list[float]:
-        self.queued_calls.append(text)
-        return await super().embed_queued(text)
 
-
-def _extract_response():
-    return {
-        "is_ephemeral": False,
-        "emotion": {"valence": 0.0, "arousal": 0.0, "dominant_emotion": None},
-        "identity": [{"content": "用户喜欢 Python", "speculate": None, "tags": []}],
-        "facts": [],
-        "intentions": [],
-        "basic_info": {"location": "北京"},
-    }
-
-
-async def test_post_extract_single_embed_batch(tmp_storage):
+async def test_one_raw_embedding_and_single_structured_batch(tmp_storage):
     embed = CountingEmbed()
-    factory = ComponentFactory(
-        settings=Settings(mode="system1", storage_dir=tmp_storage),
+    c = MemoryClient(
+        settings=Settings(storage_dir=tmp_storage),
         embed=embed,
-        llm=FakeLLMClient(responses={"extract": _extract_response(), "search_query": []}),
-    )
-    agent = MemAgent(factory=factory)
-    raw = MemoryNode(
-        content="我搬到北京了，主要用 Python",
-        layer=Layer.L1_RAW,
-        app_id="app",
-        user_id="u",
-        agent_id="ag",
-    )
-    raw.embedding = embed.embed_sync(raw.content)
-
-    await agent.run(
-        content=raw.content,
-        app_id="app",
-        user_id="u",
-        agent_id="ag",
-        session_id="se",
-        request_id="req",
-        memory_at=None,
-    )
-
-    # L0 + one L4 in one post-extract batch (no separate basic_profile embed).
-    assert len(embed.batch_calls) == 1
-    assert len(embed.batch_calls[0]) == 2
-
-
-async def test_writer_uses_queued_embedding_for_l1(tmp_storage):
-    embed = CountingEmbed()
-    factory = ComponentFactory(
-        settings=Settings(
-            mode="system1",
-            storage_dir=tmp_storage,
+        jev=FakeJev(),
+        llm=FakeLLMClient(
+            {
+                "extract": {
+                    "facts": [{"content": "80 yuan"}, {"content": "30 yuan"}],
+                    "identity": [{"content": "Lives in Beijing"}],
+                }
+            }
         ),
-        embed=embed,
-        llm=FakeLLMClient(responses={"extract": _extract_response(), "search_query": []}),
     )
-    writer = MemoryWriter(factory=factory)
-    dialogue = "[user]: 我搬到北京\n[assistant]: 好的"
-
-    await writer.write(
-        content=dialogue,
-        app_id="app",
-        user_id="u",
-        agent_id="ag",
-        session_id="se",
-        request_id="req",
-    )
-
-    assert len(embed.queued_calls) == 1
-    assert embed.queued_calls[0] == dialogue
+    result = await c.add(content="raw evidence", user_id="u")
+    assert embed.direct == ["raw evidence"] and len(embed.batches) == 1
+    assert len(embed.batches[0]) == 3 and result.extracted_count == 3
 
 
-def _basic_info_only_response():
-    """Extract result with ONLY basic_info — no facts/identity/intentions."""
-    return {
-        "is_ephemeral": False,
-        "emotion": {"valence": 0.0, "arousal": 0.0, "dominant_emotion": None},
-        "identity": [],
-        "facts": [],
-        "intentions": [],
-        "basic_info": {"location": "北京"},
-    }
-
-
-async def test_reconcile_sync_basic_info_only_writes_l0_no_enqueue(tmp_storage):
-    """reconcile_sync=True with ONLY basic_info: L0 is written and nothing is queued for
-    reconcile (L0 evolves via its own supersede chain, never the reconcile queue)."""
+async def test_known_skip_needs_no_structured_embedding(tmp_storage):
     embed = CountingEmbed()
-    factory = ComponentFactory(
-        settings=Settings(
-            mode="system1", storage_dir=tmp_storage,
-            reconcile_sync=True,
-        ),
+    jev = FakeJev()
+    c = MemoryClient(
+        settings=Settings(storage_dir=tmp_storage),
         embed=embed,
-        llm=FakeLLMClient(responses={"extract": _basic_info_only_response()}),
+        jev=jev,
+        llm=FakeLLMClient({"extract": {"facts": [{"content": "Known"}]}}),
     )
-    agent = MemAgent(factory=factory)
-    raw = MemoryNode(
-        content="我搬到北京了", layer=Layer.L1_RAW,
-        app_id="app", user_id="u", agent_id="ag",
-    )
-    raw.embedding = embed.embed_sync(raw.content)
-
-    stored_ids, _commit, _eph = await agent.run(
-        content=raw.content,
-        app_id="app", user_id="u", agent_id="ag", session_id="se",
-        request_id="req", memory_at=None,
-    )
-
-    # Exactly one L0 node persisted.
-    assert len(stored_ids) == 1
-    l0 = factory.vector.get(stored_ids[0])
-    assert l0 is not None and l0.layer is Layer.L0_BASIC_INFO
-    # No reconcile task enqueued for an L0-only write.
-    assert factory.cache.list_pending_reconcile_tasks(
-        app_id="app", user_id="u", agent_id="ag"
-    ) == []
-
-
-async def test_system1_fast_write_does_not_leave_reconcile_work(tmp_storage):
-    """System1 has no digest consumer, so fast writes must not accumulate queue rows."""
-    embed = CountingEmbed()
-    factory = ComponentFactory(
-        settings=Settings(mode="system1", storage_dir=tmp_storage),
-        embed=embed,
-        llm=FakeLLMClient(responses={"extract": _extract_response()}),  # L4 + basic_info
-    )
-    agent = MemAgent(factory=factory)
-    raw = MemoryNode(
-        content="我搬到北京，主要用 Python", layer=Layer.L1_RAW,
-        app_id="app", user_id="u", agent_id="ag",
-    )
-    raw.embedding = embed.embed_sync(raw.content)
-
-    stored_ids, _g, _e = await agent.run(
-        content=raw.content,
-        app_id="app", user_id="u", agent_id="ag", session_id="se",
-        request_id="req", memory_at=None,
-    )
-
-    tasks = factory.cache.list_pending_reconcile_tasks(
-        app_id="app", user_id="u", agent_id="ag"
-    )
-    assert stored_ids
-    assert tasks == []
+    original = await c.add(content="Known", user_id="u")
+    jev.responses = {"p0:action": "SKIP", "p0:target": original.extra_node_ids[0]}
+    result = await c.add(content="Known", user_id="u")
+    assert result.extracted_count == 0 and not result.is_ephemeral
+    assert len(embed.batches) == 1 and len(embed.direct) == 2

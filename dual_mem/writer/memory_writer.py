@@ -1,55 +1,41 @@
-# -*- coding: utf-8 -*-
-"""
-@author:XuMing(xuming624@qq.com)
-@description: Synchronous-write path: persist a raw L1 memory node, log it, and run the
-System1 cognition pipeline (extract -> commit decision -> fast-write). In dual mode, L2/L4
-writes queue reconcile work for explicit digest(). L7 intentions and optional L3 summaries
-are written inline. dual-mem requires both LLM and embedding providers.
-"""
+"""Uniform writer: retain raw evidence; all semantic decisions use Jev."""
+
+from __future__ import annotations
+
 import asyncio
 import hashlib
-import logging
-from dataclasses import dataclass, field
+import json
+import uuid
+from dataclasses import dataclass, field, replace
+from dual_mem.locks import LockRegistry
 
 from dual_mem.agent.mem_agent import MemAgent
 from dual_mem.registry import ComponentFactory
-from dual_mem.sdk_models import ChatMessage
-from dual_mem.types import Layer, MemoryNode, MemoryStatus
-
-logger = logging.getLogger("dual_mem.writer")
-
-
-def _content_iso_key(
-    *,
-    app_id: str,
-    user_id: str,
-    agent_id: str,
-    session_id: str,
-    scope: str = "session",
-) -> str:
-    """Dedup key for content_hash. ``session`` scope keys per app/user/agent/session (strict);
-    ``user`` scope keys per app/user (cross-session/agent dedup, higher hit rate)."""
-    if scope == "user":
-        return f"{app_id}::{user_id}"
-    return f"{app_id}::{user_id}::{agent_id}::{session_id}"
+from dual_mem.sdk_models import ChatMessage, MemoryDecision
+from dual_mem.types import Layer, MemoryNode
 
 
 @dataclass
 class WriterOutcome:
-    """Internal write-path outcome before the public ``sdk_models.WriteResult`` wrapper."""
-
     memory_id: str
     extra_node_ids: list[str] = field(default_factory=list)
     commit_passed: bool = True
     is_ephemeral: bool = False
     deduplicated: bool = False
+    decisions: list[MemoryDecision] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.decisions = [
+            MemoryDecision(**item) if isinstance(item, dict) else item
+            for item in self.decisions
+        ]
 
 
 class MemoryWriter:
-    """system1 writer: persist the raw memory and run the System1 cognition pipeline."""
-
-    def __init__(self, *, factory: ComponentFactory):
+    def __init__(self, *, factory: ComponentFactory) -> None:
         self.factory = factory
+        self.agent = MemAgent(factory=factory)
+        self._requests = factory.commit_locks
 
     async def write(
         self,
@@ -63,122 +49,97 @@ class MemoryWriter:
         memory_at: int | None = None,
         messages: list[ChatMessage] | None = None,
     ) -> WriterOutcome:
-        """Persist content according to the configured memory mode."""
-        settings = self.factory.settings
-        is_system1 = settings.mode == "system1"
-        iso_key = _content_iso_key(
-            app_id=app_id,
-            user_id=user_id,
-            agent_id=agent_id,
-            session_id=session_id,
-            scope=settings.content_hash_scope,
-        )
-        content_hash: str | None = None
-        if settings.content_hash_dedup and not is_system1:
-            content_hash = hashlib.md5(content.encode()).hexdigest()
-            cached = self.factory.cache.get_content_hash_outcome(iso_key, content_hash)
-            if cached is not None:
-                logger.debug(
-                    "content_hash hit user=%s hash=%s memory_id=%s",
-                    user_id,
-                    content_hash[:8],
-                    cached.get("memory_id"),
+        scope = (app_id, user_id, agent_id)
+        key = "request:" + json.dumps([scope, request_id])
+        fingerprint = hashlib.sha256(
+            json.dumps([content, session_id, memory_at], ensure_ascii=False).encode()
+        ).hexdigest()
+        async with self._requests.get(key):
+            saved = self.factory.cache.get_profile(key)
+            if saved:
+                if saved["fingerprint"] != fingerprint:
+                    raise ValueError("request_id reused with different input")
+                return WriterOutcome(**saved["outcome"])
+            raw_id = str(uuid.uuid5(uuid.NAMESPACE_URL, key + ":raw"))
+            raw = self.factory.vector.get(raw_id)
+            if raw and (
+                raw.content != content
+                or (raw.app_id, raw.user_id, raw.agent_id) != scope
+                or raw.session_id != session_id
+                or raw.memory_at != memory_at
+            ):
+                raise ValueError("request_id reused with different input")
+            if raw is None:
+                raw = await self._raw(
+                    content=content,
+                    app_id=app_id,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    memory_at=memory_at,
+                    node_id=raw_id,
                 )
-                return WriterOutcome(
-                    memory_id=str(cached["memory_id"]),
-                    extra_node_ids=list(cached.get("extra_node_ids") or []),
-                    commit_passed=bool(cached.get("commit_passed", True)),
-                    is_ephemeral=bool(cached.get("is_ephemeral", False)),
-                    deduplicated=True,
+            recovered = self.factory.vector.completed_request(
+                f"write:{raw.node_id}:{request_id}"
+            )
+            if recovered:
+                result = WriterOutcome(memory_id=raw.node_id, **recovered)
+                from dataclasses import asdict
+
+                self.factory.cache.set_profile(
+                    key, {"fingerprint": fingerprint, "outcome": asdict(result)}
                 )
-
-        node = MemoryNode(
-            content=content,
-            layer=Layer.L1_RAW,
-            app_id=app_id,
-            user_id=user_id,
-            agent_id=agent_id,
-            session_id=session_id,
-            status=MemoryStatus.ACTIVE,
-            memory_at=memory_at,
-        )
-
-        if is_system1 or not settings.skip_l1_vector_when_derived:
-            node.embedding = await self.factory.embed.embed_queued(content)
-            await asyncio.to_thread(self.factory.vector.upsert, [node])
-        self.factory.history.append(
-            event="ADD",
-            node_id=node.node_id,
-            user_id=user_id,
-            old=None,
-            new=node.to_metadata(),
-        )
-        logger.debug(
-            "write_raw user=%s memory_id=%s len=%d",
-            user_id, node.node_id, len(content),
-        )
-
-        # reconcile_sync is a dual-pipeline feature: honor it even in system1
-        # mode by delegating to the full dual agent pipeline.
-        if is_system1 and not settings.reconcile_sync:
-            agent = MemAgent(factory=self.factory)
-            extra_node_ids, commit_result, is_ephemeral = await agent.run_system1(
+                return result
+            # Failed model work leaves original evidence available for retry.
+            ids, commit, ephemeral = await self.agent.run_system1(
                 content=content,
-                raw_node=node,
+                raw_node=raw,
                 messages=messages,
                 request_id=request_id,
             )
-            if extra_node_ids:
-                # Derived memories carry their own embeddings now, so the raw
-                # chunk leaves the recall pool (shadow), matching dual mode.
-                node.status = MemoryStatus.SHADOW
-                await asyncio.to_thread(self.factory.vector.upsert, [node])
-            return WriterOutcome(
-                memory_id=node.node_id,
-                extra_node_ids=extra_node_ids,
-                commit_passed=commit_result.passed,
-                is_ephemeral=is_ephemeral,
+            result = WriterOutcome(
+                raw.node_id, ids, commit.passed, ephemeral, decisions=commit.decisions
             )
+            from dataclasses import asdict
 
-        agent = MemAgent(factory=self.factory)
-        extra_node_ids, commit_result, is_ephemeral = await agent.run(
+            self.factory.cache.set_profile(
+                key, {"fingerprint": fingerprint, "outcome": asdict(result)}
+            )
+            return result
+
+    async def _raw(
+        self,
+        *,
+        content: str,
+        app_id: str,
+        user_id: str,
+        agent_id: str,
+        session_id: str,
+        memory_at: int | None,
+        node_id: str | None = None,
+    ) -> MemoryNode:
+        raw = MemoryNode(
             content=content,
+            layer=Layer.L0_RAW,
+            kind="raw",
             app_id=app_id,
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
-            request_id=request_id,
             memory_at=memory_at,
-            messages=messages,
-            source_node_id=node.node_id,
         )
-
-        if extra_node_ids:
-            node.status = MemoryStatus.SHADOW
-            if not settings.skip_l1_vector_when_derived:
-                await asyncio.to_thread(self.factory.vector.upsert, [node])
-        elif settings.skip_l1_vector_when_derived:
-            node.embedding = await self.factory.embed.embed_queued(content)
-            await asyncio.to_thread(self.factory.vector.upsert, [node])
-
-        outcome = WriterOutcome(
-            memory_id=node.node_id,
-            extra_node_ids=extra_node_ids,
-            commit_passed=commit_result.passed,
-            is_ephemeral=is_ephemeral,
+        if node_id:
+            raw.node_id = node_id
+        raw.embedding = await self.factory.embed.embed(content)
+        await asyncio.to_thread(self.factory.vector.upsert, [raw])
+        self.factory.history.append(
+            event="ADD",
+            node_id=raw.node_id,
+            user_id=user_id,
+            old=None,
+            new=raw.to_metadata(),
         )
-        if settings.content_hash_dedup and content_hash is not None:
-            self.factory.cache.set_content_hash_outcome(
-                iso_key,
-                content_hash,
-                {
-                    "memory_id": outcome.memory_id,
-                    "extra_node_ids": outcome.extra_node_ids,
-                    "commit_passed": outcome.commit_passed,
-                    "is_ephemeral": outcome.is_ephemeral,
-                },
-            )
-        return outcome
+        return raw
 
     async def write_raw(
         self,
@@ -190,27 +151,15 @@ class MemoryWriter:
         session_id: str,
         memory_at: int | None = None,
     ) -> WriterOutcome:
-        """Persist L1_RAW only — no extract / reconcile."""
-        node = MemoryNode(
+        raw = await self._raw(
             content=content,
-            layer=Layer.L1_RAW,
             app_id=app_id,
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
-            status=MemoryStatus.ACTIVE,
             memory_at=memory_at,
         )
-        node.embedding = await self.factory.embed.embed_queued(content)
-        await asyncio.to_thread(self.factory.vector.upsert, [node])
-        self.factory.history.append(
-            event="ADD",
-            node_id=node.node_id,
-            user_id=user_id,
-            old=None,
-            new=node.to_metadata(),
-        )
-        return WriterOutcome(memory_id=node.node_id, is_ephemeral=True)
+        return WriterOutcome(raw.node_id, commit_passed=False, is_ephemeral=True)
 
     async def distill(
         self,
@@ -225,47 +174,31 @@ class MemoryWriter:
         memory_at: int | None = None,
         messages: list[ChatMessage] | None = None,
     ) -> WriterOutcome:
-        """Extract from existing L1 nodes; do not write another L1."""
-        raw = (
-            self.factory.vector.get(source_node_ids[0]) if source_node_ids else None
+        if not source_node_ids:
+            raise ValueError("distill requires at least one raw source")
+        sources = self.factory.vector.get_by_ids(source_node_ids)
+        if set(sources) != set(source_node_ids):
+            raise ValueError("distill requires existing raw sources")
+        for node in sources.values():
+            if (node.app_id, node.user_id, node.agent_id) != (
+                app_id,
+                user_id,
+                agent_id,
+            ):
+                raise ValueError("distill sources must belong to the requested scope")
+            if node.layer != Layer.L0_RAW:
+                raise ValueError("distill sources must be raw evidence")
+        raw = next(iter(sources.values()))
+        if memory_at is not None:
+            # Only the in-memory context gets the override, not immutable stored evidence.
+            raw = replace(raw, memory_at=memory_at)
+        ids, commit, ephemeral = await self.agent.run_system1(
+            content=content,
+            raw_node=raw,
+            messages=messages,
+            request_id=request_id,
+            source_node_ids=source_node_ids,
         )
-        if raw is None:
-            return WriterOutcome(memory_id="", commit_passed=False, is_ephemeral=True)
-        settings = self.factory.settings
-        is_system1 = settings.mode == "system1"
-        agent = MemAgent(factory=self.factory)
-        if is_system1 and not settings.reconcile_sync:
-            extra_node_ids, commit_result, is_ephemeral = await agent.run_system1(
-                content=content,
-                raw_node=raw,
-                messages=messages,
-                request_id=request_id,
-            )
-        else:
-            extra_node_ids, commit_result, is_ephemeral = await agent.run(
-                content=content,
-                app_id=app_id,
-                user_id=user_id,
-                agent_id=agent_id,
-                session_id=session_id,
-                request_id=request_id,
-                memory_at=memory_at if memory_at is not None else raw.memory_at,
-                messages=messages,
-                source_node_id=raw.node_id,
-            )
-        if extra_node_ids:
-            for nid in source_node_ids:
-                node = self.factory.vector.get(nid)
-                if node is None:
-                    continue
-                node.status = MemoryStatus.SHADOW
-                await asyncio.to_thread(self.factory.vector.upsert, [node])
         return WriterOutcome(
-            memory_id=raw.node_id,
-            extra_node_ids=extra_node_ids,
-            commit_passed=commit_result.passed,
-            is_ephemeral=is_ephemeral,
+            raw.node_id, ids, commit.passed, ephemeral, decisions=commit.decisions
         )
-
-
-__all__ = ["MemoryWriter", "WriterOutcome"]

@@ -14,6 +14,18 @@ Benchmark 专用覆盖见 `exp/dual_mem_exp/benchmarks/backends/dual_mem.py`（�
 
 ---
 
+## [JEV redesign · 2026-10-15 · branch]
+
+- 四层 L0_RAW / L1_FACT / L2_PROFILE / L3_DERIVED；仅保留 system1、dual。
+- JEV 批量 action/target/representation，已知与更新分开，六种 update_type。
+  删除 novelty、weak similarity 路由、skip_llm、sync 与规则裁决分支。
+- 所有 reconcile 追加并链接历史；update 返回新 ID，delete 归档，latest 默认读取。
+- 默认并发 4，复用 HTTP；版本 CAS + 持久计划恢复 + 图投影待处理记录。
+- System2 完整分页覆盖事实，processed evidence 与版本原子提交；来源更新使推导过期。
+- 确定性生成 smoke 的真实 Venus JEV 最新四步裁决为 408–562 ms；真实 hy3 生成链
+  四步写入为 12–28 秒，embedding 为确定性适配器。未做准确率或速度对比基准。
+- 兼容性与迁移详见 docs/jev-memory-design.md；以下记录为旧实现历史。
+
 ## [Unreleased]
 
 > 当前 `__version__` 仍为 `0.1.2`；下列变更已在 `main`，尚未发版。

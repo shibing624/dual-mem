@@ -2,19 +2,29 @@
 """Coding memory data structures — separate schema from chat memories."""
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 BOUNDARY_SCOPES = ("strict", "project", "user", "global")
 BoundaryScope = Literal["strict", "project", "user", "global"]
 
-ReconcileAction = Literal["ADD", "UPDATE", "DELETE", "SKIP"]
+ReconcileAction = Literal["ADD", "UPDATE", "SKIP", "RAW_ONLY"]
+CodingScope = tuple[str, str, str]
+
+
+class CodingDecisionError(RuntimeError):
+    """Incomplete evidence or an invalid executable JEV decision."""
+
+
+class CodingConcurrentWriteError(RuntimeError):
+    """The scope changed after the decision snapshot; reconcile again."""
 
 
 @dataclass
 class CodingMemoryDraft:
     """LLM extractor output — not yet persisted."""
+
     task: str
-    search_keys: List[str] = field(default_factory=list)
+    search_keys: list[str] = field(default_factory=list)
     solution: str = ""
     boundary_envs: str = ""
     boundary_scope: BoundaryScope = "project"
@@ -22,13 +32,13 @@ class CodingMemoryDraft:
     user_id: str = ""
     agent_id: str = "default_agent"
     app_id: str = "default"
-    workspace_id: Optional[str] = None
-    branch: Optional[str] = None
-    session_id: Optional[str] = None
-    files: List[str] = field(default_factory=list)
+    workspace_id: str | None = None
+    branch: str | None = None
+    session_id: str | None = None
+    files: list[str] = field(default_factory=list)
     source: str = "auto_extract"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "task": self.task,
             "search_keys": list(self.search_keys),
@@ -50,26 +60,36 @@ class CodingMemoryDraft:
 @dataclass
 class CodingMemory:
     """Persisted coding memory (SQLite + VDB dual-layer)."""
+
     memory_id: str
     user_id: str
     agent_id: str = "default_agent"
     app_id: str = "default"
     task: str = ""
-    search_keys: List[str] = field(default_factory=list)
+    search_keys: list[str] = field(default_factory=list)
     solution: str = ""
     boundary_envs: str = ""
     boundary_scope: BoundaryScope = "project"
-    workspace_id: Optional[str] = None
-    branch: Optional[str] = None
-    session_id: Optional[str] = None
-    files: List[str] = field(default_factory=list)
+    workspace_id: str | None = None
+    branch: str | None = None
+    session_id: str | None = None
+    files: list[str] = field(default_factory=list)
     confidence: float = 0.7
     source: str = "auto_extract"
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    is_latest: bool = True
+    supersedes: list[str] = field(default_factory=list)
+    superseded_by: list[str] = field(default_factory=list)
+    source_ids: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
         return {
+            "is_latest": self.is_latest,
+            "supersedes": list(self.supersedes),
+            "superseded_by": list(self.superseded_by),
+            "source_ids": list(self.source_ids),
             "memory_id": self.memory_id,
             "user_id": self.user_id,
             "agent_id": self.agent_id,
@@ -93,7 +113,24 @@ class CodingMemory:
 @dataclass
 class CodingReconcileOp:
     """Reconciler decision for one draft."""
+
     action: ReconcileAction
-    draft_idx: Optional[int] = None
-    target_memory_id: Optional[str] = None
-    reason: Optional[str] = None
+    draft_idx: int | None = None
+    target_memory_id: str | None = None
+    reason: str | None = None
+
+
+def coding_scope(memory: CodingMemory | CodingMemoryDraft) -> CodingScope:
+    return memory.app_id, memory.user_id, memory.agent_id
+
+
+def version_boundary(
+    memory: CodingMemory | CodingMemoryDraft,
+) -> tuple[str, str | None, str | None, str | None]:
+    """Structural retirement boundary; JEV compares semantic environment details."""
+    return (
+        memory.boundary_scope,
+        memory.workspace_id,
+        memory.branch,
+        memory.session_id if memory.boundary_scope == "strict" else None,
+    )

@@ -25,9 +25,11 @@ async def recall_intentions(
         app_ids=app_ids,
         user_id=user_id,
         agent_ids=agent_ids,
-        layers=[Layer.L7_INTENTION],
+        layers=[Layer.L1_FACT, Layer.L3_DERIVED],
         statuses=[MemoryStatus.ACTIVE],
+        latest_only=True,
     )
+    where["kind"] = "intention"
     try:
         nodes = await asyncio.to_thread(
             vector.query, embedding=query_embedding, where=where, top_k=limit
@@ -41,7 +43,7 @@ async def recall_intentions(
             "node_id": n.node_id,
             "score": n.score,
             "node": n,
-            "layer": Layer.L7_INTENTION.value,
+            "layer": n.layer.value,
             "source": "vdb_intention",
         }
         for n in nodes

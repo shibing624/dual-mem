@@ -1,0 +1,214 @@
+{
+  "passed": false,
+  "generator": "hy3",
+  "jev": "jev-1.13.0",
+  "embedding": "deterministic smoke adapter",
+  "writes": [
+    {
+      "source": "我目前住在北京。",
+      "elapsed_ms": 11651,
+      "jev_requests": 1,
+      "decisions": [
+        {
+          "action": "ADD",
+          "update_type": "TEMPORAL",
+          "targets": [],
+          "proposal_ids": [
+            "p0"
+          ],
+          "source_ids": [
+            "9a11dcb9-58ef-5db9-b672-2ca8af512df0"
+          ],
+          "reason": "Time-bounded circumstance; do not replace the long-term baseline.",
+          "confidence": 0.35
+        }
+      ]
+    },
+    {
+      "source": "我从北京搬到上海了，现在住在上海。",
+      "elapsed_ms": 9708,
+      "jev_requests": 2,
+      "decisions": [
+        {
+          "action": "ADD",
+          "update_type": "SUPPLEMENT",
+          "targets": [],
+          "proposal_ids": [
+            "p0"
+          ],
+          "source_ids": [
+            "6c4b5660-f2b4-553a-b2ec-5344598e6dbd"
+          ],
+          "reason": "Independent compatible fact or distinct event, even when wording is identical.",
+          "confidence": 0.4
+        },
+        {
+          "action": "ADD",
+          "update_type": "OVERRIDE",
+          "targets": [
+            "47798635-d8a3-5da6-987c-a3e61bb56269"
+          ],
+          "proposal_ids": [
+            "p1"
+          ],
+          "source_ids": [
+            "6c4b5660-f2b4-553a-b2ec-5344598e6dbd"
+          ],
+          "reason": "Confirmed same-subject, same-dimension state change; old current value no longer holds.",
+          "confidence": 0.6
+        }
+      ]
+    },
+    {
+      "source": "我又搬回北京了，目前住在北京。",
+      "elapsed_ms": 8276,
+      "jev_requests": 1,
+      "decisions": [
+        {
+          "action": "ADD",
+          "update_type": "CONFLICT",
+          "targets": [
+            "a30afa9f-1aaf-5609-8119-f71016104edc"
+          ],
+          "proposal_ids": [
+            "p0"
+          ],
+          "source_ids": [
+            "99b1ef06-b088-5abf-857e-082441b03176"
+          ],
+          "reason": "Incompatible evidence with insufficient time/authority to choose truth; coexist.",
+          "confidence": 0.35
+        },
+        {
+          "action": "ADD",
+          "update_type": "CONFLICT",
+          "targets": [
+            "33ff0559-5f7c-511c-8e00-02cbb4364e8a"
+          ],
+          "proposal_ids": [
+            "p1"
+          ],
+          "source_ids": [
+            "99b1ef06-b088-5abf-857e-082441b03176"
+          ],
+          "reason": "Incompatible evidence with insufficient time/authority to choose truth; coexist.",
+          "confidence": 0.44
+        }
+      ]
+    },
+    {
+      "source": "我目前住在北京。",
+      "elapsed_ms": 10707,
+      "jev_requests": 1,
+      "decisions": [
+        {
+          "action": "ADD",
+          "update_type": "CONFLICT",
+          "targets": [
+            "7c538ccb-cd35-5b49-bf5c-4629078dd3d5"
+          ],
+          "proposal_ids": [
+            "p0"
+          ],
+          "source_ids": [
+            "9cac2a33-5055-50f8-88b7-a709ebd34d68"
+          ],
+          "reason": "Incompatible evidence with insufficient time/authority to choose truth; coexist.",
+          "confidence": 0.27
+        }
+      ]
+    }
+  ],
+  "digest_processed": 1,
+  "nodes": [
+    {
+      "id": "9a11dcb9-58ef-5db9-b672-2ca8af512df0",
+      "content": "我目前住在北京。",
+      "layer": "L0_RAW",
+      "kind": "raw",
+      "is_latest": true,
+      "supersedes": []
+    },
+    {
+      "id": "47798635-d8a3-5da6-987c-a3e61bb56269",
+      "content": "我目前住在北京。",
+      "layer": "L2_PROFILE",
+      "kind": "profile",
+      "is_latest": false,
+      "supersedes": []
+    },
+    {
+      "id": "6c4b5660-f2b4-553a-b2ec-5344598e6dbd",
+      "content": "我从北京搬到上海了，现在住在上海。",
+      "layer": "L0_RAW",
+      "kind": "raw",
+      "is_latest": true,
+      "supersedes": []
+    },
+    {
+      "id": "a30afa9f-1aaf-5609-8119-f71016104edc",
+      "content": "我从北京搬到上海了",
+      "layer": "L1_FACT",
+      "kind": "fact",
+      "is_latest": true,
+      "supersedes": []
+    },
+    {
+      "id": "33ff0559-5f7c-511c-8e00-02cbb4364e8a",
+      "content": "我现在住在上海",
+      "layer": "L2_PROFILE",
+      "kind": "profile",
+      "is_latest": true,
+      "supersedes": [
+        "47798635-d8a3-5da6-987c-a3e61bb56269"
+      ]
+    },
+    {
+      "id": "99b1ef06-b088-5abf-857e-082441b03176",
+      "content": "我又搬回北京了，目前住在北京。",
+      "layer": "L0_RAW",
+      "kind": "raw",
+      "is_latest": true,
+      "supersedes": []
+    },
+    {
+      "id": "7c538ccb-cd35-5b49-bf5c-4629078dd3d5",
+      "content": "我又搬回北京了",
+      "layer": "L1_FACT",
+      "kind": "fact",
+      "is_latest": true,
+      "supersedes": []
+    },
+    {
+      "id": "80a7b043-06b7-5d0d-8ae8-ef655a25d161",
+      "content": "目前住在北京",
+      "layer": "L2_PROFILE",
+      "kind": "profile",
+      "is_latest": true,
+      "supersedes": []
+    },
+    {
+      "id": "9cac2a33-5055-50f8-88b7-a709ebd34d68",
+      "content": "我目前住在北京。",
+      "layer": "L0_RAW",
+      "kind": "raw",
+      "is_latest": true,
+      "supersedes": []
+    },
+    {
+      "id": "480b51ff-86d2-5fff-bd4e-ea4d0a5a57f8",
+      "content": "我目前住在北京。",
+      "layer": "L2_PROFILE",
+      "kind": "profile",
+      "is_latest": true,
+      "supersedes": []
+    }
+  ],
+  "transport_passed": true,
+  "assertions": {
+    "return_is_override": false,
+    "repeat_is_skip": false
+  },
+  "tested_at": "2026-10-15",
+  "scope": "Real generation test before final clarified decision criteria; semantic assertions failed despite HTTP success"
+}

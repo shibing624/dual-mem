@@ -39,8 +39,14 @@ def test_shape_history_short_dialogue_passthrough():
 
 def test_shape_history_disabled_passthrough():
     msgs = [ChatMessage(role="assistant", content="a" * 800)]
-    assert _shape_history(msgs, threshold_chars=0, assistant_max_chars=500)[0].content == "a" * 800
-    assert _shape_history(msgs, threshold_chars=1, assistant_max_chars=0)[0].content == "a" * 800
+    assert (
+        _shape_history(msgs, threshold_chars=0, assistant_max_chars=500)[0].content
+        == "a" * 800
+    )
+    assert (
+        _shape_history(msgs, threshold_chars=1, assistant_max_chars=0)[0].content
+        == "a" * 800
+    )
 
 
 @pytest.fixture
@@ -58,7 +64,10 @@ async def test_dual_add_drops_system_role_from_extract_dialogue(
     )
     await dual_client.add(
         messages=[
-            {"role": "system", "content": "You are a helpful assistant with secret rules."},
+            {
+                "role": "system",
+                "content": "You are a helpful assistant with secret rules.",
+            },
             {"role": "user", "content": "用户喜欢咖啡"},
             {"role": "assistant", "content": "好的，记住了。"},
         ],
@@ -69,7 +78,10 @@ async def test_dual_add_drops_system_role_from_extract_dialogue(
         c
         for c in fake_llm.calls
         if c["type"] == "chat_json"
-        and ("memory analyst" in c["system"] or "记忆分析专家" in c["system"])
+        and (
+            "Generate faithful explicit atomic candidates" in c["system"]
+            or "记忆分析专家" in c["system"]
+        )
     ]
     assert extract_calls
     payload = extract_calls[0]["user"]
@@ -110,8 +122,11 @@ async def test_update(client):
 
     res = await client.update(memory_id, "新内容")
     assert res.success is True
-    got = await client.get(memory_id)
+    assert not (await client.get(memory_id)).is_latest
+    assert (await client.get(memory_id)).content == "旧内容"
+    got = await client.get(res.memory_id)
     assert got.content == "新内容"
+    assert got.supersedes == [memory_id]
 
 
 async def test_delete_and_missing_404(client):
@@ -120,7 +135,7 @@ async def test_delete_and_missing_404(client):
 
     res = await client.delete(memory_id)
     assert res.success is True
-    assert await client.get(memory_id) is None
+    assert not (await client.get(memory_id)).is_latest
 
     missing = await client.delete("no-such-id")
     assert missing.success is False

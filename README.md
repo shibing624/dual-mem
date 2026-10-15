@@ -9,38 +9,24 @@
 
 **dual-mem** 让 Agent **真正记住用户**——不是堆聊天记录，而是像人一样：**先快速记下今天说了什么，再慢慢整理成用户画像、习惯和未来打算**。分层存储、偏好会变就更新、检索时自动带出相关记忆。通过 **SDK / REST / MCP / CLI / Skill** 即插即用。
 
-## 记忆架构（L0–L7）
+## JEV 四层记忆架构
 
-dual-mem 实现 **七个记忆层（L0–L4、L6、L7）**——借鉴人脑「先感知、再编码、再巩固、再抽象」的分层过程，从原始对话一路沉淀到画像、习惯与打算，并带 **演化链**（偏好变了留历史，不粗暴覆盖）：
+`system1` 与 `dual` 的每次写入共享一个流程：**保留 L0 原文 → 生成候选 → JEV 批量裁决 → 追加版本并链接历史**。`dual` 额外在显式 `digest()` 中生成跨证据记忆。
 
-| 层 | 存什么 | 举例 |
-|---|---|---|
-| **L0 基础画像** | 结构化档案 | 姓名、年龄、城市 |
-| **L1 原始对话** | 完整交互记录 | 多轮 chat 原文（提炼后归档） |
-| **L2 事实** | 可核对的具体信息 | 「下周去北京出差」 |
-| **L3 摘要** | 长文压缩 | 一篇长笔记的要点 |
-| **L4 身份与偏好** | 稳定的「你是谁、喜欢什么」 | 「主力语言是 Python」 |
-| **L6 行为模式** | 跨多条事实归纳的习惯 | 「做事前爱列清单、爱分类整理」 |
-| **L7 意图** | 未来计划与目标 | 「准备跑马拉松」 |
+| 层 | 保存内容 |
+| --- | --- |
+| L0_RAW | 原始来源证据 |
+| L1_FACT | 显式事实、独立事件、明确意图 |
+| L2_PROFILE | 用户身份、状态、画像维度 |
+| L3_DERIVED | 跨证据模式、推导、摘要 |
 
-偏好变了（Java → Python）不会覆盖旧记录，而是 **演化链** 保留历史，读的时候给你 **最新版 + 变更轨迹**。
+JEV 判断 `ADD / DELETE / SKIP` 及 `OVERRIDE / MERGE / SUPPLEMENT / TEMPORAL / NEGATE / CONFLICT`；生成模型只提供候选、合并文本和推导文本。正常写入一次生成、一次 JEV，多个问题共享 state，HTTP 请求默认并行 4。
 
-## 双系统：短期记忆 × 深度记忆
+北京→上海→北京是对当前状态的更新；不会因为历史曾出现北京而跳过。相似度仅用于读侧检索，novelty 与 weak_candidate_score 不参与写入。所有 reconcile 保留原文与版本，通过 `is_latest` 区分当前表示。
 
-| | **System1 · 短期记忆** | **System2 · 深度记忆** |
-|---|---|---|
-| **像什么** | 当场听懂并记下来 | 睡后整理、越聊越懂你 |
-| **什么时候** | 每次 `add` 立刻完成 | `dual` 模式显式调用 `digest()` |
-| **产出** | L0–L4：事实、偏好、画像 | L6 行为模式、L7 意图、知识关联 |
-| **怎么用** | `mode="system1"`（默认） | `mode="dual"` |
+本分支为 SDK 破坏性设计迁移：`update()` 返回新版本 ID，`delete()` 归档；默认读取 latest。旧层元数据自动转换为四层，旧控制键兼容忽略。使用前配置 `jev_api_key`、`llm_api_key`、`embed_api_key`，或注入三个 provider。
 
-```
-对话 add ──▶ System1 短期记忆（秒级可用）
-                │
-                └──▶ System2 深度记忆（dual：digest 时巩固）
-```
-
-检索侧按 **画像 / 主动推荐 / 常规记忆** 三路分组，语义 + 关键词混合召回，**读记忆不额外调 LLM**（只需 embedding）。
+[完整设计与迁移](docs/jev-memory-design.md) · [可交互流程页](docs/design/jev-memory-flow.html) · [层定义](docs/memory_layers.md)
 
 ## 为什么选 dual-mem
 
@@ -69,7 +55,7 @@ dual-mem 实现 **七个记忆层（L0–L4、L6、L7）**——借鉴人脑「�
    向量 + 图 + 本地存储
 ```
 
-实现细节（Extractor 提交判定、Reconcile、混合检索管线等）见 [架构文档](docs/architecture.md) · [在线文档](https://shibing624.github.io/dual-mem/architecture/)。
+实现细节（JEV 写入裁决、Reconcile、混合检索管线等）见 [架构文档](docs/architecture.md) · [在线文档](https://shibing624.github.io/dual-mem/architecture/)。
 
 ## 安装
 
@@ -132,15 +118,15 @@ async def main():
 asyncio.run(main())
 ```
 
-配置位于 `~/.dual_mem/config.yaml`（**首次启动自动创建**）。**LLM 与 Embedding 两套 API key 均必填**。
+配置位于 `~/.dual_mem/config.yaml`（**首次启动自动创建**）。**JEV、生成 LLM、Embedding 三套服务均需配置或注入**。
 
 → 参数详解、多轮对话、`aclose()`、Agent 集成最佳实践见 **[Quickstart 文档](docs/getting-started/quickstart.md)**（在线：[Quickstart](https://shibing624.github.io/dual-mem/getting-started/quickstart/)）。
 
 ## 功能特性
 
-- **七个实现层 + 演化链** — 从 raw 对话到行为模式、意图，偏好变更可追溯
-- **System1 短期记忆** — 写入即结构化；由 Extractor 决定是否提交衍生记忆
-- **System2 深度记忆**（dual）— 在明确业务边界调用 `digest()` 归纳 L6/L7
+- **四个阶段层 + 演化链** — 从 raw 对话到行为模式、意图，偏好变更可追溯
+- **System1 短期记忆** — 写入即结构化；由 JEV 决定写入动作与关系
+- **System2 深度记忆**（dual）— 在明确业务边界调用 `digest()` 归纳 L3_DERIVED
 - **混合检索** — 语义 + 关键词；画像 / 主动 / 常规三路召回
 - **同步 & 异步 SDK** — `SyncMemoryClient` 给脚本；`MemoryClient` 给 FastAPI / Agent
 - **OpenAI 兼容** — 任意 LLM / Embedding 端点

@@ -9,6 +9,9 @@ operates in an embedding-only / no-LLM state.
 from dual_mem.config import Settings, ensure_storage_dir
 from dual_mem.providers.embedding import EmbedService
 from dual_mem.providers.llm import LLMClient
+from dual_mem.providers.jev import DecisionProvider, JevClient
+from dual_mem.locks import LockRegistry
+from dual_mem.types import Layer, MemoryNode
 from dual_mem.storage.cache_store import CacheStore
 from dual_mem.storage.graph_store import KuzuGraphStore
 from dual_mem.storage.history_store import HistoryStore
@@ -26,6 +29,7 @@ class ComponentFactory:
         settings: Settings,
         embed: EmbedService | None = None,
         llm=_UNSET,
+        jev: DecisionProvider | None = None,
     ):
         self.settings = settings
         ensure_storage_dir(settings.storage_dir)
@@ -35,9 +39,28 @@ class ComponentFactory:
         self._history: HistoryStore | None = None
         self._graph = _UNSET
         self._llm = llm
+        self._jev = jev
+        self.commit_locks = LockRegistry()
         # True when the caller injected an LLM client (tests / custom backends). Such a
         # client is trusted as-is and bypasses the api_key/probe checks done by MemoryClient.
         self.has_user_llm = llm is not _UNSET and llm is not None
+
+    @property
+    def jev(self) -> DecisionProvider:
+        """Typed decision provider, injected or constructed from explicit settings."""
+        if self._jev is None:
+            self._jev = JevClient(
+                endpoint=self.settings.jev_endpoint,
+                api_key=self.settings.jev_api_key,
+                model=self.settings.jev_model,
+                concurrency=self.settings.reconcile_concurrency,
+                max_questions=self.settings.jev_max_questions,
+                max_request_chars=self.settings.jev_max_request_chars,
+                max_question_chars=self.settings.jev_max_question_chars,
+                timeout=self.settings.jev_timeout,
+                retry_attempts=self.settings.jev_retry_attempts,
+            )
+        return self._jev
 
     @property
     def embed(self) -> EmbedService:
@@ -63,7 +86,9 @@ class ComponentFactory:
     def vector(self) -> ChromaVectorStore:
         """The Chroma vector store, constructed on first access."""
         if self._vector is None:
-            self._vector = ChromaVectorStore(self.settings.storage_dir)
+            self._vector = ChromaVectorStore(
+                self.settings.storage_dir, history=self.history
+            )
         return self._vector
 
     @property
@@ -92,6 +117,34 @@ class ComponentFactory:
                 if self.settings.enable_graph
                 else None
             )
+            if self._graph is not None:
+                for old in self._graph.legacy_nodes():
+                    if self.vector.get(old.node_id) is None:
+                        kind = "intention" if old.layer == "L7_INTENTION" else "schema"
+                        raw = MemoryNode(
+                            node_id=old.node_id,
+                            content=old.content,
+                            layer=Layer.L3_DERIVED,
+                            kind=kind,
+                            app_id=old.app_id,
+                            user_id=old.user_id,
+                            agent_id=old.agent_id,
+                            tags=old.tags,
+                            embedding=old.embedding,
+                            gmt_created=old.gmt_created,
+                            custom={
+                                **(old.custom or {}),
+                                "source_ids": self._graph.evidence_of(old.node_id),
+                                "legacy_graph": True,
+                            },
+                        )
+                        if not raw.embedding:
+                            raise ValueError(
+                                "legacy graph memory lacks embedding; migrate explicitly"
+                            )
+                        self.vector.upsert([raw])
+                    old.layer = Layer.L3_DERIVED.value
+                    self._graph.add_node(old)
         return self._graph
 
     def close(self) -> None:
@@ -100,6 +153,13 @@ class ComponentFactory:
         Currently the Kuzu graph store holds an on-disk lock that benefits from an explicit
         release on shutdown; Chroma/SQLite stores are flushed per write and need no close.
         """
+        if self._vector is not None:
+            self._vector.close()
+            self._vector = None
+        for store in (self._cache, self._history):
+            if store is not None and store.conn is not None:
+                store.conn.close()
+                store.conn = None
         if self._graph is not _UNSET and self._graph is not None:
             self._graph.close()
             self._graph = _UNSET

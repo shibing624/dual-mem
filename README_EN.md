@@ -1,3 +1,5 @@
+> This branch migrates the SDK to Jev decisions and four canonical layers: L0_RAW, L1_FACT, L2_PROFILE, L3_DERIVED. Both modes reconcile inline; dual adds explicit digest. Configure Jev credentials or inject `jev=`. `update` returns a new version ID and `delete` archives. See [the migration design](docs/jev-memory-design.md) and [interactive flow](docs/design/jev-memory-flow.html). Historical release notes below describe earlier SDK versions.
+
 [**🇨🇳中文**](https://github.com/shibing624/dual-mem/blob/main/README.md) | [**🌐English**](https://github.com/shibing624/dual-mem/blob/main/README_EN.md)
 
 # dual-mem: Dual-System Layered Memory SDK
@@ -9,38 +11,25 @@
 
 **dual-mem** helps agents **actually remember users** — not by dumping chat logs, but like people do: **capture today’s conversation quickly, then consolidate it into profile, habits, and plans**. Layered storage, preference updates with history, and retrieval that surfaces what matters. Plug in via **SDK / REST / MCP / CLI / Skill**.
 
-## Memory architecture (L0–L7)
+## Four memory layers and two modes
 
-dual-mem implements **seven memory layers (L0–L4, L6, L7)** — inspired by how the brain moves from raw experience → encoding → consolidation → abstraction: from chat traces to profile, habits, and plans, with **evolution chains** (preference updates keep history instead of blind overwrite):
+| Layer | Content |
+| --- | --- |
+| L0_RAW | Original source evidence |
+| L1_FACT | Explicit facts, events and intentions |
+| L2_PROFILE | Identity, profile and current state dimensions |
+| L3_DERIVED | Cross-evidence schemas, summaries and inferred intentions |
 
-| Layer | What it holds | Example |
-|---|---|---|
-| **L0 Profile** | Structured basics | Name, age, city |
-| **L1 Raw traces** | Full interaction history | Multi-turn chat (archived after extraction) |
-| **L2 Facts** | Verifiable statements | “Flying to Beijing next week” |
-| **L3 Summaries** | Long-text compression | Key points from a long note |
-| **L4 Identity & prefs** | Stable “who you are” | “Main language is Python” |
-| **L6 Patterns** | Habits from many facts | “Lists everything before trips; loves organizing” |
-| **L7 Intentions** | Plans and goals | “Training for a marathon” |
+Both `system1` and `dual` preserve source → generate explicit candidates → batch JEV
+questions → append/link versions. JEV decides source support, durable value, known versus
+update, targets and six update types. A normal write uses one generation and one JEV
+request; MERGE alone adds lossless text generation and validation. `dual` adds explicit
+`digest()` with complete paged evidence coverage and validated L3 generation.
 
-When preferences change (Java → Python), old entries aren’t erased — an **evolution chain** keeps history; reads return the **latest version plus the trail**.
-
-## Dual system: short-term × deep memory
-
-| | **System1 · short-term** | **System2 · deep memory** |
-|---|---|---|
-| **Like** | Hear and note it now | Sleep on it; understand deeper over time |
-| **When** | Every `add`, ready in seconds | Explicit `digest()` in `dual` mode |
-| **Produces** | L0–L4: facts, prefs, profile | L6 patterns, L7 intentions, linked knowledge |
-| **How to enable** | `mode="system1"` (default) | `mode="dual"` |
-
-```
-add conversation ──▶ System1 short-term memory (usable immediately)
-                         │
-                         └──▶ System2 deep memory (dual: consolidate on digest)
-```
-
-Recall groups results into **profile / proactive / normal**; hybrid semantic + keyword search; **no extra LLM on read** (embedding only).
+All versions remain stored. `update()` returns a new ID; `delete()` archives.
+Similarity is for retrieval; there is no novelty or weak similarity write gate.
+Default JEV and digest concurrency is four. Configure JEV, generation and embedding
+providers; see [the full design](docs/jev-memory-design.md).
 
 ## Why dual-mem
 
@@ -69,7 +58,7 @@ Recall groups results into **profile / proactive / normal**; hybrid semantic + k
    Vector + graph + local storage
 ```
 
-Implementation details (Extractor commit decisions, reconcile, hybrid retrieval, etc.): [architecture.md](docs/architecture.md) · [docs site](https://shibing624.github.io/dual-mem/architecture/).
+Implementation details (JEV write decisions, reconcile, hybrid retrieval, etc.): [architecture.md](docs/architecture.md) · [docs site](https://shibing624.github.io/dual-mem/architecture/).
 
 ## Installation
 
@@ -139,8 +128,8 @@ Config lives at `~/.dual_mem/config.yaml` (**auto-created on first startup**). *
 ## Features
 
 - **Seven implemented layers + evolution chains** — from raw chat to patterns and intentions; preference history preserved
-- **System1 short-term memory** — structured on write; the Extractor decides whether to commit derived memories
-- **System2 deep memory** (dual) — explicit `digest()` consolidates L6/L7 at a business boundary
+- **System1 short-term memory** — structured on write; JEV decides actions and version relations
+- **System2 deep memory** (dual) — explicit `digest()` consolidates L3_DERIVED at a business boundary
 - **Hybrid retrieval** — semantic + keyword; profile / proactive / normal routes
 - **Sync & async SDK** — `SyncMemoryClient` for scripts; `MemoryClient` for FastAPI / agents
 - **OpenAI-compatible** — any LLM / embedding endpoint

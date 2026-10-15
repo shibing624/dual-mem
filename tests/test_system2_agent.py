@@ -1,206 +1,182 @@
-"""P1-6: System2 single-shot ops agent — contract verification.
-
-System2 no longer drives a multi-turn ReAct tool loop. It makes exactly ONE chat_json
-call that emits a raw JSON array of ops (create_schema / create_intention / add_evidence
-/ add_edge), which the executor materializes into graph state. These tests pin that
-contract down:
-
-- one LLM call per digest (not N tool turns),
-- ops are dispatched to the graph in order,
-- ``self_evidence`` is marked only when something was actually created,
-- malformed / empty ops are survived without raising,
-- a fact cluster is not re-consumed by the next digest.
-"""
+import json
+from dataclasses import replace
 import pytest
-
-from dual_mem.config import Settings
+from conftest import FakeLLMClient, FakeJev
 from dual_mem.registry import ComponentFactory
-from dual_mem.storage.graph_store import GraphNode
-from dual_mem.system2.system2_agent import System2Agent
+from dual_mem.config import Settings
 from dual_mem.types import Layer, MemoryNode
-
-from tests.conftest import FakeLLMClient
-
-
-def _vec(comps: dict[int, float], dim: int = 16) -> list[float]:
-    v = [0.0] * dim
-    for i, val in comps.items():
-        v[i] = val
-    return v
+from dual_mem.system2.system2_agent import System2Agent
+from dual_mem.agent.reconciler import DecisionContextError
 
 
-@pytest.fixture
-def ultra_factory(tmp_storage, fake_embed):
-    # Force single-shot mode: these tests exercise the one-call ops contract.
-    settings = Settings(
-        mode="dual", storage_dir=tmp_storage, system2_single_shot_max_clusters=0
-    )
-    return ComponentFactory(settings=settings, embed=fake_embed, llm=FakeLLMClient())
+def factory(tmp_storage, embed, response=None, jev=None, cap=2):
+    def default(system, user):
+        facts = json.loads(user)["facts"]
+        ids = [f["id"] for f in facts]
+        return {
+            "memories": [
+                {
+                    "content": "derived " + ",".join(ids),
+                    "kind": "schema",
+                    "evidence_ids": ids,
+                }
+            ],
+            "processed_ids": ids,
+        }
 
-
-def _seed_fresh_facts(factory):
-    nodes = []
-    for nid, content, comp in [
-        ("a1", "用户做饭严格按菜谱", {0: 1.0, 4: 0.5}),
-        ("a2", "用户烘焙精确称量", {0: 1.0, 5: 0.5}),
-        ("a3", "用户煮咖啡按固定比例", {0: 1.0, 6: 0.5}),
-    ]:
-        node = MemoryNode(
-            content=content, layer=Layer.L2_FACT, app_id="app", user_id="u", node_id=nid
-        )
-        node.embedding = _vec(comp)
-        nodes.append(node)
-    factory.vector.upsert(nodes)
-
-
-def _ops(*ops: dict) -> list[dict]:
-    """An ops batch.
-
-    The real ``LLMClient.chat_json`` parses the model's raw JSON array before returning,
-    so the fake must hand the agent an already-parsed list — returning a JSON *string*
-    here would be silently coerced to ``[]`` by the agent and every ops assertion would
-    pass vacuously.
-    """
-    return list(ops)
-
-
-def _script_ops(factory, payload) -> None:
-    """Script the System2 ops response.
-
-    The agent calls ``chat_json`` directly, so it routes to the FakeLLMClient's generic
-    ``json`` bucket (no system-prompt keyword matches the System2 ops template).
-    """
-    factory.llm.responses["json"] = payload
-
-
-def _s2_chat_json_calls(factory) -> int:
-    """Count the LLM calls the System2 agent made."""
-    return sum(1 for c in factory.llm.calls if c["type"] == "chat_json")
-
-
-async def test_system2_single_shot_creates_schema_with_evidence(ultra_factory):
-    """One ops call: create_schema with 3 evidence facts → wired into the graph."""
-    _seed_fresh_facts(ultra_factory)
-    _script_ops(
-        ultra_factory,
-        _ops(
-            {
-                "op": "create_schema",
-                "content": "当做饭时，用户严格按菜谱精确称量——反映了对结构的需要。",
-                "tags": ["烹饪"],
-                "evidence": ["a1", "a2", "a3"],
-            }
+    return ComponentFactory(
+        settings=Settings(
+            mode="dual", storage_dir=tmp_storage, system2_max_prompt_facts=cap
         ),
+        embed=embed,
+        llm=FakeLLMClient({"json": response or default}),
+        jev=jev or FakeJev(),
     )
 
-    result = await System2Agent(factory=ultra_factory).run(app_id="app", user_id="u")
-    assert result["created_schemas"] == 1
-    assert result["evidence_added"] == 3
 
-    # Exactly one LLM call — the ReAct loop is gone.
-    assert _s2_chat_json_calls(ultra_factory) == 1
-
-    # Verify schema actually landed in graph + evidence wired.
-    schemas = ultra_factory.graph.list_by_layer(
-        layer=Layer.L6_SCHEMA.value, user_id="u", app_ids=["app"]
-    )
-    assert len(schemas) == 1
-    schema_id = schemas[0].node_id
-    assert set(ultra_factory.graph.evidence_of(schema_id)) == {"a1", "a2", "a3"}
-
-
-async def test_system2_single_shot_adds_evidence_to_existing_schema(ultra_factory):
-    """A pre-existing schema is extended via add_evidence rather than re-created."""
-    _seed_fresh_facts(ultra_factory)
-    # Seed the schema the `add_evidence` op refers to, the same way the executor does.
-    ultra_factory.graph.add_node(
-        GraphNode(
-            node_id="s1",
-            layer=Layer.L6_SCHEMA.value,
-            content="当做饭时，用户严格按菜谱——反映结构需要。",
+def seed(f, count=5):
+    nodes = [
+        MemoryNode(
+            node_id=str(i),
+            content=f"fact {i}",
+            layer=Layer.L1_FACT,
             app_id="app",
             user_id="u",
-            tags=["烹饪"],
+            embedding=f.embed.embed_sync(f"fact {i}"),
         )
+        for i in range(count)
+    ]
+    f.vector.upsert(nodes)
+    return nodes
+
+
+async def test_all_facts_paged_with_exact_coverage_and_real_evidence(
+    tmp_storage, fake_embed
+):
+    f = factory(tmp_storage, fake_embed)
+    original = seed(f)
+    stats = await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert stats["created_schemas"] == 3
+    assert len(f.llm.calls) == 3 and len(f.jev.calls) == 6
+    derived = f.vector.get_many({"layer": Layer.L3_DERIVED.value}, limit=100)
+    assert {nid for n in derived for nid in n.custom["source_ids"]} == {
+        n.node_id for n in original
+    }
+    assert all(f.vector.get(n.custom["source_node_id"]) for n in derived)
+    assert all(f.vector.get(n.node_id).s2_evidence_count == 1 for n in original)
+    assert all(
+        f.graph.evidence_of(n.node_id) == n.custom["source_ids"] for n in derived
     )
-    _script_ops(
-        ultra_factory,
-        _ops(
-            {"op": "add_evidence", "schema_id": "s1", "evidence": ["a2", "a3"]},
-        ),
-    )
-
-    result = await System2Agent(factory=ultra_factory).run(app_id="app", user_id="u")
-    # The agent created nothing new; it only linked evidence onto the existing schema.
-    assert result["created_schemas"] == 0
-    assert result["evidence_added"] == 2
-    assert set(ultra_factory.graph.evidence_of("s1")) == {"a2", "a3"}
-    assert _s2_chat_json_calls(ultra_factory) == 1
+    calls = len(f.llm.calls)
+    await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert len(f.llm.calls) == calls
+    f.close()
 
 
-async def test_system2_single_shot_handles_malformed_ops(ultra_factory):
-    """An op with an unknown name / missing args must not raise."""
-    _seed_fresh_facts(ultra_factory)
-    _script_ops(
-        ultra_factory,
-        _ops(
-            {"op": "add_evidence", "evidence": ["a1"]},  # missing schema_id
-            {"op": "not_a_real_tool", "x": 1},           # unknown op
-            {"no_op_key": True},                          # not an op at all
-        ),
-    )
-
-    result = await System2Agent(factory=ultra_factory).run(app_id="app", user_id="u")
-    # Nothing materialized, but the run completed cleanly.
-    assert result["created_schemas"] == 0
-    assert result["evidence_added"] == 0
-
-
-async def test_system2_single_shot_empty_ops_makes_no_writes(ultra_factory):
-    """An empty ops array → no graph writes, and no facts marked processed."""
-    _seed_fresh_facts(ultra_factory)
-    _script_ops(ultra_factory, _ops())
-
-    result = await System2Agent(factory=ultra_factory).run(app_id="app", user_id="u")
-    assert result["created_schemas"] == 0
-    assert result["evidence_added"] == 0
-    assert _s2_chat_json_calls(ultra_factory) == 1
-
-    # Facts stay unprocessed so a later digest can still consume them.
-    for fid in ("a1", "a2", "a3"):
-        node = ultra_factory.vector.get(fid)
-        assert node is not None and node.s2_evidence_count == 0
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"memories": [], "processed_ids": []},
+        {
+            "memories": [{"content": "invented", "evidence_ids": ["foreign"]}],
+            "processed_ids": ["0"],
+        },
+        {"memories": [{"content": "", "evidence_ids": ["0"]}], "processed_ids": ["0"]},
+        {"memories": "invalid", "processed_ids": ["0"]},
+    ],
+)
+async def test_invalid_generation_leaves_uncovered_sources_fresh(
+    tmp_storage, fake_embed, response
+):
+    f = factory(tmp_storage, fake_embed, response)
+    seed(f, 1)
+    with pytest.raises(DecisionContextError):
+        await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert f.vector.get("0").s2_evidence_count == 0
+    assert f.vector.get_many({"layer": Layer.L3_DERIVED.value}) == []
+    f.close()
 
 
-async def test_system2_no_clusters_no_calls(ultra_factory):
-    """Only 1 fact → cluster_facts returns no clusters → LLM never invoked."""
-    node = MemoryNode(
-        content="孤立事实", layer=Layer.L2_FACT, app_id="app", user_id="u", node_id="x1"
-    )
-    node.embedding = _vec({2: 1.0})
-    ultra_factory.vector.upsert([node])
-
-    result = await System2Agent(factory=ultra_factory).run(app_id="app", user_id="u")
-    assert result["created_schemas"] == 0
-    assert _s2_chat_json_calls(ultra_factory) == 0
+async def test_rejected_inference_not_acknowledged(tmp_storage, fake_embed):
+    f = factory(tmp_storage, fake_embed, jev=FakeJev({"coverage": "INVALID"}))
+    seed(f, 1)
+    with pytest.raises(DecisionContextError, match="coverage"):
+        await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert f.vector.get("0").s2_evidence_count == 0
+    f.close()
 
 
-async def test_system2_single_shot_marks_clustered_facts_processed(ultra_factory):
-    """Creating a schema marks the whole cluster consumed so the next digest skips it.
+async def test_no_inference_still_requires_jev_coverage_verdict(
+    tmp_storage, fake_embed
+):
+    f = factory(tmp_storage, fake_embed, {"memories": [], "processed_ids": ["0"]})
+    seed(f, 1)
+    await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert len(f.jev.calls) == 1 and f.vector.get("0").s2_evidence_count == 1
+    assert f.vector.get_many({"layer": Layer.L3_DERIVED.value}) == []
+    f.close()
 
-    Only one fact is cited as evidence, but every fact in the cluster gets
-    ``s2_evidence_count`` bumped — otherwise the next digest would re-cluster and
-    re-process the same facts indefinitely.
-    """
-    _seed_fresh_facts(ultra_factory)
-    _script_ops(
-        ultra_factory,
-        _ops(
-            {"op": "create_schema", "content": "X", "tags": [], "evidence": ["a1"]},
-        ),
-    )
 
-    await System2Agent(factory=ultra_factory).run(app_id="app", user_id="u")
-    for fid in ("a1", "a2", "a3"):
-        node = ultra_factory.vector.get(fid)
-        assert node is not None and node.s2_evidence_count >= 1
+async def test_oversized_fact_retained_pending(tmp_storage, fake_embed):
+    f = factory(tmp_storage, fake_embed)
+    f.settings.llm_context_window = 1200
+    f.settings.llm_completion_reserve = 100
+    n = seed(f, 1)[0]
+    n.content = "x" * 4000
+    # seed initial oversized source directly in a new scope
+    n.node_id = "long"
+    f.vector.upsert([n])
+    with pytest.raises(ValueError, match="context"):
+        await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert f.vector.get("long").s2_evidence_count == 0
+    f.close()
+
+
+async def test_changed_evidence_cannot_commit_inference(tmp_storage, fake_embed):
+    f = factory(tmp_storage, fake_embed)
+    seed(f, 1)
+
+    def response(system, user):
+        f.vector.update_payload("0", {"is_latest": False})
+        return {
+            "memories": [
+                {"content": "derived", "kind": "schema", "evidence_ids": ["0"]}
+            ],
+            "processed_ids": ["0"],
+        }
+
+    f.llm.responses = {"json": response}
+    with pytest.raises(DecisionContextError, match="evidence changed"):
+        await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert f.vector.get("0").s2_evidence_count == 0
+    assert f.vector.get_many({"layer": Layer.L3_DERIVED.value}) == []
+    f.close()
+
+
+async def test_graph_failure_repaired_after_evidence_watermark_commit(
+    tmp_storage, fake_embed, monkeypatch
+):
+    f = factory(tmp_storage, fake_embed)
+    seed(f, 1)
+    original = f.graph.add_evidence
+    fail = True
+
+    def add_evidence(**kw):
+        nonlocal fail
+        if fail:
+            fail = False
+            raise OSError("graph temporarily unavailable")
+        return original(**kw)
+
+    monkeypatch.setattr(f.graph, "add_evidence", add_evidence)
+    with pytest.raises(OSError):
+        await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert f.vector.get("0").s2_evidence_count == 1
+    assert len(f.vector.pending_projections(("app", "u", ""))) == 1
+    calls = len(f.llm.calls)
+    await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert len(f.llm.calls) == calls
+    derived = f.vector.get_many({"layer": Layer.L3_DERIVED.value})[0]
+    assert f.graph.evidence_of(derived.node_id) == ["0"]
+    assert f.vector.pending_projections(("app", "u", "")) == []
+    f.close()

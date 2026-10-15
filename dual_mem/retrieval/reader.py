@@ -12,6 +12,7 @@ from dual_mem.retrieval.hybrid_engine import search_hybrid
 from dual_mem.sdk_models import MemoryItem, ReadResult, SearchMemories
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
 
+
 class Reader:
     """Embed a query, run hybrid recall, and return grouped memory items."""
 
@@ -141,6 +142,15 @@ class Reader:
             source_node_id = str(source_node_id)
         return MemoryItem(
             memory_id=node.node_id,
+            layer=node.layer.value,
+            kind=node.kind or node.category.value,
+            is_latest=node.is_latest,
+            revision=node.revision,
+            supersedes=list(node.supersedes),
+            source_ids=list((node.custom or {}).get("source_ids", [])),
+            conflicts_with=list((node.custom or {}).get("conflicts_with", [])),
+            valid_from=node.valid_from,
+            valid_until=node.valid_until,
             content=node.content,
             category=node.category.value,
             score=node.score,

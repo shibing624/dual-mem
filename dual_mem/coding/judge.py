@@ -1,78 +1,62 @@
-# -*- coding: utf-8 -*-
-"""Coding memory scene judge — LLM binary classifier (coding vs chat).
+"""Jev scene choice using full available source, never a keyword rule."""
 
-Fail-safe: any LLM error or parse failure → False (fallback to chat path).
-"""
 import json
-import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from dual_mem.providers.llm import LLMClient
-from dual_mem.coding.preproc import extract_tool_summary
+from dual_mem.coding.types import CodingDecisionError
+from dual_mem.providers.jev import DecisionProvider, JevAnswer
 
-logger = logging.getLogger("dual_mem.coding.judge")
 
-_CLASSIFY_PROMPT = """\
-You are a single-label scene classifier. Decide the DOMINANT scene of the entire
-conversation chunk passed to you.
-
-Output exactly one of:
-  "coding"  — user is primarily doing engineering work (code/files/commands/
-              deploy/debug). Tool calls are doing real work, and instructions/
-              conventions/decisions/learnings may emerge.
-  "chat"    — user is primarily having casual conversation, sharing personal
-              info, asking factual Q&A unrelated to dev/ops. Tool calls (if any)
-              are incidental.
-
-Rules:
-- Look at the WHOLE chunk, not individual turns.
-- A few stray tool calls inside a clearly chat chunk should still be "chat".
-- When in doubt, prefer "chat".
-
-Conversation summary (turns with user query + tool names used):
-{turns_block}
-
-Output strict JSON only, no markdown:
-{{"is_coding": true/false, "reason": "..."}}
-"""
+async def evaluate_decisions(
+    jev: DecisionProvider,
+    *,
+    state: dict[str, Any],
+    questions: dict[str, dict[str, Any]],
+) -> dict[str, JevAnswer]:
+    """Bound full evidence and validate injected providers as well as HTTP JEV."""
+    state_chars = len(json.dumps(state, ensure_ascii=False))
+    budget = min(
+        getattr(jev, "max_question_chars", 60_000),
+        getattr(jev, "max_request_chars", 100_000),
+    )
+    for name, question in questions.items():
+        if not 1 <= len(question.get("criteria", {})) <= 255:
+            raise CodingDecisionError("coding JEV choice budget exceeded")
+        if state_chars + len(json.dumps({name: question}, ensure_ascii=False)) > budget:
+            raise CodingDecisionError(
+                "coding JEV context budget exceeded; split source or expand budget"
+            )
+    answers = await jev.evaluate(state=state, questions=questions)
+    if not isinstance(answers, dict) or set(answers) != set(questions):
+        raise CodingDecisionError("coding JEV response lacks exact question coverage")
+    for name, answer in answers.items():
+        try:
+            answer = JevAnswer.model_validate(answer)
+        except (TypeError, ValueError) as exc:
+            raise CodingDecisionError("invalid coding JEV answer") from exc
+        if answer.type != "choice" or answer.choice not in questions[name]["criteria"]:
+            raise CodingDecisionError("coding JEV selected an unsupported answer")
+        answers[name] = answer
+    return answers
 
 
 async def classify_messages_is_coding(
-    messages: List[dict],
-    llm: LLMClient,
-    *,
-    max_tokens: int = 200,
-    temperature: float = 0.1,
+    messages: list[dict], jev: DecisionProvider
 ) -> bool:
-    """Classify if messages are coding or chat. Fail-safe → False."""
     if not messages:
         return False
-
-    summary = extract_tool_summary(messages)
-    turns_block = _format_turns(summary)
-    prompt = _CLASSIFY_PROMPT.format(turns_block=turns_block)
-
-    try:
-        resp = await llm.chat_json(system=prompt, user="", temperature=temperature)
-        if isinstance(resp, dict) and "is_coding" in resp:
-            is_coding = bool(resp["is_coding"])
-            logger.info("[coding-judge] is_coding=%s reason=%r", is_coding, resp.get("reason", ""))
-            return is_coding
-    except Exception as e:
-        logger.warning("[coding-judge] classify failed: %s; defaulting to chat", e)
-
-    return False
-
-
-def _format_turns(summary: List[Dict[str, Any]]) -> str:
-    if not summary:
-        return "(empty)"
-    rows = []
-    for t in summary:
-        user = (t.get("user") or "")[:200]
-        tools = t.get("tools") or []
-        rows.append(
-            f"- turn {t.get('turn', '?')}: user={user!r}, tools={tools}"
-            + (", has_tool_result=True" if t.get("has_tool_result") else "")
-        )
-    return "\n".join(rows)
+    answers = await evaluate_decisions(
+        jev,
+        state={"messages": messages},
+        questions={
+            "scene": {
+                "type": "choice",
+                "instructions": "Choose dominant scene of the entire conversation. Incidental tool use does not imply engineering.",
+                "criteria": {
+                    "CODING": "Engineering work and reusable implementation learning",
+                    "CHAT": "User conversation or non-engineering task",
+                },
+            }
+        },
+    )
+    return answers["scene"].choice == "CODING"

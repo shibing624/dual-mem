@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: Async extractor that pulls identity/facts/intentions/basic_info and
-the is_ephemeral commit signal from a conversation in one JSON-mode LLM call. L0 persistence
-is deferred to MemAgent so L0/L2/L4 embeddings can be batched post-extract.
+@description: Generate faithful explicit candidates; Jev decides persistence and relations.
 """
 import logging
 
@@ -52,6 +50,7 @@ class Extractor:
                 prompts.EXTRACT_FEW_SHOT_EN,
                 content,
             )
+
         def _build_system(chunk: str) -> str:
             return tmpl.format(
                 content=chunk,
@@ -68,7 +67,9 @@ class Extractor:
             build_system=_build_system,
             merge_results=merge_extract_results,
         )
-        if self.retry_on_failure and self._should_retry(parsed, content_len=len(llm_content)):
+        if self.retry_on_failure and self._should_retry(
+            parsed, content_len=len(llm_content)
+        ):
             logger.warning(
                 "extract: retry after empty/unparseable LLM output (content len=%d)",
                 len(content),
@@ -139,14 +140,26 @@ class Extractor:
             if current_messages is not None
             else content
         )
-        system = prompts.pick(
-            prompts.SYSTEM1_EXTRACT_ZH,
-            prompts.SYSTEM1_EXTRACT_EN,
-            llm_content,
+        system = (
+            "Generate faithful explicit atomic candidates from the supplied conversation. "
+            "Use the conversation language. Do not judge persistence, knownness or update relations; Jev does that. "
+            "Preserve every number, name, condition, negation and explicit intention. "
+            "Separate distinct events from current state and keep one dimension per candidate. "
+            "Do not infer preferences or traits from behavior. Attribute assistant claims correctly. "
+            "Repeated statements and return to a former state still require candidates. "
+            "Current time is only a reference for explicitly stated relative dates; do not insert an as-of "
+            "time or validity boundary when the source supplies none. Do not omit content because it might be known. "
+            'Return a JSON object: {"facts":[{"content":"explicit self-contained statement", "tags":[]}], '
+            '"identity":[], "intentions":[], "basic_info":{}}. Put every explicit candidate in facts; '
+            "Jev chooses representation. Do not write placeholder text or explanations. Empty facts only when "
+            "the conversation contains no explicit statements."
         )
         user = f"Current time: {current_time or '(unknown)'}\n\nConversation:\n{llm_content}"
-        parsed = await self.llm.chat_json(
-            system=system,
+        parsed = await self.llm.chat_json_for_content(
+            content=llm_content,
+            build_system=lambda chunk: system
+            + f"\nCurrent time: {current_time or '(unknown)'}",
+            merge_results=merge_extract_results,
             user=user,
             temperature=0.0,
             max_tokens=3072,
@@ -154,14 +167,24 @@ class Extractor:
         if not isinstance(parsed, dict):
             parsed = {}
         return {
-            "identity": parsed.get("identity") if isinstance(parsed.get("identity"), list) else [],
-            "facts": parsed.get("facts") if isinstance(parsed.get("facts"), list) else [],
+            "identity": (
+                parsed.get("identity")
+                if isinstance(parsed.get("identity"), list)
+                else []
+            ),
+            "facts": (
+                parsed.get("facts") if isinstance(parsed.get("facts"), list) else []
+            ),
             "intentions": (
-                parsed.get("intentions") if isinstance(parsed.get("intentions"), list) else []
+                parsed.get("intentions")
+                if isinstance(parsed.get("intentions"), list)
+                else []
             ),
             "is_ephemeral": bool(parsed.get("is_ephemeral", False)),
             "basic_info": (
-                parsed.get("basic_info") if isinstance(parsed.get("basic_info"), dict) else {}
+                parsed.get("basic_info")
+                if isinstance(parsed.get("basic_info"), dict)
+                else {}
             ),
         }
 
