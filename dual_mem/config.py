@@ -111,7 +111,7 @@ class Settings(BaseSettings):
     # Both modes append System1 facts/profiles using Jev decisions.
     # dual adds explicit digest for cross-evidence L3 cognition.
     mode: Literal["system1", "dual"] = "system1"
-    storage_dir: str = "./.dual_mem_data"
+    storage_dir: str = "./.dual_mem_v4"
 
     # Tuning preset: pick ONE named scenario instead of hand-tuning the advanced knobs
     # below. The preset only fills in fields you did NOT set explicitly (init/env/YAML

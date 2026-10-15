@@ -71,7 +71,7 @@ JEV 可使用 `jev=` 注入 provider，或配置 `jev_api_key` / `jev_endpoint` 
 
 删除配置：reconcile_sync、reconcile_skip_llm、reconcile_weak_candidate_score、
 reconcile_policy、reconcile_non_destructive、content_hash_dedup 以及 cluster 写入门控。
-旧键及嵌套 mem0 配置不再兼容，Settings 校验直接报错。旧存储不自动迁移：`layer_schema_version` 不是 4，或状态不是 `ACTIVE`，打开时抛 `ValueError` 并且不改写文件。换新的 `storage_dir`。
+旧键及嵌套 mem0 配置不再兼容，Settings 校验直接报错。默认 `storage_dir` 是 `./.dual_mem_v4`，旧的 `.dual_mem_data` 不再使用。显式打开 `layer_schema_version` 不是 4、或状态不是 `ACTIVE` 的目录时抛 `ValueError` 并且不改写文件。
 
 ## 验证
 

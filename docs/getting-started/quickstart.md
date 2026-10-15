@@ -7,7 +7,7 @@
 ```python
 from dual_mem import SyncMemoryClient
 
-with SyncMemoryClient(mode="system1", storage_dir="./.dual_mem_data") as client:
+with SyncMemoryClient(mode="system1", storage_dir="./.dual_mem_v4") as client:
     client.add(
         content="我最爱的编程语言是 Java，已经用了5年。",
         user_id="alice",
@@ -30,7 +30,7 @@ from dual_mem import MemoryClient
 
 
 async def main():
-    client = MemoryClient(mode="system1", storage_dir="./.dual_mem_data")
+    client = MemoryClient(mode="system1", storage_dir="./.dual_mem_v4")
     await client.add(content="...", user_id="alice")
     await client.aclose()
 
@@ -49,7 +49,7 @@ asyncio.run(main())
 | 参数 | 必填 | 含义 |
 |---|---|---|
 | `mode` | 否 | `"system1"`（默认，写 L0/L1/L2）或 `"dual"`（+ 显式 `digest()` 写 L3_DERIVED）。可写在 YAML。 |
-| `storage_dir` | 否 | 本地数据目录（Chroma + Kuzu + SQLite），默认 `./.dual_mem_data`。 |
+| `storage_dir` | 否 | 本地数据目录（Chroma + Kuzu + SQLite），默认 `./.dual_mem_v4`。 |
 | `settings` | 否 | 传入 `Settings` 对象，覆盖 YAML / 环境变量。 |
 | `embed` / `llm` / `jev` | 否 | 注入自定义客户端（测试 / 自建后端）；注入后跳过对应密钥校验。 |
 
@@ -173,7 +173,7 @@ dual 写入只登记待处理 scope，不启动后台任务。由应用在会话
 from dual_mem import MemoryClient
 from dual_mem.config import Settings
 
-client = MemoryClient(settings=Settings(mode="dual", storage_dir="./.dual_mem_data"))
+client = MemoryClient(settings=Settings(mode="dual", storage_dir="./.dual_mem_v4"))
 # ... await client.add(...) 若干次 ...
 digest = await client.digest()
 await client.aclose()

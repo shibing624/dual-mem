@@ -1,4 +1,4 @@
-> The SDK now uses to Jev decisions with four canonical layers: L0_RAW, L1_FACT, L2_PROFILE, L3_DERIVED. Both modes reconcile inline; dual adds explicit digest. Configure Jev credentials or inject `jev=`. `update` returns a new version ID and `delete` archives. Legacy layer aliases, nested configuration, deferred reconcile queues and automatic storage migrations are removed; use canonical flat settings. An existing data directory is rejected unchanged — use a new `storage_dir`. See [the migration design](docs/jev-memory-design.md) and the local interactive flow at `docs/design/jev-memory-flow.html` (Git ignored). Historical release notes below describe earlier SDK versions.
+> The SDK now uses to Jev decisions with four canonical layers: L0_RAW, L1_FACT, L2_PROFILE, L3_DERIVED. Both modes reconcile inline; dual adds explicit digest. Configure Jev credentials or inject `jev=`. `update` returns a new version ID and `delete` archives. Legacy layer aliases, nested configuration, deferred reconcile queues and automatic storage migrations are removed; use canonical flat settings. The default data directory is `./.dual_mem_v4`. An existing `.dual_mem_data` directory is left unused and is not migrated. See [the migration design](docs/jev-memory-design.md) and the local interactive flow at `docs/design/jev-memory-flow.html` (Git ignored). Historical release notes below describe earlier SDK versions.
 
 [**🇨🇳中文**](https://github.com/shibing624/dual-mem/blob/main/README.md) | [**🌐English**](https://github.com/shibing624/dual-mem/blob/main/README_EN.md)
 
@@ -92,7 +92,7 @@ Scripts / sync apps (recommended):
 ```python
 from dual_mem import SyncMemoryClient
 
-with SyncMemoryClient(mode="system1", storage_dir="./.dual_mem_data") as client:
+with SyncMemoryClient(mode="system1", storage_dir="./.dual_mem_v4") as client:
     client.add(
         content="My favorite language is Java. I've used it for 5 years.",
         user_id="alice",
@@ -113,7 +113,7 @@ from dual_mem import MemoryClient
 
 
 async def main():
-    client = MemoryClient(mode="system1", storage_dir="./.dual_mem_data")
+    client = MemoryClient(mode="system1", storage_dir="./.dual_mem_v4")
     await client.add(content="...", user_id="alice")
     await client.aclose()
 

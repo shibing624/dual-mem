@@ -1,7 +1,7 @@
 # 配置优先级：显式参数 > DUAL_MEM_* 环境变量 > YAML > preset > 默认值。
 # 密钥建议只放环境变量；不把本地配置提交到 git。
 mode: system1
-storage_dir: ./.dual_mem_data
+storage_dir: ./.dual_mem_v4
 preset: default
 
 # JEV：全部语义判断。Venus 仅替换 endpoint，model 显式发送。

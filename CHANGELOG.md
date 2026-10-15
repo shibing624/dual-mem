@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 默认 `storage_dir` 从 `./.dual_mem_data` 改为 `./.dual_mem_v4`。未显式指定目录时不再打开旧目录，旧数据不迁移。配置或参数仍指向旧目录时，打开照旧报 `unsupported memory schema` 且不改写。
+
 ## [0.1.3] — 2026-10-15
 
 - Replace write-side semantic rules and similarity routing with batched JEV decisions.
