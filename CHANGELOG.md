@@ -92,6 +92,7 @@ Benchmark 专用覆盖见 `exp/dual_mem_exp/benchmarks/backends/dual_mem.py`（�
 | **Entity BM25 分数映射** | （内部） | — | fusion 中 entity 不再 **全部 ~0.9** 压过 vector 0.4–0.7 | `score = 0.25 + 0.45 * bm25_norm`（`bm25_norm` 已 max-normalize）。旧：`min(0.9, 0.3+0.6*raw)` |
 | **Fusion access 批量读** | （内部 `get_access_batch`） | 少 N 次 SQLite  round-trip | — | — |
 | **Query understanding 只算一次** | （内部） | 避免 hybrid 路径重复 `understand()` | — | — |
+| **池内 BM25 置信度校准** | （内部） | 无额外存储查询 | BM25 分数同时考虑 query 覆盖率和候选池词项稀有度；精确稀有词仍可救回弱语义命中，但池内普遍词不再因 max-normalize 自动拿满分并穿过 `min_score` | 不引入 Trigger 模型或额外 LLM；部分词匹配的提升幅度低于旧行为 |
 | **Reconsolidation 限频** | `reconsolidation_min_interval_sec: 0`（SDK）；benchmark `60` | 同 user 搜索 **减少 hook 开销** | dual 模式 S2 reconsolidation 任务更稀疏 | 回退：`reconsolidation_enabled: false` 或 `min_interval_sec: 0` |
 | **Reconsolidation 仅刷新时间戳（零 LLM）** | （内部 `_run_reconsolidation`） | 无额外 LLM | dual：召回后仅刷新 `last_reactivated_at`，**不再做情绪/arousal 推断、不再置 `custom.reactivation`**（Gate 移除后去此逻辑） | 非 ReAct，按设计轻量 |
 | **Hybrid 按 `target_layers` 路由** | （内部，`reader_mode: hybrid`） | — | QU 建议层 ∪ 常驻 profile 层下传 anchor（旧文档误标"写死层列表"） | 回退：`reader_mode: legacy` |

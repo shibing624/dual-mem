@@ -14,7 +14,11 @@ import math
 
 from dual_mem.isolation import build_filter
 from dual_mem.registry import ComponentFactory
-from dual_mem.retrieval.bm25 import compute_bm25_scores, tokenize
+from dual_mem.retrieval.bm25 import (
+    compute_bm25_confidences,
+    compute_bm25_scores,
+    tokenize,
+)
 from dual_mem.retrieval.evolution import expand_evolution_chains
 from dual_mem.retrieval.hybrid_scoring import compute_evidence_boost, score_vdb_node
 from dual_mem.retrieval.intention_recall import recall_intentions
@@ -291,11 +295,10 @@ async def search_hybrid(
             for h in vdb_semantic_hits
         ]
         raw = compute_bm25_scores(terms, contents)
-        max_raw = max(raw) if raw else 0.0
-        if max_raw > 0:
-            for h, r in zip(vdb_semantic_hits, raw):
-                if r > 0:
-                    bm25_by_nid[h["node_id"]] = r / max_raw
+        calibrated = compute_bm25_confidences(terms, contents, raw)
+        for hit, score in zip(vdb_semantic_hits, calibrated, strict=True):
+            if score > 0:
+                bm25_by_nid[hit["node_id"]] = score
     has_bm25 = bool(bm25_by_nid)
 
     vdb_scored: list[dict] = []

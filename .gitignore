@@ -223,16 +223,13 @@ __marimo__/
 docs/hy-memory-test/
 docs/superpowers/
 
-# exp/ 下只排除实验产物（results/、storage/、日志、scratch），harness 源码要版本化。
-# 注意：不能用 `exp/ + !子目录` 的 re-include 写法——git 无法 re-include 被排除目录的子路径。
-# 改为不排除父目录、逐条排除产物。
-exp/dual_mem_exp/benchmarks/results/
-exp/dual_mem_exp/benchmarks/*/results/
-exp/dual_mem_exp/benchmarks/*/storage/
-exp/dual_mem_exp/benchmarks/**/tmp/
-exp/dual_mem_exp/benchmarks/**/*.jsonl
-exp/dual_mem_exp/benchmarks/**/__pycache__/
-exp/dual_mem_exp/benchmarks/tmp/
+# Local experiments and design artifacts
+/docs/design/
+/dual_mem_flow_visualization.html
+/exp/
+/node_modules/
+/package-lock.json
+/package.json
 
 # scratch / smoke demos
 tmp/

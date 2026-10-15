@@ -57,6 +57,47 @@ def compute_bm25_scores(
     return scores
 
 
+def compute_bm25_confidences(
+    query_terms: list[str],
+    candidate_contents: list[str],
+    raw_scores: list[float],
+) -> list[float]:
+    """Calibrate relative BM25 scores by query coverage and term rarity.
+
+    Max-normalization alone always gives the best lexical candidate a score of 1,
+    even when it only matches a term shared by the entire candidate pool. This
+    confidence keeps exact, discriminative matches strong while making ubiquitous
+    or partial matches contribute less to hybrid retrieval.
+    """
+    if not query_terms or not candidate_contents:
+        return [0.0] * len(candidate_contents)
+    if len(raw_scores) != len(candidate_contents):
+        raise ValueError("raw_scores and candidate_contents must have the same length")
+
+    terms = set(query_terms)
+    tokenized = [set(tokenize(content)) for content in candidate_contents]
+    n = len(tokenized)
+    df = {term: sum(term in tokens for tokens in tokenized) for term in terms}
+    rare_match_idf = math.log((n - 0.5) / 1.5 + 1.0)
+    max_raw = max(raw_scores, default=0.0)
+    if rare_match_idf <= 0 or max_raw <= 0:
+        return [0.0] * len(candidate_contents)
+
+    confidences: list[float] = []
+    for tokens, raw_score in zip(tokenized, raw_scores, strict=True):
+        rarity_coverage = sum(
+            min(
+                math.log((n - df[term] + 0.5) / (df[term] + 0.5) + 1.0)
+                / rare_match_idf,
+                1.0,
+            )
+            for term in terms
+            if term in tokens
+        ) / len(terms)
+        confidences.append((raw_score / max_raw) * rarity_coverage)
+    return confidences
+
+
 def score_and_rank(
     query_terms: list[str],
     candidates: list[tuple[str, str]],

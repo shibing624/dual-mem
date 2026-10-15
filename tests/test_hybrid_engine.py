@@ -135,6 +135,24 @@ async def test_i3_keyword_hit_survives_min_score_gate(tmp_storage):
     await client.aclose()
 
 
+async def test_ubiquitous_term_does_not_force_weak_hits_through_gate(tmp_storage):
+    query = "status"
+    settings = Settings(mode="system1", storage_dir=tmp_storage)
+    client = MemoryClient(
+        settings=settings,
+        embed=_ScriptedEmbed(query),
+        llm=FakeLLMClient(),
+    )
+
+    _seed_fact(client, node_id="one", content="project status meeting notes", cosine=0.3)
+    _seed_fact(client, node_id="two", content="order status remains unchanged", cosine=0.3)
+
+    result = await client.search(query=query, app_ids=["app"], user_id="u")
+    assert result.memories.normal == []
+
+    await client.aclose()
+
+
 async def test_dual_l6_schema_recalled_into_profile(tmp_storage, fake_embed):
     """Dual mode: an L6 schema (graph) with DERIVED_FROM evidence surfaces in the profile route."""
     settings = Settings(mode="dual", storage_dir=tmp_storage)

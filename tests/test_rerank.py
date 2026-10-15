@@ -1,4 +1,9 @@
-from dual_mem.retrieval.bm25 import compute_bm25_scores, score_and_rank, tokenize
+from dual_mem.retrieval.bm25 import (
+    compute_bm25_confidences,
+    compute_bm25_scores,
+    score_and_rank,
+    tokenize,
+)
 from dual_mem.retrieval.rrf import rrf_fuse
 
 
@@ -20,6 +25,21 @@ def test_bm25_more_query_terms_ranks_first():
 def test_bm25_empty_query_all_zero():
     scores = compute_bm25_scores([], ["foo bar", "baz"])
     assert scores == [0.0, 0.0]
+
+
+def test_bm25_confidence_penalizes_ubiquitous_partial_match():
+    terms = tokenize("project status quasar-917")
+    contents = [
+        "project status meeting notes",
+        "project status remains unchanged",
+        "project status for quasar-917",
+    ]
+    raw = compute_bm25_scores(terms, contents)
+    confidence = compute_bm25_confidences(terms, contents, raw)
+
+    assert confidence[2] > 0.5
+    assert 0.0 < confidence[0] < 0.2
+    assert 0.0 < confidence[1] < 0.2
 
 
 def test_rrf_multi_channel_doc_ranks_first():
