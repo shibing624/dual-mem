@@ -6,6 +6,8 @@
 - Keep four canonical layers and only system1 / dual modes; retain linked history.
 - Remove legacy layers/statuses, deferred reconcile worker, nested config adapters and automatic migrations.
 - Add per-attempt JEV latency and generation reasoning telemetry; hy3 smoke explicitly uses no_think.
+- JEV target 选项从节点正文改为完整 `_context_node` JSON（layer、kind、revision、有效期、source_ids）。候选一多会先撞上 255 个选项或 `jev_max_question_chars`，抛 `DecisionContextError`，不会静默改成 SUPPLEMENT。action 说明把「另一次搬家」和「当前居住地变化」分开。
+- 打开 `layer_schema_version != 4` 或非 `ACTIVE` 的目录直接报错且不改写。已有 `.dual_mem_data` 必须换新 `storage_dir`；旧 reconcile 队列不再排空。
 
 本文件记录 **dual-mem SDK** 中会影响 **延迟、LLM 调用次数、召回/写入效果** 的变更。  
 Benchmark 对比或线上行为异常时，优先查此表 + 对应 `Settings` / `config.default.yaml` 开关。
@@ -31,11 +33,13 @@ Benchmark 专用覆盖见 `exp/dual_mem_exp/benchmarks/backends/dual_mem.py`（�
 - System2 完整分页覆盖事实，processed evidence 与版本原子提交；来源更新使推导过期。
 - 确定性生成 smoke 的真实 Venus JEV 最新四步裁决为 408–562 ms；真实 hy3 生成链
   四步写入为 12–28 秒，embedding 为确定性适配器。未做准确率或速度对比基准。
-- 兼容性与迁移详见 docs/jev-memory-design.md；以下记录为旧实现历史。
+- JEV 的 target 选项携带完整节点 JSON，而不只是正文。材料过长或选项超过 255 时写入失败并保留 source，不降级成 SUPPLEMENT。
+- 旧存储目录不能打开，也不会被迁移。换新的 `storage_dir`。
+- 兼容性详见 docs/jev-memory-design.md。
 
-## [Unreleased]
+## [Historical · pre-JEV notes]
 
-> 当前 `__version__` 仍为 `0.1.2`；下列变更已在 `main`，尚未发版。
+> 下面是 JEV 重构前的未发版记录，不是当前 SDK 行为。其中的旧层名、`SHADOW`、Gate、`content_hash_dedup`、reconcile 队列和对应配置都已删除。
 
 ### 写入：Provider 先落 L1；读侧挂来源 id
 
@@ -128,7 +132,7 @@ Benchmark 专用覆盖见 `exp/dual_mem_exp/benchmarks/backends/dual_mem.py`（�
 
 ### Benchmark backend 与 SDK 默认值差异
 
-`exp/dual_mem_exp/benchmarks/backends/dual_mem.py` 相对 SDK 的典型覆盖（**刷榜时务必对齐**）：
+下面这段是 JEV 重构前的 benchmark 覆盖。这些键已经从 `Settings` 删除，不要抄进当前配置：
 
 ```yaml
 summarizer_enabled: false
@@ -158,17 +162,15 @@ llm_json_mode: false              # vLLM Qwen 兼容
 
 ---
 
-## 快速回退清单（benchmark 异常时）
+## 快速回退清单（当前 SDK）
 
 | 现象 | 优先尝试 |
 |------|----------|
-| ingest LLM 调用数异常 | 当前每 `add` 固定 1 次 extract LLM（Gate 已移除，无 gate 次数）；如需低价值内容跳过 extract 见本地预筛 TODO。其他查 `summarizer_enabled`、`extract_max_content_chars` |
-| 长对话 fact 变少 / 丢中间信息 | `extract_max_content_chars: 0`（恢复 chunk merge）或增大截断上限 |
-| REJECT/ephemeral 仍付 1 次 extract LLM | 设计如此（Gate 已删，无 short-circuit 可省）；如需省，加本地启发式预筛 |
-| LME session 召回掉点 | 确认 `content_hash_dedup` 未跨 session 误命中；已含 `session_id` |
-| search 排序异常 | `reader_mode: legacy`；或查 entity BM25 分数映射 |
-| JSON 解析失败翻倍耗时 | `extract_retry_on_failure: false` |
-| vLLM 400 on json_mode | `llm_json_mode: false`（benchmark 已设） |
+| 打开存储报 `unsupported memory schema` | 换新 `storage_dir`。旧库不迁移、不改写，队列里的旧 reconcile 任务不会再跑 |
+| `DecisionContextError`，或 JEV 报选项/字符超预算 | 把这次 source 拆成更小的写入。上限是 `jev_max_questions`、`jev_max_question_chars`，每个 target choice 最多 255 个选项 |
+| 写入变慢 | 看 usage 回调里每次 JEV 的 `latency_ms`。默认并发 4 |
+| 生成 JSON 解析失败又重试 | `extract_retry_on_failure: false` |
+| vLLM 400 on json_mode | `llm_json_mode: false` |
 
 ---
 
@@ -183,4 +185,4 @@ llm_json_mode: false              # vLLM Qwen 兼容
 
 ---
 
-维护约定：任何 **默认配置变更**、**LLM 调用次数变更**、**截断/merge 策略变更**、**并发/scheduling 变更**，合并 PR 时请更新 `[Unreleased]` 一节。
+维护约定：任何 **默认配置变更**、**LLM / JEV 调用次数变更**、**截断或上下文预算变更**、**并发变更**，合并时写入文首 `Unreleased — JEV memory redesign`。

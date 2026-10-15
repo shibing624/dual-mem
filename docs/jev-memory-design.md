@@ -58,13 +58,13 @@ JEV 可使用 `jev=` 注入 provider，或配置 `jev_api_key` / `jev_endpoint` 
 默认并发 4，HTTP 客户端复用，429/529/502/503/504 有限重试；按问题数量和字符预算拆包。
 字符预算是保守配置，不是 tokenizer 实测 token 数。
 
-材料上限默认 64、最多 220；每个 target choice 至多 255 个选项，提议特别多时应拆 source。
+材料上限默认 64、最多 220；每个 target choice 至多 255 个选项。选项文本是完整节点 JSON（layer、kind、revision、有效期、source_ids），不只是正文，所以更容易先撞上 `jev_max_question_chars`。提议特别多时应拆 source。
 默认提议问题批量 12。材料/历史过长或动作与目标矛盾时显式报错并保留 source，
 不会无依据地转成 SUPPLEMENT。连续 MERGE 传递全部祖先片段与来源，保持一批合并的一次生成/一次校验。JEV 的质量和完整真实生成链路速度仍须业务数据评测。
 
 删除配置：reconcile_sync、reconcile_skip_llm、reconcile_weak_candidate_score、
 reconcile_policy、reconcile_non_destructive、content_hash_dedup 以及 cluster 写入门控。
-旧键及嵌套 mem0 配置不再兼容，Settings 校验直接报错。旧存储不自动迁移。
+旧键及嵌套 mem0 配置不再兼容，Settings 校验直接报错。旧存储不自动迁移：`layer_schema_version` 不是 4，或状态不是 `ACTIVE`，打开时抛 `ValueError` 并且不改写文件。换新的 `storage_dir`。
 
 ## 验证
 
