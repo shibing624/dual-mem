@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **写入降级而不丢弃**：coverage 拒绝 / 空抽取被判漏抽时带反馈重抽（`extract_coverage_retries`，默认 1），用尽后仍提交候选并把 L0 来源排队复核；`NEED_CONTEXT`、多目标 `UNSURE`、低于 `reconcile_review_confidence`（默认 0 = 关）的关系先按独立 SUPPLEMENT 写入并标 `needs_review`。`digest()` 在 system1 / dual 都先跑复核，失败项 `review_max_attempts` 次后隔离。**效果**：benchmark 不再因单个 session 的决策失败丢整段记忆。**速度**：coverage 失败时多一次生成 + JEV。**回退**：`extract_coverage_retries=0`。
+- **乱序灌入**：来源 `memory_at` 早于 target 时只能选 `ADD_HISTORICAL` 等不退役 head 的动作；旧报告作为非 latest 版本插到 head 后面。**效果**：并发 / 乱序 ingest 不会让旧 session 覆盖新状态。
+- **JEV 预算**：target 选项改为短标签，完整节点只在 state 里出现一次（原先每个 head 出现两次，约 48 个 head 就超 60k 字符）。head 超过 `reconcile_candidate_limit` 或材料超预算时，按 embedding 相似度排序截断，只决定比较对象，不做写入门；取代原来的全量扫描 + 逐页 INCLUDE/EXCLUDE。**速度**：大 scope 每次 add 的 JEV 调用从 O(N/64) 降为常数；路由 embedding 写入时复用。
+- `MemoryDecision.action` 原样返回 `RAW_ONLY` / `INVALID`，不再压成 `SKIP`；`WriteResult` 新增 `status`（committed / known / raw_only / pending_review）与 `needs_review`。
+- 新增 `dual_mem.errors`，顶层导出 `DecisionContextError` / `DecisionPlanError` / `CoverageError` / `StaleDecisionError` / `IdempotencyConflictError`；REST 映射 409 / 422，`AddRequest` 支持 `request_id`，`AddResponse` 返回决策与状态。
+- 抽取输出明确的 `valid_from` / `valid_until` / `temporal_scope`；`search(as_of=...)` 过滤过期的 TEMPORAL；命中附带一跳 `previous` 与仍有效的 `conflicts`（`include_relations`，默认开）；formatter 渲染有效期、上一值与冲突。
+- `search(raw_limit=N)` 新增 L0 原文兜底路（`SearchMemories.raw`，分数 ≤0.5），默认关闭。REST / MCP 返回的 `memories` 多一个 `raw` 键。
+- System2：分批前按 embedding 最近邻链排序让同主题证据同批；新增 `kind=preference`（隐式偏好推断，带证据）；被拒批次同次 digest 内二分隔离，单条事实失败 `s2_max_attempts` 次后隔离，scope 不再因坏批次反复失败。
+- 幂等结果移到独立 `request_outcomes` 表，按 `request_outcome_ttl_seconds`（默认 7 天）在 digest 时清理。
+- 修复（review）：同一批中两条 `HISTORICAL` 挂到同一个 current head 不再被当作「重复消耗目标」而让整次写入失败；退役目标仍只能被消耗一次，同一 head 不能在一批里既被退役又挂历史版本。
+- 修复（review）：来源早于 target 时不再提供 `ADD_MERGE`（MERGE 会退役 head）；乱序动作集只剩 `HISTORICAL` / `CONFLICT` / `SKIP` / `INVALID` / `NEED_CONTEXT`。
+- 修复（review）：复核意图在版本计划提交**之前**入队，计划 journal 同时记录 `needs_review`。进程死在提交与返回之间时，复核项仍在队列；队列行丢失时，同 `request_id` 重试从 journal 重放结果并补回复核项，不重新裁决。复核遇到尚未落库的临时版本会保留重试（写入可能仍在进行），对应写入以其它计划提交后视为无需复核。重新入队会清零 attempts。
+- 修复（review）：复核重新抽取使用稳定的 `review:{id}` 作为 request_id，提交后、`resolve_review` 前崩溃时，下次 digest 从 journal 重放，不会因裁决不同撞上已存在的版本 id 而被隔离。
+- 修复（review）：tool 消息（coding）路径的 `add(request_id=...)` 现在幂等：原文 id 与记忆 id 由 request_id 派生，结果与发布在同一 SQLite 事务写入 `coding_requests`，重复提交直接重放，复用 id 但输入不同抛 `IdempotencyConflictError`；中途崩溃留下的未发布预留行会在重试时清除。
+- 修复（review）：coverage / REEXTRACT 复核与原写入的竞争。复核项记录发起它的 `request_key`；`digest()` 只在该请求已完成后才重新抽取，未完成（仍在提交或已失败等待重试）时保留重试。原写入提交后重新打开该项（attempts 清零），避免并发 digest 期间累积的失败把它推进隔离。同一 `request_id` 的重试若覆盖已通过，复核视为不需要。原文没有产生任何版本的写入（REEXTRACT、全部 RAW_ONLY/SKIP）也在 journal 记一条空计划，重试从 journal 重放，复核也能看到它已完成。
+- `versions.db` 新增 `requests` 表（request_key → plan），`completed_request` 不再顺序扫描整个 journal；已有库在打开时从 plans 补齐。
+- coding 路径的 `request_id` 冲突改抛 `IdempotencyConflictError`（REST 409，原先为 500）。
+- coding 重放记录只写调用方显式传入 `request_id` 的请求（自动生成的 id 无法重放，写进去只会白占空间），并加 `ts` 列，由 `digest()` 按 `request_outcome_ttl_seconds` 一并清理。
 - 默认 `storage_dir` 从 `./.dual_mem_data` 改为 `./.dual_mem_v4`。未显式指定目录时不再打开旧目录，旧数据不迁移。配置或参数仍指向旧目录时，打开照旧报 `unsupported memory schema` 且不改写。
 
 ## [0.1.3] — 2026-10-15

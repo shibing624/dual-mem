@@ -133,8 +133,13 @@ class Extractor:
         content: str,
         current_time: str,
         current_messages: list[ChatMessage] | None = None,
+        feedback: str = "",
     ) -> dict:
-        """Extract System1 memories with a stable contract and separate user input."""
+        """Extract System1 memories with a stable contract and separate user input.
+
+        ``feedback`` is the decision provider's rejection of a previous extraction of
+        the same source; it is appended verbatim so the regeneration can address it.
+        """
         llm_content = self._prepare_content(
             _message_native_content(current_messages, None)
             if current_messages is not None
@@ -149,11 +154,17 @@ class Extractor:
             "Repeated statements and return to a former state still require candidates. "
             "Current time is only a reference for explicitly stated relative dates; do not insert an as-of "
             "time or validity boundary when the source supplies none. Do not omit content because it might be known. "
-            'Return a JSON object: {"facts":[{"content":"explicit self-contained statement", "tags":[]}], '
+            "When the source states an explicit limited validity (this week, until a date, from a date, temporarily), "
+            "add valid_from / valid_until as ISO dates (YYYY-MM-DD) resolved against the current time, and "
+            "temporal_scope with the original phrase. "
+            'Return a JSON object: {"facts":[{"content":"explicit self-contained statement", "tags":[], '
+            '"valid_from":"optional YYYY-MM-DD", "valid_until":"optional YYYY-MM-DD", "temporal_scope":"optional"}], '
             '"identity":[], "intentions":[], "basic_info":{}}. Put every explicit candidate in facts; '
             "Jev chooses representation. Do not write placeholder text or explanations. Empty facts only when "
             "the conversation contains no explicit statements."
         )
+        if feedback:
+            system += f"\nA previous extraction of this source was rejected: {feedback}"
         user = f"Current time: {current_time or '(unknown)'}\n\nConversation:\n{llm_content}"
         parsed = await self.llm.chat_json_for_content(
             content=llm_content,

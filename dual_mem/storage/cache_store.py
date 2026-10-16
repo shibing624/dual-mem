@@ -39,6 +39,33 @@ CREATE TABLE IF NOT EXISTS memory_operations (
     user_id TEXT NOT NULL,
     ts      REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS request_outcomes (
+    request_key TEXT PRIMARY KEY,
+    data        TEXT NOT NULL,
+    ts          REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS review_queue (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind      TEXT NOT NULL,
+    app_id    TEXT NOT NULL,
+    user_id   TEXT NOT NULL,
+    agent_id  TEXT NOT NULL DEFAULT '',
+    node_id   TEXT NOT NULL,
+    payload   TEXT NOT NULL,
+    status    TEXT NOT NULL DEFAULT 'pending',
+    attempts  INTEGER NOT NULL DEFAULT 0,
+    error     TEXT NOT NULL DEFAULT '',
+    ts        REAL NOT NULL,
+    UNIQUE(kind, node_id)
+);
+CREATE TABLE IF NOT EXISTS s2_failures (
+    fact_id   TEXT NOT NULL,
+    scope     TEXT NOT NULL,
+    attempts  INTEGER NOT NULL DEFAULT 0,
+    error     TEXT NOT NULL DEFAULT '',
+    ts        REAL NOT NULL,
+    PRIMARY KEY (scope, fact_id)
+);
 """
 
 
@@ -71,6 +98,135 @@ class CacheStore:
                 "SELECT data FROM profile_cache WHERE iso_key = ?", (iso_key,)
             ).fetchone()
             return json.loads(row["data"]) if row else None
+
+    # ---- Idempotent write outcomes --------------------------------------------------
+
+    def set_request_outcome(self, request_key: str, data: dict) -> None:
+        """Persist the outcome of an idempotent add(request_id=...)."""
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO request_outcomes (request_key, data, ts) VALUES (?, ?, ?)",
+                (request_key, json.dumps(data, ensure_ascii=False), time.time()),
+            )
+            self.conn.commit()
+
+    def get_request_outcome(self, request_key: str) -> dict | None:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT data FROM request_outcomes WHERE request_key = ?",
+                (request_key,),
+            ).fetchone()
+            return json.loads(row["data"]) if row else None
+
+    def purge_request_outcomes(self, *, older_than: float) -> int:
+        """Drop outcomes older than ``older_than`` (unix seconds); returns rows removed."""
+        with self._lock:
+            cur = self.conn.execute(
+                "DELETE FROM request_outcomes WHERE ts < ?", (older_than,)
+            )
+            self.conn.commit()
+            return cur.rowcount
+
+    # ---- Review queue (undecided relations, sources needing re-extraction) ---------
+
+    def enqueue_review(
+        self,
+        *,
+        kind: str,
+        app_id: str,
+        user_id: str,
+        agent_id: str,
+        node_id: str,
+        payload: dict,
+    ) -> None:
+        """Queue one review item; re-queuing the same (kind, node) reopens it."""
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO review_queue (kind, app_id, user_id, agent_id, node_id, payload, ts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(kind, node_id) DO UPDATE SET payload=excluded.payload, "
+                "status='pending', attempts=0, error='', ts=excluded.ts",
+                (
+                    kind,
+                    app_id,
+                    user_id,
+                    agent_id,
+                    node_id,
+                    json.dumps(payload, ensure_ascii=False),
+                    time.time(),
+                ),
+            )
+            self.conn.commit()
+
+    def list_reviews(self, *, status: str = "pending") -> list[dict]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM review_queue WHERE status = ? ORDER BY id ASC",
+                (status,),
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item["payload"])
+            items.append(item)
+        return items
+
+    def resolve_review(self, review_id: int) -> None:
+        with self._lock:
+            self.conn.execute(
+                "UPDATE review_queue SET status='done' WHERE id=?", (review_id,)
+            )
+            self.conn.commit()
+
+    def fail_review(self, review_id: int, *, error: str, max_attempts: int) -> None:
+        """Record a failed review; quarantine it after ``max_attempts``."""
+        with self._lock:
+            self.conn.execute(
+                "UPDATE review_queue SET attempts=attempts+1, error=?, "
+                "status=CASE WHEN attempts+1 >= ? THEN 'quarantined' ELSE 'pending' END "
+                "WHERE id=?",
+                (error[:500], max_attempts, review_id),
+            )
+            self.conn.commit()
+
+    # ---- System2 failed evidence ----------------------------------------------------
+
+    def record_s2_failure(
+        self, *, scope: str, fact_ids: list[str], error: str, increment: int = 1
+    ) -> None:
+        """Count a failed cognition batch against each fact it contained."""
+        with self._lock:
+            self.conn.executemany(
+                "INSERT INTO s2_failures (fact_id, scope, attempts, error, ts) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(scope, fact_id) DO UPDATE SET "
+                "attempts=attempts+excluded.attempts, error=excluded.error, ts=excluded.ts",
+                [(fid, scope, increment, error[:500], time.time()) for fid in fact_ids],
+            )
+            self.conn.commit()
+
+    def clear_s2_failures(self, *, scope: str, fact_ids: list[str]) -> None:
+        with self._lock:
+            self.conn.executemany(
+                "DELETE FROM s2_failures WHERE scope=? AND fact_id=?",
+                [(scope, fid) for fid in fact_ids],
+            )
+            self.conn.commit()
+
+    def quarantined_s2_facts(self, *, scope: str, max_attempts: int) -> set[str]:
+        """Facts that failed cognition ``max_attempts`` times; excluded from batches."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT fact_id FROM s2_failures WHERE scope=? AND attempts >= ?",
+                (scope, max_attempts),
+            ).fetchall()
+        return {row["fact_id"] for row in rows}
+
+    def list_s2_failures(self) -> list[dict]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM s2_failures ORDER BY ts ASC"
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     # ---- System2 queue (cognition tasks) --------------------------------------------
 

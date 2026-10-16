@@ -13,6 +13,13 @@ Logging policy (SDK best practice):
 import logging
 
 from dual_mem.client import MemoryClient
+from dual_mem.errors import (
+    CoverageError,
+    DecisionContextError,
+    DecisionPlanError,
+    IdempotencyConflictError,
+    StaleDecisionError,
+)
 from dual_mem.sync_client import SyncMemoryClient
 
 __version__ = "0.1.3"
@@ -44,4 +51,14 @@ def enable_logging(level: int | str = "INFO", *, propagate: bool = False) -> log
     return logger
 
 
-__all__ = ["__version__", "MemoryClient", "SyncMemoryClient", "enable_logging"]
+__all__ = [
+    "__version__",
+    "CoverageError",
+    "DecisionContextError",
+    "DecisionPlanError",
+    "IdempotencyConflictError",
+    "MemoryClient",
+    "StaleDecisionError",
+    "SyncMemoryClient",
+    "enable_logging",
+]

@@ -24,6 +24,7 @@ class MemoryOperations:
         agent_id: str = "",
         session_id: str = "",
         memory_at: int | None = None,
+        request_id: str | None = None,
     ) -> dict:
         result = await self.client.add(
             content=content,
@@ -33,6 +34,7 @@ class MemoryOperations:
             agent_id=agent_id,
             session_id=session_id,
             memory_at=memory_at,
+            request_id=request_id,
         )
         return result.to_dict()
 
@@ -52,6 +54,9 @@ class MemoryOperations:
         include_derived: bool | None = None,
         created_after: int | None = None,
         debug: bool = False,
+        as_of: int | None = None,
+        raw_limit: int = 0,
+        include_relations: bool = True,
     ) -> dict:
         result = await self.client.search(
             query=query,
@@ -67,6 +72,9 @@ class MemoryOperations:
             include_derived=include_derived,
             created_after=created_after,
             debug=debug,
+            as_of=as_of,
+            raw_limit=raw_limit,
+            include_relations=include_relations,
         )
         return result.to_dict()
 

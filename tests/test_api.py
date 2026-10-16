@@ -35,7 +35,7 @@ def test_add_search_get_list_update_delete_flow(app_client):
     )
     assert searched.status_code == 200
     memories = searched.json()["memories"]
-    assert set(memories.keys()) == {"profile", "proactive", "normal"}
+    assert set(memories.keys()) == {"profile", "proactive", "normal", "raw"}
     assert any("咖啡" in m["content"] for m in memories["normal"])
 
     got = app_client.get(f"/v1/memories/{memory_id}")

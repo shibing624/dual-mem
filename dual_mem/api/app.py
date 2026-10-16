@@ -31,6 +31,11 @@ from dual_mem.api.schemas import (
 )
 from dual_mem.client import MemoryClient
 from dual_mem.config import Settings, resolve_app_id, resolve_app_ids
+from dual_mem.errors import (
+    DecisionContextError,
+    IdempotencyConflictError,
+    StaleDecisionError,
+)
 
 
 def _get_settings(request: Request) -> Settings:
@@ -106,6 +111,31 @@ def create_app(
             },
         )
 
+    def _error(status: int, exc: Exception) -> JSONResponse:
+        return JSONResponse(
+            status_code=status,
+            content={
+                "success": False,
+                "error_code": status,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            },
+        )
+
+    @app.exception_handler(StaleDecisionError)
+    async def _stale_handler(request: Request, exc: StaleDecisionError):
+        # Concurrent writers moved the targets; retrying the same request is safe.
+        return _error(409, exc)
+
+    @app.exception_handler(IdempotencyConflictError)
+    async def _idempotency_handler(request: Request, exc: IdempotencyConflictError):
+        return _error(409, exc)
+
+    @app.exception_handler(DecisionContextError)
+    async def _decision_handler(request: Request, exc: DecisionContextError):
+        # The decision service rejected the material; L0 evidence was retained.
+        return _error(422, exc)
+
     # ── memory_add ──────────────────────────────────────────────────────────
 
     @app.post("/v1/memories/", response_model=AddResponse, dependencies=[Depends(_verify_bearer)])
@@ -126,6 +156,7 @@ def create_app(
             agent_id=body.agent_id,
             session_id=body.session_id,
             memory_at=body.memory_at,
+            request_id=body.request_id,
         )
 
     # ── memory_search ─────────────────────────────────────────────────────────
@@ -156,6 +187,9 @@ def create_app(
             include_derived=body.include_derived,
             created_after=body.created_after,
             debug=body.debug,
+            as_of=body.as_of,
+            raw_limit=body.raw_limit,
+            include_relations=body.include_relations,
         )
 
     @app.post(

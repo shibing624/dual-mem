@@ -81,7 +81,7 @@ async def test_add_search_get_update_delete(mcp):
         {"query": "饮品", "user_id": "u", "min_score": 0.0},
     )
     memories = _payload(searched)["memories"]
-    assert set(memories.keys()) == {"profile", "proactive", "normal"}
+    assert set(memories.keys()) == {"profile", "proactive", "normal", "raw"}
 
     deleted = await mcp.call_tool("memory_delete", {"memory_id": memory_id})
     assert _payload(deleted)["success"] is True

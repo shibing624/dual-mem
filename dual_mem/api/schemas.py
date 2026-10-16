@@ -16,6 +16,7 @@ class AddRequest(BaseModel):
     agent_id: str = ""
     session_id: str = ""
     memory_at: int | None = None
+    request_id: str | None = None
 
 
 class AddResponse(BaseModel):
@@ -25,6 +26,13 @@ class AddResponse(BaseModel):
     memory_id: str
     request_id: str
     processing_time_ms: float
+    status: str = "committed"
+    commit_passed: bool = True
+    extracted_count: int = 0
+    extra_node_ids: list[str] = []
+    is_ephemeral: bool = False
+    decisions: list[dict] = []
+    needs_review: list[str] = []
 
 
 class SearchRequest(BaseModel):
@@ -43,6 +51,9 @@ class SearchRequest(BaseModel):
     include_derived: bool | None = None
     created_after: int | None = None
     debug: bool = False
+    as_of: int | None = None
+    raw_limit: int = 0
+    include_relations: bool = True
 
 
 class ConversationSearchRequest(BaseModel):

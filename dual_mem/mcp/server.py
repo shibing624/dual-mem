@@ -76,6 +76,8 @@ def build_mcp(
         min_score: float = 0.4,
         intention_limit: int = 0,
         include_derived: bool | None = None,
+        as_of: int | None = None,
+        raw_limit: int = 0,
     ) -> dict:
         return await ops.memory_search(
             query=query,
@@ -86,6 +88,8 @@ def build_mcp(
             min_score=min_score,
             intention_limit=intention_limit,
             include_derived=include_derived,
+            as_of=as_of,
+            raw_limit=raw_limit,
         )
 
     @mcp.tool(description="检索 L0 原文及保留的历史，用于核对原话/时间/来源。")

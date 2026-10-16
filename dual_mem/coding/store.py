@@ -12,6 +12,7 @@ import json
 import math
 import sqlite3
 import threading
+import time
 import uuid
 from dataclasses import replace
 from datetime import datetime
@@ -27,6 +28,7 @@ from dual_mem.coding.types import (
     coding_scope,
     version_boundary,
 )
+from dual_mem.errors import IdempotencyConflictError
 from dual_mem.isolation import build_filter
 from dual_mem.providers.embedding import EmbedService
 from dual_mem.storage.vector_store import VectorStore
@@ -111,6 +113,11 @@ class CodingMemoryStore:
                 workspace_id TEXT, branch TEXT, indexed INTEGER NOT NULL DEFAULT 0
             )"""
             )
+            # Written in the same transaction that publishes a request's batch,
+            # so a committed request can always be replayed instead of re-decided.
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS coding_requests (request_key TEXT PRIMARY KEY, result TEXT NOT NULL, ts REAL NOT NULL)"
+            )
             self._validate_history()
 
     def _validate_history(self) -> None:
@@ -181,24 +188,41 @@ class CodingMemoryStore:
         session_id: str | None = None,
         workspace_id: str | None = None,
         branch: str | None = None,
+        raw_id: str | None = None,
     ) -> str:
-        """Persist lossless source BEFORE generation; never discard it on failure."""
-        raw_id = str(uuid.uuid4())
+        """Persist lossless source BEFORE generation; never discard it on failure.
+
+        With an explicit ``raw_id`` (idempotent requests) a retry reuses the stored
+        source when it matches and rejects different content under the same id.
+        """
+        raw_id = raw_id or str(uuid.uuid4())
         content = json.dumps(messages, ensure_ascii=False)
         with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT INTO coding_sources (raw_id,app_id,user_id,agent_id,messages,session_id,workspace_id,branch) VALUES (?,?,?,?,?,?,?,?)",
-                (
-                    raw_id,
-                    app_id,
-                    user_id,
-                    agent_id,
-                    content,
-                    session_id,
-                    workspace_id,
-                    branch,
-                ),
-            )
+            existing = self._conn.execute(
+                "SELECT app_id,user_id,agent_id,messages,indexed FROM coding_sources WHERE raw_id=?",
+                (raw_id,),
+            ).fetchone()
+            if existing is not None:
+                if tuple(existing[:4]) != (app_id, user_id, agent_id, content):
+                    raise IdempotencyConflictError(
+                        "coding source ID reused with different input"
+                    )
+                if existing["indexed"]:
+                    return raw_id
+            else:
+                self._conn.execute(
+                    "INSERT INTO coding_sources (raw_id,app_id,user_id,agent_id,messages,session_id,workspace_id,branch) VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        raw_id,
+                        app_id,
+                        user_id,
+                        agent_id,
+                        content,
+                        session_id,
+                        workspace_id,
+                        branch,
+                    ),
+                )
         embeddings = await self.embed.embed_batch([content])
         self._validate_embeddings(embeddings, 1)
         node = MemoryNode(
@@ -213,12 +237,64 @@ class CodingMemoryStore:
             tags=["coding"],
             custom={"coding_raw_id": raw_id},
         )
-        await asyncio.to_thread(self._write_vectors, [node])
+        if not self.vector.get_by_ids([raw_id]):
+            await asyncio.to_thread(self._write_vectors, [node])
         with self._lock, self._conn:
             self._conn.execute(
                 "UPDATE coding_sources SET indexed=1 WHERE raw_id=?", (raw_id,)
             )
         return raw_id
+
+    def request_result(self, request_key: str) -> dict[str, Any] | None:
+        """Result recorded atomically with a published request batch."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT result FROM coding_requests WHERE request_key=?", (request_key,)
+            ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def purge_requests(self, *, older_than: float) -> int:
+        """Drop replay records older than ``older_than`` (unix seconds)."""
+        with self._lock, self._conn:
+            return self._conn.execute(
+                "DELETE FROM coding_requests WHERE ts < ?", (older_than,)
+            ).rowcount
+
+    def discard_unpublished(self, memory_ids: list[str]) -> None:
+        """Drop reserved-but-unpublished rows and vectors so a retry can re-reserve.
+
+        Unpublished rows are never visible to reads; only an interrupted attempt
+        (crash between reservation and publish) leaves them behind.
+        """
+        if not memory_ids:
+            return
+        marks = ",".join("?" for _ in memory_ids)
+        with self._lock, self._conn:
+            rows = self._conn.execute(
+                f"SELECT memory_id, search_keys FROM coding_memory_meta "
+                f"WHERE published=0 AND memory_id IN ({marks})",
+                memory_ids,
+            ).fetchall()
+            if not rows:
+                return
+            self._conn.execute(
+                f"DELETE FROM coding_memory_meta WHERE published=0 AND memory_id IN ({marks})",
+                memory_ids,
+            )
+        keys = [
+            f"{row['memory_id']}_key{i}"
+            for row in rows
+            for i in range(1 + len(json.loads(row["search_keys"])))
+        ]
+        self.vector.delete(keys)
+
+    def record_request(self, request_key: str, result: dict[str, Any]) -> None:
+        """Record a request whose decisions changed nothing (no batch to publish)."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO coding_requests (request_key,result,ts) VALUES (?,?,?)",
+                (request_key, json.dumps(result, ensure_ascii=False), time.time()),
+            )
 
     def get_source(
         self,
@@ -319,10 +395,16 @@ class CodingMemoryStore:
         *,
         expected_epoch: int | None = None,
         archive_ids: list[str] | None = None,
+        request: tuple[str, dict[str, Any]] | None = None,
     ) -> list[str]:
-        """Append an all-or-nothing visible batch; immutable IDs cannot be reused."""
+        """Append an all-or-nothing visible batch; immutable IDs cannot be reused.
+
+        ``request`` = (request_key, result) is recorded in the publishing transaction.
+        """
         archive_ids = list(archive_ids or [])
         if not memories and not archive_ids:
+            if request:
+                self.record_request(*request)
             return []
         if not memories:
             head = self.get(archive_ids[0])
@@ -330,7 +412,9 @@ class CodingMemoryStore:
                 raise ValueError("coding archive target missing")
             scope = coding_scope(head)
             epoch = self._epoch(scope) if expected_epoch is None else expected_epoch
-            await asyncio.to_thread(self._publish, [], scope, epoch, archive_ids)
+            await asyncio.to_thread(
+                self._publish, [], scope, epoch, archive_ids, request
+            )
             return []
         # Freeze the caller's mutable dataclasses before any await.
         memories = [
@@ -383,7 +467,9 @@ class CodingMemoryStore:
                 )
                 offset += 1
         await asyncio.to_thread(self._write_vectors, nodes)
-        await asyncio.to_thread(self._publish, memories, scope, epoch, archive_ids)
+        await asyncio.to_thread(
+            self._publish, memories, scope, epoch, archive_ids, request
+        )
         return [m.memory_id for m in memories]
 
     def _validate_plan(
@@ -458,6 +544,7 @@ class CodingMemoryStore:
         scope: CodingScope,
         epoch: int,
         archive_ids: list[str] | None = None,
+        request: tuple[str, dict[str, Any]] | None = None,
     ) -> None:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -554,6 +641,15 @@ class CodingMemoryStore:
                     "INSERT INTO coding_epochs (scope,epoch) VALUES (?,?) ON CONFLICT(scope) DO UPDATE SET epoch=excluded.epoch",
                     (self._scope_key(scope), epoch + 1),
                 )
+                if request:
+                    self._conn.execute(
+                        "INSERT INTO coding_requests (request_key,result,ts) VALUES (?,?,?)",
+                        (
+                            request[0],
+                            json.dumps(request[1], ensure_ascii=False),
+                            time.time(),
+                        ),
+                    )
                 self._conn.commit()
             except BaseException:
                 self._conn.rollback()

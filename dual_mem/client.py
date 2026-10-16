@@ -22,6 +22,7 @@ import uuid
 from typing import Any
 
 from dual_mem.config import Settings
+from dual_mem.agent.review import ReviewWorker
 from dual_mem.isolation import build_filter
 from dual_mem.locks import LockRegistry
 from dual_mem.registry import _UNSET, ComponentFactory
@@ -37,6 +38,7 @@ from dual_mem.sdk_models import (
     SearchResult,
     UpdateResult,
     WriteResult,
+    write_status,
 )
 from dual_mem.system2.system2_writer import System2Writer
 from dual_mem.types import MemoryStatus
@@ -272,8 +274,15 @@ class MemoryClient:
         ``user_id`` is required. With ``messages``, L0_RAW and the extractor see the shaped
         full dialogue after host-injected system turns are removed.
 
-        Each normal add performs one candidate-generation call and one batched Jev decision. Batch ``messages`` at session end to reduce cost when appropriate.
+        Cost per add: one candidate generation, then Jev target selection and (when a
+        target exists) one action round; MULTIPLE targets, MERGE verification and a
+        coverage regeneration each add calls. ``WriteResult.status`` reports
+        committed / known / raw_only / pending_review; pending items are resolved by
+        ``digest()``. Batch ``messages`` at session end to reduce cost.
         """
+        # Only a caller-supplied id can be replayed; the coding store records nothing
+        # for generated ids.
+        idempotency_key = request_id
         request_id = request_id or str(uuid.uuid4())
         start = time.perf_counter()
         resolved_app_id = self._resolve_app_id(app_id)
@@ -307,35 +316,31 @@ class MemoryClient:
                         agent_id=agent_id,
                         session_id=session_id,
                         app_id=resolved_app_id,
+                        request_id=idempotency_key,
                     )
                     if coding_result is not None:
                         mids = coding_result.get("memory_ids") or []
+                        decisions = [
+                            MemoryDecision(
+                                action=d["action"],
+                                update_type=d.get("update_type") or None,
+                                targets=list(d.get("targets") or []),
+                                proposal_ids=list(d.get("proposal_ids") or []),
+                                source_ids=list(d.get("source_ids") or []),
+                                reason=d.get("reason") or "",
+                            )
+                            for d in coding_result.get("decisions", [])
+                        ]
                         return WriteResult(
                             success=True,
                             memory_id=coding_result["raw_id"],
                             extra_node_ids=mids,
                             extracted_count=len(mids),
                             commit_passed=bool(mids),
-                            is_ephemeral=bool(coding_result.get("decisions"))
-                            and all(
-                                d["action"] == "RAW_ONLY"
-                                for d in coding_result["decisions"]
-                            ),
-                            decisions=[
-                                MemoryDecision(
-                                    action=(
-                                        "SKIP"
-                                        if d["action"] == "RAW_ONLY"
-                                        else d["action"]
-                                    ),
-                                    update_type=d.get("update_type") or None,
-                                    targets=list(d.get("targets") or []),
-                                    proposal_ids=list(d.get("proposal_ids") or []),
-                                    source_ids=list(d.get("source_ids") or []),
-                                    reason=d.get("reason") or "",
-                                )
-                                for d in coding_result.get("decisions", [])
-                            ],
+                            is_ephemeral=bool(decisions)
+                            and all(d.action == "RAW_ONLY" for d in decisions),
+                            decisions=decisions,
+                            status=write_status(decisions),
                             request_id=request_id,
                             processing_time_ms=round(
                                 (time.perf_counter() - start) * 1000, 2
@@ -382,6 +387,7 @@ class MemoryClient:
                 commit_passed=False,
                 extracted_count=0,
                 is_ephemeral=True,
+                status="raw_only",
             )
 
         logger.info(
@@ -415,6 +421,8 @@ class MemoryClient:
             extra_node_ids=list(result.extra_node_ids),
             is_ephemeral=result.is_ephemeral,
             decisions=result.decisions,
+            status=result.status,
+            needs_review=list(result.needs_review),
         )
 
     async def add_raw(
@@ -446,6 +454,7 @@ class MemoryClient:
                 commit_passed=False,
                 extracted_count=0,
                 is_ephemeral=True,
+                status="raw_only",
             )
         async with self._user_write_lock_ctx(resolved_app_id, user_id):
             result = await self.writer.write_raw(
@@ -464,6 +473,7 @@ class MemoryClient:
             commit_passed=False,
             extracted_count=0,
             is_ephemeral=True,
+            status="raw_only",
         )
 
     async def distill(
@@ -496,6 +506,7 @@ class MemoryClient:
                 commit_passed=False,
                 extracted_count=0,
                 is_ephemeral=True,
+                status="raw_only",
             )
         async with self._user_write_lock_ctx(resolved_app_id, user_id):
             result = await self.writer.distill(
@@ -519,6 +530,8 @@ class MemoryClient:
             extra_node_ids=list(result.extra_node_ids),
             is_ephemeral=result.is_ephemeral,
             decisions=result.decisions,
+            status=result.status,
+            needs_review=list(result.needs_review),
         )
 
     async def search(
@@ -539,6 +552,9 @@ class MemoryClient:
         request_id: str | None = None,
         debug: bool = False,
         include_derived_fusion: bool = True,
+        as_of: int | None = None,
+        raw_limit: int = 0,
+        include_relations: bool = True,
     ) -> SearchResult:
         """Semantic search; returns profile / proactive / normal groups.
 
@@ -573,6 +589,15 @@ class MemoryClient:
             request_id: 日志/链路追踪 id，省略自动生成 / trace id for logs; auto-generated.
             debug: ``True`` 时填充 ``SearchResult.read_result`` 的逐阶段 trace /
                 fill ``SearchResult.read_result`` with per-stage trace metadata.
+            as_of: 有效期判定时刻（Unix 秒）。显式 ``valid_from``/``valid_until`` 不含该
+                时刻的记忆（如已过期的 TEMPORAL 例外）被过滤；``None`` 不过滤。
+                benchmark 传问题时间，在线场景传当前时间 / drop memories whose
+                explicit validity window excludes this time.
+            raw_limit: L0 原文兜底路条数，``0`` = 关闭。原文按语义 + BM25 RRF 排序，
+                分数压在 0.5 以下，放在 ``SearchMemories.raw`` / fallback L0_RAW
+                evidence for details extraction did not keep.
+            include_relations: 为命中填充一跳 ``previous``（被直接取代的旧值）与仍有效的
+                ``conflicts`` / attach the one-hop previous value and live conflicts.
         """
         request_id = request_id or str(uuid.uuid4())
         start = time.perf_counter()
@@ -611,6 +636,9 @@ class MemoryClient:
             created_after=created_after,
             request_id=request_id,
             collect_trace=debug,
+            as_of=as_of,
+            raw_limit=raw_limit,
+            include_relations=include_relations,
         )
 
         return SearchResult(
@@ -809,14 +837,39 @@ class MemoryClient:
         ]
 
     async def digest(self) -> DigestResult:
-        """Explicitly drain pending reconcile work and run System2 cognition."""
+        """Review deferred write decisions, then (dual) run System2 cognition.
+
+        Both modes re-decide memories written with an undecided relation and re-extract
+        sources whose extraction was judged incomplete (``WriteResult.needs_review``).
+        Failing review items stay queued and are quarantined after
+        ``review_max_attempts``; they never fail the digest.
+        """
+        started = time.perf_counter()
+        review = await ReviewWorker(factory=self.factory).run()
+        timing: dict = {
+            "review_sec": time.perf_counter() - started,
+            "review_failed": float(review["failed"]),
+        }
+        if self.settings.request_outcome_ttl_seconds:
+            cutoff = time.time() - self.settings.request_outcome_ttl_seconds
+            self.factory.cache.purge_request_outcomes(older_than=cutoff)
+            if self._coding_writer:
+                self._coding_writer.store.purge_requests(older_than=cutoff)
         if not isinstance(self.writer, System2Writer):
-            return DigestResult(success=True, processed=0)
+            return DigestResult(
+                success=True, processed=0, reviewed=review["reviewed"], timing=timing
+            )
         processed = await self.writer.digest_pending()
-        timing = dict(self.writer.last_digest_stats)
+        timing.update(self.writer.last_digest_stats)
         if self.settings.purge_done_queues:
             self.factory.cache.purge_done_queues()
-        return DigestResult(success=True, processed=processed, timing=timing)
+        return DigestResult(
+            success=True, processed=processed, reviewed=review["reviewed"], timing=timing
+        )
+
+    def pending_reviews(self, *, status: str = "pending") -> list[dict]:
+        """Deferred decisions awaiting ``digest()`` (``status="quarantined"`` for failures)."""
+        return self.factory.cache.list_reviews(status=status)
 
     async def search_coding(
         self,

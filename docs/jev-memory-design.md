@@ -6,13 +6,21 @@
 
 1. 移除宿主注入块和 system 对话轮；保留 source 为 L0_RAW 原始证据。
 2. 生成模型只抽取明确、原子化候选文本、日期及来源，不裁决是否已知或是否更新。
-3. 读取同 scope 当前 latest 及真实 `history_versions`。材料较多时，用 JEV 分页判断
-   INCLUDE/EXCLUDE；每条提议仍进入决策，没有向量相似度写入门，也没有弱相似度 bypass。
+   原文写明有限有效期时，候选带 `valid_from` / `valid_until`（ISO 日期，按 UTC 整日展开）
+   与 `temporal_scope`；格式不合法的边界被丢弃，记忆照常写入。
+3. 读取同 scope 当前 latest 及真实 `history_versions`，作为比较材料。head 数超过
+   `reconcile_candidate_limit`，或材料 JSON 超过 `jev_max_question_chars` 时，按与任一提议的
+   最高 embedding 相似度排序并截断。**相似度只决定拿哪些旧版本来比较，不决定是否写入**：
+   每条提议仍进入 JEV 决策，被截掉的 head 只是不参与这次比较。路由用的 embedding 在写入时复用。
+   target 选项是短标签（`[layer/kind 日期] 正文前 240 字`），完整节点只在 `state.current` 出现一次。
 4. 先问 coverage、representation 和 target。没有 current head、也没有更早的 proposal 时，
    action 跟这批一起问，仍然是一次 JEV。只要存在可选 target，action 放到第二阶段，
    并且只提供与 target 是否为空匹配的选项。
 5. 有 target：`ADD_OVERRIDE` / `ADD_MERGE` / `ADD_NEGATE` / `ADD_CONFLICT` / `SKIP` /
-   `DELETE` / `INVALID` / `NEED_CONTEXT`。无 target：`ADD_SUPPLEMENT` / `ADD_TEMPORAL` /
+   `DELETE` / `INVALID` / `NEED_CONTEXT`。来源 `memory_at` 早于所选 head 时（乱序灌入），选项换成
+   `ADD_HISTORICAL` / `ADD_MERGE` / `ADD_CONFLICT` / `SKIP` / `INVALID` / `NEED_CONTEXT`：旧报告不能
+   覆盖、否定或删除更新的 head。`HISTORICAL` 作为非 latest 版本插到 head 之后（新节点
+   `superseded_by=[head]`，head 的 `supersedes` 追加它），head 保持 current。无 target：`ADD_SUPPLEMENT` / `ADD_TEMPORAL` /
    `RAW_ONLY` / `INVALID` / `NEED_CONTEXT`。`TEMPORAL` 不链接 baseline。`SUPPLEMENT`
    可以与其他 latest 共存，但不携带 target。两边的说明文字也分开，无 target 时不再提到 SKIP。
    `SKIP` 只能为一个 target 建立可引用别名；多目标共同覆盖时应选择 `MERGE`。
@@ -29,13 +37,47 @@
 SKIP 是“当前事实已覆盖”，RAW_ONLY 是“没有持久增量”。原文证据不是已存知识；
 历史中出现过北京，不说明目前仍住北京。北京→上海→北京必须链接当前上海版本。
 旧 novelty 门和 weak_candidate_score 是两个不同概念，但本设计两个都退出写入逻辑。
+对外 `MemoryDecision.action` 原样区分 `ADD` / `SKIP` / `RAW_ONLY` / `DELETE` / `INVALID`。
+
+## 降级而不是丢弃
+
+写入失败会让整段 session 在检索里消失，所以以下情况降级，不抛错：
+
+| 情况 | 处理 | `WriteResult.status` |
+| --- | --- | --- |
+| coverage 判 INVALID / 空抽取被判 REEXTRACT | 带拒绝原因重抽 `extract_coverage_retries` 次；用尽后仍提交候选，L0 来源排入 `extract` 复核 | `pending_review` |
+| `NEED_CONTEXT`、MULTIPLE 展开出现 `UNSURE`、关系置信度 < `reconcile_review_confidence` | 按独立 `SUPPLEMENT` 写入并标 `needs_review`，排入 `relation` 复核 | `pending_review` |
+| `INVALID` 候选 | 不写入，决策保留在结果里 | 由其余决策决定 |
+
+`digest()`（system1 与 dual 都执行）先跑 `ReviewWorker`：`relation` 项按当时的材料重新裁决，
+结果为 OVERRIDE/MERGE/NEGATE/CONFLICT/HISTORICAL 时生成新版本同时取代临时版本；SUPPLEMENT/TEMPORAL
+只清标记；SKIP/RAW_ONLY/INVALID 归档临时版本。`extract` 项重跑整条 System1。失败项保留，
+`review_max_attempts` 次后进入 `quarantined`，不阻塞其他项。`client.pending_reviews()` 查看队列。
+
+复核排队与写入的时序：复核项在版本计划提交**前**入队（进程死在提交后也不会丢），提交后再入队一次
+并清零失败计数。`extract` 项记录发起它的 `request_key`，`digest()` 只在该请求完成后才重新抽取：
+写入仍在进行或已失败等待重试时，这一项保留在队列里不动，避免和原写入各写一套记忆。同一个
+`request_id` 的重试若这次通过了 coverage，该复核视为不需要。没有产生任何版本的写入（REEXTRACT、
+全部 RAW_ONLY/SKIP）也在 journal 记一条空计划，重试从 journal 重放，复核据此判断"已完成"。
+`versions.db` 的 `requests` 表（request_key → plan）是对应索引，已有库打开时从 plans 补齐。
+
+仍然抛错的只有：provider 契约错误（缺题、越界选项）、动作与 target 不匹配、来源本身超出 JEV
+预算（`DecisionContextError`，REST 422）；同 scope 并发重试用尽（`StaleDecisionError`，REST 409，
+可原样重试）；`request_id` 复用不同输入（`IdempotencyConflictError`，REST 409）。异常从 `dual_mem` 顶层导出。
 
 ## dual / digest
 
 `add()` 先完成同一 System1 决策和版本写入，再登记 cognition scope。
 `digest()` 捕获队列 task IDs，同 scope 顺序处理，不同 scope 默认并行 4。
 事实按照 `system2_max_prompt_facts` 和生成模型字符预算分批，孤立点也处理，
-不使用 DBSCAN/cluster 去重作为证据覆盖。超预算材料保留 pending 并报错。
+不使用 DBSCAN/cluster 去重作为证据覆盖。分批前按 embedding 最近邻链排序，让同主题证据进同一批
+（只排序，不丢弃），便于跨 session 汇总（总额、次数、时间线）。超预算材料保留 pending 并报错。
+
+生成的 `kind` 可以是 `schema` / `summary` / `intention` / `preference`。`preference` 是由多条事实
+模式推出、但原文没直说的偏好，System1 不做这类推断，由 digest 产出并带 evidence_ids，同样走版本链。
+
+被 JEV 拒绝的批次在同一次 digest 内二分重试，其余证据照常提交；单条事实仍失败时计数，
+该 scope 保持 pending，下次 digest 重试；同一事实失败 `s2_max_attempts` 次后隔离，不再阻塞。
 
 每批返回 `memories` 与 `processed_ids`；必须明确覆盖实际输入。JEV 校验推导与
 覆盖声明，之后按同一版本协议写入 L3。只有实际成功处理的证据才标记完成。
@@ -57,6 +99,18 @@ SKIP 是“当前事实已覆盖”，RAW_ONLY 是“没有持久增量”。原
 - `versions.db` 保存完整计划与审计事件；`versions.lock` 协调本机进程。进入存储读操作先
   先校验现存 schema 与全部待回放计划的 schema，再恢复未完成计划；旧格式拒绝且不改写。非法向量在写日志前拒绝。跨机器共享目录/分布式事务不在此实现中。
 - `persist_history` 控制附加审计库；版本内容和恢复日志始终保留。
+- 幂等结果存在 `cache.db` 的 `request_outcomes` 表（不再借用 profile 缓存），digest 时清理
+  超过 `request_outcome_ttl_seconds` 的记录。
+
+## 读取
+
+- `search(as_of=...)`：显式有效期不包含该时刻的记忆被过滤（如已过期的 TEMPORAL）。
+  benchmark 传问题时间；不传则不过滤。
+- `search(include_relations=True)`（默认）：命中带一跳 `previous`（直接被取代的旧值，
+  HISTORICAL 也会出现在这里）与仍然有效的 `conflicts`；formatter 渲染为 `(previously, 日期: …)` /
+  `(conflicts, both unretracted: …)`，有效期渲染为 `(valid: 起 → 止)`。
+- `search(raw_limit=N)`：L0 原文兜底路，语义 + BM25 做 RRF，分数压到 ≤0.5，结果在
+  `SearchMemories.raw`，`flatten()` 会合并。默认 0 关闭。
 
 ## 配置与限制
 
@@ -79,6 +133,7 @@ reconcile_policy、reconcile_non_destructive、content_hash_dedup 以及 cluster
 python -m pytest tests/ -q
 python ~/.agents/rules/check_ast.py .
 python tmp/jev_smoke.py --offline
+python tmp/benchmark_protocol_smoke.py
 VENUS_TOKEN=... python tmp/jev_smoke.py --output /tmp/venus-results.json
 ```
 

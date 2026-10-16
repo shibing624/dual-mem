@@ -6,12 +6,12 @@ import asyncio
 import hashlib
 import json
 import uuid
-from dataclasses import dataclass, field, replace
-from dual_mem.locks import LockRegistry
+from dataclasses import asdict, dataclass, field, replace
 
 from dual_mem.agent.mem_agent import MemAgent
+from dual_mem.errors import IdempotencyConflictError
 from dual_mem.registry import ComponentFactory
-from dual_mem.sdk_models import ChatMessage, MemoryDecision
+from dual_mem.sdk_models import ChatMessage, CommitResult, MemoryDecision, write_status
 from dual_mem.types import Layer, MemoryNode
 
 
@@ -23,12 +23,27 @@ class WriterOutcome:
     is_ephemeral: bool = False
     deduplicated: bool = False
     decisions: list[MemoryDecision] = field(default_factory=list)
+    needs_review: list[str] = field(default_factory=list)
+    status: str = ""
 
     def __post_init__(self) -> None:
         self.decisions = [
             MemoryDecision(**item) if isinstance(item, dict) else item
             for item in self.decisions
         ]
+        if not self.status:
+            self.status = write_status(self.decisions, pending=bool(self.needs_review))
+
+
+def _outcome(raw_id: str, commit: CommitResult, ephemeral: bool, ids: list[str]) -> WriterOutcome:
+    return WriterOutcome(
+        raw_id,
+        ids,
+        commit.passed,
+        ephemeral,
+        decisions=commit.decisions,
+        needs_review=list(commit.needs_review),
+    )
 
 
 class MemoryWriter:
@@ -55,10 +70,10 @@ class MemoryWriter:
             json.dumps([content, session_id, memory_at], ensure_ascii=False).encode()
         ).hexdigest()
         async with self._requests.get(key):
-            saved = self.factory.cache.get_profile(key)
+            saved = self.factory.cache.get_request_outcome(key)
             if saved:
                 if saved["fingerprint"] != fingerprint:
-                    raise ValueError("request_id reused with different input")
+                    raise IdempotencyConflictError("request_id reused with different input")
                 return WriterOutcome(**saved["outcome"])
             raw_id = str(uuid.uuid5(uuid.NAMESPACE_URL, key + ":raw"))
             raw = self.factory.vector.get(raw_id)
@@ -68,7 +83,7 @@ class MemoryWriter:
                 or raw.session_id != session_id
                 or raw.memory_at != memory_at
             ):
-                raise ValueError("request_id reused with different input")
+                raise IdempotencyConflictError("request_id reused with different input")
             if raw is None:
                 raw = await self._raw(
                     content=content,
@@ -79,30 +94,16 @@ class MemoryWriter:
                     memory_at=memory_at,
                     node_id=raw_id,
                 )
-            recovered = self.factory.vector.completed_request(
-                f"write:{raw.node_id}:{request_id}"
-            )
-            if recovered:
-                result = WriterOutcome(memory_id=raw.node_id, **recovered)
-                from dataclasses import asdict
-
-                self.factory.cache.set_profile(
-                    key, {"fingerprint": fingerprint, "outcome": asdict(result)}
-                )
-                return result
-            # Failed model work leaves original evidence available for retry.
+            # Failed model work leaves original evidence available for retry; a
+            # committed plan is recovered (with its review intents) by run_system1.
             ids, commit, ephemeral = await self.agent.run_system1(
                 content=content,
                 raw_node=raw,
                 messages=messages,
                 request_id=request_id,
             )
-            result = WriterOutcome(
-                raw.node_id, ids, commit.passed, ephemeral, decisions=commit.decisions
-            )
-            from dataclasses import asdict
-
-            self.factory.cache.set_profile(
+            result = _outcome(raw.node_id, commit, ephemeral, ids)
+            self.factory.cache.set_request_outcome(
                 key, {"fingerprint": fingerprint, "outcome": asdict(result)}
             )
             return result
@@ -159,7 +160,9 @@ class MemoryWriter:
             session_id=session_id,
             memory_at=memory_at,
         )
-        return WriterOutcome(raw.node_id, commit_passed=False, is_ephemeral=True)
+        return WriterOutcome(
+            raw.node_id, commit_passed=False, is_ephemeral=True, status="raw_only"
+        )
 
     async def distill(
         self,
@@ -199,6 +202,4 @@ class MemoryWriter:
             request_id=request_id,
             source_node_ids=source_node_ids,
         )
-        return WriterOutcome(
-            raw.node_id, ids, commit.passed, ephemeral, decisions=commit.decisions
-        )
+        return _outcome(raw.node_id, commit, ephemeral, ids)

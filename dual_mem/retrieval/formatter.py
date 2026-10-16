@@ -14,6 +14,7 @@ _GROUP_TITLES = [
     ("profile", "【画像 Profile】"),
     ("proactive", "【主动 Proactive】"),
     ("normal", "【常规记忆 Normal】"),
+    ("raw", "【原文 Raw】"),
 ]
 
 _DATE_PREAMBLE = (
@@ -44,6 +45,11 @@ def _format_item(
     mem_date = format_memory_timestamp(item.get("memory_at") or item.get("gmt_created"))
     date_suffix = f" (conversation date: {mem_date})" if mem_date else ""
     lines = [f"- [{item['category']}] {content}{date_suffix}"]
+    if item.get("valid_from") is not None or item.get("valid_until") is not None:
+        start = format_memory_timestamp(item.get("valid_from")) or "?"
+        end = format_memory_timestamp(item.get("valid_until")) or "?"
+        lines.append(f"  (valid: {start} → {end})")
+    lines.extend(relation_lines(item))
     merged_ts = item.get("merged_timestamps") or []
     if isinstance(merged_ts, list) and len(merged_ts) > 1:
         start = format_memory_timestamp(min(int(x) for x in merged_ts))
@@ -70,6 +76,26 @@ def _format_item(
             date_part = f", {ver_date}" if ver_date else ""
             lines.append(f"    ·{date_part}: {ver['content']}")
     return "\n".join(lines)
+
+
+def relation_lines(item: dict, *, prefix: str = "  ") -> list[str]:
+    """One-hop previous value and live conflicts of a memory item dict."""
+    lines: list[str] = []
+    label = {"NEGATE": "negated", "MERGE": "merged from"}.get(
+        str(item.get("update_type") or ""), "previously"
+    )
+    for prev in item.get("previous") or []:
+        date = format_memory_timestamp(prev.get("memory_at") or prev.get("gmt_created"))
+        lines.append(f"{prefix}({label}{', ' + date if date else ''}: {prev.get('content', '')})")
+    for other in item.get("conflicts") or []:
+        date = format_memory_timestamp(other.get("memory_at") or other.get("gmt_created"))
+        lines.append(
+            f"{prefix}(conflicts, both unretracted{', ' + date if date else ''}: "
+            f"{other.get('content', '')})"
+        )
+    if item.get("needs_review"):
+        lines.append(f"{prefix}(relation to older memories not yet reviewed)")
+    return lines
 
 
 def format_memories(
@@ -132,6 +158,7 @@ def format_search_hit_line(
     prefix: str = "- ",
     include_date: bool = True,
     include_evolution: bool = False,
+    include_relations: bool = True,
 ) -> str:
     """Format one flat search hit (``memory`` or ``content`` key) for QA prompts."""
     category = hit.get("category", "")
@@ -143,6 +170,10 @@ def format_search_hit_line(
         if mem_date:
             date_suffix = f" (conversation date: {mem_date})"
     line = f"{prefix}{cat_part}{text}{date_suffix}"
+    if include_relations:
+        extra = relation_lines(hit, prefix=f"{prefix}  ")
+        if extra:
+            line = "\n".join([line, *extra])
 
     chain = hit.get("evolution_chain")
     if not include_evolution or not chain or len(chain) <= 1:

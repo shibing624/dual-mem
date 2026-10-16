@@ -127,53 +127,132 @@ async def test_batch_skip_predecessor_resolves_to_current_head(tmp_storage, fake
     assert not c.factory.vector.get(old).is_latest
 
 
-async def test_model_missed_durable_extraction_fails_without_silent_drop(
+async def test_model_missed_durable_extraction_regenerates_then_queues_review(
     tmp_storage, fake_embed
 ):
     c = client(tmp_storage, fake_embed, {"facts": []}, FakeJev({"value": "REEXTRACT"}))
-    with pytest.raises(DecisionContextError, match="missed"):
-        await c.add(content="Moved to Beijing", user_id="u")
+    result = await c.add(content="Moved to Beijing", user_id="u")
+    # One regeneration carried the rejection, then the source was queued.
+    extract_calls = [
+        call for call in c.factory.llm.calls if "Generate faithful" in call["system"]
+    ]
+    assert len(extract_calls) == 2
+    assert "rejected" in extract_calls[1]["system"]
+    assert result.status == "pending_review"
+    assert result.needs_review == [result.memory_id]
+    assert result.decisions[0].action == "RAW_ONLY"
+    assert result.decisions[0].review_reason == "REEXTRACT"
+    (review,) = c.pending_reviews()
+    assert review["kind"] == "extract" and review["node_id"] == result.memory_id
     assert len(c.factory.vector.get_many({"user_id": "u"}, limit=100)) == 1
+
+
+async def test_review_reextracts_missed_source_on_digest(tmp_storage, fake_embed):
+    c = client(tmp_storage, fake_embed, {"facts": []}, FakeJev({"value": "REEXTRACT"}))
+    written = await c.add(content="Moved to Beijing", user_id="u")
+    c.factory.llm.responses["extract"] = {"facts": [{"content": "Moved to Beijing"}]}
+    c.factory.jev.responses = None
+    digest = await c.digest()
+    assert digest.reviewed == 1 and c.pending_reviews() == []
+    (fact,) = c.factory.vector.get_many({"layer": Layer.L1_FACT.value}, limit=10)
+    assert fact.content == "Moved to Beijing"
+    assert fact.custom["source_ids"] == [written.memory_id]
+
+
+async def test_review_failure_is_retried_then_quarantined(tmp_storage, fake_embed):
+    c = client(
+        tmp_storage,
+        fake_embed,
+        {"facts": []},
+        FakeJev({"value": "REEXTRACT"}),
+        review_max_attempts=2,
+    )
+    await c.add(content="Moved to Beijing", user_id="u")
+    first = await c.digest()
+    assert first.success and first.reviewed == 0 and len(c.pending_reviews()) == 1
+    await c.digest()
+    assert c.pending_reviews() == []
+    (stuck,) = c.pending_reviews(status="quarantined")
+    assert stuck["attempts"] == 2 and "missed" in stuck["error"]
 
 
 async def test_request_retry_after_result_cache_failure_does_not_rerun_jev(
     tmp_storage, fake_embed, monkeypatch
 ):
     c = client(tmp_storage, fake_embed, {"facts": [{"content": "Fact"}]})
-    original = c.factory.cache.set_profile
+    original = c.factory.cache.set_request_outcome
 
     def fail(*args, **kwargs):
         raise OSError("cache failed after commit")
 
-    monkeypatch.setattr(c.factory.cache, "set_profile", fail)
+    monkeypatch.setattr(c.factory.cache, "set_request_outcome", fail)
     with pytest.raises(OSError):
         await c.add(content="Fact", user_id="u", request_id="durable")
     calls = len(c.factory.jev.calls)
-    monkeypatch.setattr(c.factory.cache, "set_profile", original)
+    monkeypatch.setattr(c.factory.cache, "set_request_outcome", original)
     retried = await c.add(content="Fact", user_id="u", request_id="durable")
     assert retried.extracted_count == 1 and len(c.factory.jev.calls) == calls
     assert len(c.factory.vector.get_many({"user_id": "u"}, limit=100)) == 2
 
 
-async def test_partial_extraction_coverage_cannot_silently_drop_update(
-    tmp_storage, fake_embed
-):
-    from conftest import FakeLLMClient, FakeJev
-    from dual_mem import MemoryClient
-    from dual_mem.config import Settings
-    from dual_mem.agent.reconciler import DecisionContextError
+async def test_rejected_coverage_regenerates_with_feedback(tmp_storage, fake_embed):
+    calls = {"n": 0}
+
+    def extract(system, user):
+        calls["n"] += 1
+        if "rejected" in system:
+            return {
+                "facts": [
+                    {"content": "User is named Alice"},
+                    {"content": "User moved to Shanghai"},
+                ]
+            }
+        return {"facts": [{"content": "User is named Alice"}]}
+
+    def jev(state, questions):
+        if "coverage" in questions:
+            return {"coverage": "VALID" if len(state["proposals"]) == 2 else "INVALID"}
+        return {}
 
     c = MemoryClient(
         settings=Settings(storage_dir=tmp_storage),
         embed=fake_embed,
+        llm=FakeLLMClient({"extract": extract}),
+        jev=FakeJev(jev),
+    )
+    result = await c.add(
+        content="My name is Alice and I moved to Shanghai", user_id="u"
+    )
+    assert calls["n"] == 2 and result.status == "committed"
+    facts = c.factory.vector.get_many({"layer": "L1_FACT"})
+    assert {f.content for f in facts} == {
+        "User is named Alice",
+        "User moved to Shanghai",
+    }
+    assert c.pending_reviews() == []
+    await c.aclose()
+
+
+async def test_exhausted_coverage_commits_candidates_and_queues_source(
+    tmp_storage, fake_embed
+):
+    c = MemoryClient(
+        settings=Settings(storage_dir=tmp_storage, extract_coverage_retries=0),
+        embed=fake_embed,
         llm=FakeLLMClient({"extract": {"facts": [{"content": "User is named Alice"}]}}),
         jev=FakeJev({"coverage": "INVALID"}),
     )
-    with pytest.raises(DecisionContextError, match="coverage"):
-        await c.add(content="My name is Alice and I moved to Shanghai", user_id="u")
+    result = await c.add(
+        content="My name is Alice and I moved to Shanghai", user_id="u"
+    )
     raw = c.factory.vector.get_many({"layer": "L0_RAW"})
     assert len(raw) == 1 and "Shanghai" in raw[0].content
-    assert c.factory.vector.get_many({"layer": "L1_FACT"}) == []
+    (fact,) = c.factory.vector.get_many({"layer": "L1_FACT"})
+    assert fact.content == "User is named Alice"
+    assert result.status == "pending_review"
+    assert result.needs_review == [raw[0].node_id]
+    assert all(d.review_reason == "coverage" for d in result.decisions)
+    assert [r["kind"] for r in c.pending_reviews()] == ["extract"]
     await c.aclose()
 
 

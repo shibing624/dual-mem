@@ -169,7 +169,21 @@ class Settings(BaseSettings):
     reconcile_candidate_limit: int = 64
     reconcile_batch_size: int = 12
     reconcile_retry_attempts: int = 3
+    # Relations Jev chose below this confidence are written as an independent
+    # SUPPLEMENT and re-decided by digest(). 0 disables the confidence route
+    # (NEED_CONTEXT / uncertain multi-target are always deferred).
+    reconcile_review_confidence: float = 0.0
+    # Extraction regenerations after Jev rejects coverage or finds missed facts.
+    # When exhausted the candidates are still committed and the source is reviewed.
+    extract_coverage_retries: int = 1
+    # Failed review items are retried on each digest and quarantined after this.
+    review_max_attempts: int = 3
+    # A single System2 fact rejected on this many digests is quarantined.
+    s2_max_attempts: int = 3
     system2_max_prompt_facts: int = 120
+    # Idempotent add(request_id=...) outcomes (chat and coding paths) are kept this
+    # many seconds and purged by digest() (0 = forever).
+    request_outcome_ttl_seconds: int = 7 * 24 * 3600
 
     # Legacy generic extractor cap in tokens (0 = disabled → rely on the LLM chunk+merge path).
     # Applies to the final content of BOTH content= and messages= (after history shaping). This
@@ -222,12 +236,28 @@ class Settings(BaseSettings):
         "reconcile_candidate_limit",
         "reconcile_batch_size",
         "reconcile_retry_attempts",
+        "review_max_attempts",
+        "s2_max_attempts",
         "system2_max_prompt_facts",
     )
     @classmethod
     def _positive_decision_limit(cls, value: int | float) -> int | float:
         if value <= 0:
             raise ValueError("decision and cognition limits must be positive")
+        return value
+
+    @field_validator("extract_coverage_retries", "request_outcome_ttl_seconds")
+    @classmethod
+    def _non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("must be non-negative")
+        return value
+
+    @field_validator("reconcile_review_confidence")
+    @classmethod
+    def _probability(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("reconcile_review_confidence must be within [0, 1]")
         return value
 
     @field_validator("reconcile_candidate_limit")

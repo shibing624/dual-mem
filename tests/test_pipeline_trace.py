@@ -34,9 +34,9 @@ async def test_write_logs_extract_commit_decision(tmp_storage, fake_embed):
     assert "GATE" not in stages
     extract_log = next(entry for entry in logs if entry["stage"] == "EXTRACT")
     assert extract_log["payload"]["candidates"]["identity"]
-    commit = next(entry for entry in logs if entry["stage"] == "COMMIT_DECISION")
-    assert commit["payload"] == {"passed": True, "source": "jev"}
-    assert "JEV_DECISION" in stages
+    decision = next(entry for entry in logs if entry["stage"] == "JEV_DECISION")
+    assert decision["payload"]["passed"] is True
+    assert [op["op"] for op in decision["payload"]["ops"]] == ["ADD"]
 
     await client.aclose()
 

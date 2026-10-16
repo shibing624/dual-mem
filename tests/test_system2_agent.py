@@ -85,25 +85,107 @@ async def test_all_facts_paged_with_exact_coverage_and_real_evidence(
         {"memories": "invalid", "processed_ids": ["0"]},
     ],
 )
-async def test_invalid_generation_leaves_uncovered_sources_fresh(
+async def test_invalid_generation_leaves_uncovered_sources_fresh_and_counted(
     tmp_storage, fake_embed, response
 ):
     f = factory(tmp_storage, fake_embed, response)
     seed(f, 1)
-    with pytest.raises(DecisionContextError):
-        await System2Agent(factory=f).run(app_id="app", user_id="u")
+    stats = await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert stats["failed_batches"] == 1 and stats["retry_pending"] == 1
     assert f.vector.get("0").s2_evidence_count == 0
     assert f.vector.get_many({"layer": Layer.L3_DERIVED.value}) == []
+    (failure,) = f.cache.list_s2_failures()
+    assert failure["fact_id"] == "0" and failure["attempts"] == 1
     f.close()
 
 
 async def test_rejected_inference_not_acknowledged(tmp_storage, fake_embed):
     f = factory(tmp_storage, fake_embed, jev=FakeJev({"coverage": "INVALID"}))
     seed(f, 1)
-    with pytest.raises(DecisionContextError, match="coverage"):
-        await System2Agent(factory=f).run(app_id="app", user_id="u")
+    stats = await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert stats["failed_batches"] == 1
     assert f.vector.get("0").s2_evidence_count == 0
+    assert "coverage=INVALID" in f.cache.list_s2_failures()[0]["error"]
     f.close()
+
+
+async def test_bad_fact_is_bisected_out_and_rest_commits(tmp_storage, fake_embed):
+    def response(system, user):
+        ids = [x["id"] for x in json.loads(user)["facts"]]
+        if "2" in ids:
+            return {"memories": [{"content": "bad", "evidence_ids": ["foreign"]}], "processed_ids": ids}
+        return {
+            "memories": [{"content": "ok " + ",".join(ids), "kind": "summary", "evidence_ids": ids}],
+            "processed_ids": ids,
+        }
+
+    f = factory(tmp_storage, fake_embed, response, cap=4)
+    seed(f, 4)
+    stats = await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert stats["retry_pending"] == 1
+    assert {n: f.vector.get(n).s2_evidence_count for n in "0123"} == {
+        "0": 1,
+        "1": 1,
+        "2": 0,
+        "3": 1,
+    }
+    assert [r["fact_id"] for r in f.cache.list_s2_failures()] == ["2"]
+    f.close()
+
+
+async def test_repeatedly_failing_fact_is_quarantined(tmp_storage, fake_embed):
+    f = factory(tmp_storage, fake_embed, {"memories": "invalid", "processed_ids": ["0"]})
+    f.settings.s2_max_attempts = 2
+    seed(f, 1)
+    for _ in range(2):
+        await System2Agent(factory=f).run(app_id="app", user_id="u")
+    calls = len(f.llm.calls)
+    stats = await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert stats["quarantined_facts"] == 1 and stats["retry_pending"] == 0
+    assert len(f.llm.calls) == calls
+    f.close()
+
+
+async def test_preference_inference_is_versioned_derived_memory(tmp_storage, fake_embed):
+    def response(system, user):
+        ids = [x["id"] for x in json.loads(user)["facts"]]
+        assert "kind=preference" in system
+        return {
+            "memories": [
+                {"content": "User seems to prefer quiet venues", "kind": "preference", "evidence_ids": ids}
+            ],
+            "processed_ids": ids,
+        }
+
+    f = factory(tmp_storage, fake_embed, response, cap=10)
+    seed(f, 3)
+    stats = await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert stats["created_preferences"] == 1 and stats["created_schemas"] == 0
+    (pref,) = f.vector.get_many({"layer": Layer.L3_DERIVED.value})
+    assert pref.kind == "preference" and pref.category.value == "preference"
+    assert sorted(pref.custom["source_ids"]) == ["0", "1", "2"]
+    f.close()
+
+
+def test_topic_order_keeps_every_fact_and_groups_neighbours():
+    from dual_mem.system2.system2_agent import topic_order
+
+    def node(nid, vec, at):
+        return MemoryNode(
+            node_id=nid, content=nid, layer=Layer.L1_FACT, app_id="a", user_id="u",
+            embedding=vec, memory_at=at,
+        )
+
+    facts = [
+        node("travel1", [1.0, 0.0], 1),
+        node("food1", [0.0, 1.0], 2),
+        node("travel2", [0.99, 0.05], 3),
+        node("food2", [0.05, 0.99], 4),
+        node("noembed", None, 5),
+    ]
+    ordered = [f.node_id for f in topic_order(facts)]
+    assert sorted(ordered) == sorted(f.node_id for f in facts)
+    assert ordered == ["travel1", "travel2", "food2", "food1", "noembed"]
 
 
 async def test_no_inference_still_requires_jev_coverage_verdict(

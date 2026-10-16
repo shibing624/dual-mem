@@ -38,6 +38,9 @@ _VDB_RECALL_LAYERS = [Layer.L1_FACT, Layer.L2_PROFILE]
 _PROFILE_RECALL_LIMIT = 10
 _PROFILE_LAYER_VALS = {layer.value for layer in _PROFILE_LAYERS}
 _NORMAL_SOURCES = {"vdb"}
+# RRF over the raw route only ranks raw hits among themselves; this scale keeps
+# raw scores below curated memories of equal rank when routes are flattened.
+_RAW_SCORE_SCALE = 0.5
 
 
 def _layer_of(item: dict) -> str:
@@ -58,6 +61,46 @@ def _derived_to_item(graph_hit: dict) -> dict:
     )
     node.score = graph_hit.get("score", 0.0)
     return {**graph_hit, "node": node, "score": node.score}
+
+
+def _valid_at(node: MemoryNode | None, as_of: int | None) -> bool:
+    """Whether an explicit validity window contains ``as_of`` (no window = valid)."""
+    if node is None or as_of is None:
+        return True
+    if node.valid_until is not None and node.valid_until < as_of:
+        return False
+    if node.valid_from is not None and node.valid_from > as_of:
+        return False
+    return True
+
+
+def _brief(node: MemoryNode) -> EvolutionItem:
+    return EvolutionItem(
+        node_id=node.node_id,
+        content=node.content,
+        layer=node.layer.value,
+        memory_at=node.memory_at,
+        gmt_created=node.gmt_created,
+    )
+
+
+def attach_relations(vector, items: list[MemoryItem]) -> None:
+    """Fill one-hop ``previous`` (direct supersedes) and current ``conflicts``."""
+    wanted = {
+        nid for item in items for nid in [*item.supersedes, *item.conflicts_with]
+    }
+    if not wanted:
+        return
+    found = vector.get_by_ids(list(wanted))
+    for item in items:
+        previous = [found[n] for n in item.supersedes if n in found]
+        if previous:
+            item.previous = [_brief(n) for n in previous]
+        conflicts = [
+            found[n] for n in item.conflicts_with if n in found and found[n].is_latest
+        ]
+        if conflicts:
+            item.conflicts = [_brief(n) for n in conflicts]
 
 
 def _item_to_memory(item: dict) -> MemoryItem:
@@ -115,6 +158,7 @@ def _item_to_memory(item: dict) -> MemoryItem:
         merged_timestamps=merged_timestamps,
         update_type=update_type,
         source_node_id=source_node_id,
+        needs_review=bool((node.custom or {}).get("needs_review")),
     )
 
 
@@ -135,8 +179,16 @@ async def search_hybrid(
     created_after: int | None = None,
     include_derived: bool = True,
     include_derived_fusion: bool = True,
+    as_of: int | None = None,
+    raw_limit: int = 0,
+    include_relations: bool = True,
 ) -> SearchMemories:
-    """Run hybrid recall + fusion; return profile/proactive/normal groups."""
+    """Run hybrid recall + fusion; return profile/proactive/normal/raw groups.
+
+    ``as_of`` drops memories whose explicit ``valid_from``/``valid_until`` window
+    excludes that time (a past TEMPORAL exception). ``raw_limit`` adds an L0_RAW
+    route as fallback evidence for details extraction did not keep.
+    """
     vector = factory.vector
     graph = factory.graph
     settings = factory.settings
@@ -187,7 +239,11 @@ async def search_hybrid(
             where=normal_where,
             top_k=vdb_sem_limit,
         )
-        return [{"node_id": n.node_id, "score": n.score, "node": n} for n in nodes]
+        return [
+            {"node_id": n.node_id, "score": n.score, "node": n}
+            for n in nodes
+            if _valid_at(n, as_of)
+        ]
 
     async def _profile_vdb() -> list[dict]:
         if profile_limit == 0:
@@ -201,7 +257,48 @@ async def search_hybrid(
         return [
             {"node_id": n.node_id, "score": n.score, "node": n}
             for n in nodes
-            if n.score >= profile_min_score
+            if n.score >= profile_min_score and _valid_at(n, as_of)
+        ]
+
+    async def _raw_route() -> list[dict]:
+        if raw_limit <= 0:
+            return []
+        where = build_filter(
+            app_ids=app_ids,
+            user_id=user_id,
+            agent_ids=agent_ids,
+            session_ids=session_ids,
+            layers=[Layer.L0_RAW],
+            statuses=[MemoryStatus.ACTIVE],
+            created_after=created_after,
+        )
+        nodes = await asyncio.to_thread(
+            vector.query, embedding=query_embedding, where=where, top_k=raw_limit * 3
+        )
+        if not nodes:
+            return []
+        semantic = sorted(nodes, key=lambda n: n.score, reverse=True)
+        lexical = sorted(
+            zip(nodes, compute_bm25_scores(tokenize(query), [n.content for n in nodes])),
+            key=lambda pair: pair[1],
+            reverse=True,
+        )
+        fused = rrf.rrf_fuse(
+            {
+                "semantic": [{"node_id": n.node_id} for n in semantic],
+                "bm25": [{"node_id": n.node_id} for n, s in lexical if s > 0],
+            }
+        )
+        by_id = {n.node_id: n for n in nodes}
+        top = max((f["rrf_score"] for f in fused), default=0.0) or 1.0
+        return [
+            {
+                "node_id": f["node_id"],
+                "node": by_id[f["node_id"]],
+                "score": _RAW_SCORE_SCALE * float(f["rrf_score"]) / top,
+                "source": "raw",
+            }
+            for f in fused[:raw_limit]
         ]
 
     async def _graph_schema() -> list[dict]:
@@ -228,18 +325,21 @@ async def search_hybrid(
             and (head := vector.get(g.node_id)) is not None
             and head.is_latest
             and head.agent_id in (agent_ids or [head.agent_id])
+            and _valid_at(head, as_of)
         ]
 
     results = await asyncio.gather(
         _vdb_semantic(),
         _profile_vdb(),
         _graph_schema(),
+        _raw_route(),
         return_exceptions=True,
     )
 
     vdb_semantic_hits = results[0] if not isinstance(results[0], Exception) else []
     profile_hits = results[1] if not isinstance(results[1], Exception) else []
     graph_schema_hits = results[2] if not isinstance(results[2], Exception) else []
+    raw_hits: list[dict] = results[3] if isinstance(results[3], list) else []
 
     if isinstance(results[0], Exception):
         logger.warning("[hybrid] vdb semantic failed: %s", results[0])
@@ -247,6 +347,8 @@ async def search_hybrid(
         logger.warning("[hybrid] profile vdb failed: %s", results[1])
     if isinstance(results[2], Exception):
         logger.warning("[hybrid] graph schema failed: %s", results[2])
+    if isinstance(results[3], Exception):
+        logger.warning("[hybrid] raw route failed: %s", results[3])
 
     intention_hits: list[dict] = []
     if use_derived and intention_limit > 0:
@@ -300,6 +402,7 @@ async def search_hybrid(
                 )
             intention_hits.sort(key=lambda x: x["score"], reverse=True)
             intention_hits = intention_hits[:intention_limit]
+        intention_hits = [h for h in intention_hits if _valid_at(h["node"], as_of)]
 
     # BM25 re-rank over the recalled semantic pool only (no full-collection scan). A node
     # with a strong exact-term match but a weak embedding similarity is rescued here; we
@@ -393,6 +496,7 @@ async def search_hybrid(
                 or head.app_id not in app_ids
                 or head.user_id != user_id
                 or (agent_ids and head.agent_id not in agent_ids)
+                or not _valid_at(head, as_of)
             ):
                 continue
             item["node"] = head
@@ -498,8 +602,14 @@ async def search_hybrid(
         len(intention_hits),
     )
 
-    return SearchMemories(
+    memories = SearchMemories(
         profile=[_item_to_memory(it) for it in profile_results],
         proactive=[_item_to_memory(it) for it in intention_hits],
         normal=[_item_to_memory(it) for it in normal_results],
+        raw=[_item_to_memory(it) for it in raw_hits],
     )
+    if include_relations:
+        attach_relations(
+            vector, [*memories.profile, *memories.proactive, *memories.normal]
+        )
+    return memories

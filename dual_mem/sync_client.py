@@ -216,6 +216,9 @@ class SyncMemoryClient:
         request_id: str | None = None,
         debug: bool = False,
         include_derived_fusion: bool = True,
+        as_of: int | None = None,
+        raw_limit: int = 0,
+        include_relations: bool = True,
     ) -> SearchResult:
         return self._run(
             self._client.search(
@@ -234,6 +237,9 @@ class SyncMemoryClient:
                 request_id=request_id,
                 debug=debug,
                 include_derived_fusion=include_derived_fusion,
+                as_of=as_of,
+                raw_limit=raw_limit,
+                include_relations=include_relations,
             )
         )
 
@@ -319,6 +325,9 @@ class SyncMemoryClient:
 
     def digest(self) -> DigestResult:
         return self._run(self._client.digest())
+
+    def pending_reviews(self, *, status: str = "pending") -> list[dict]:
+        return self._client.pending_reviews(status=status)
 
     def search_coding(
         self,

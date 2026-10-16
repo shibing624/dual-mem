@@ -33,6 +33,33 @@ def _normalize_where(where: dict | None) -> dict | None:
     return {"$and": [{key: value} for key, value in where.items()]}
 
 
+def _plan_semantic(nodes: list[MemoryNode]) -> list[dict]:
+    """Replay identity of a version plan: everything except embeddings/revisions."""
+    return [
+        {
+            "id": n.node_id,
+            "content": n.content,
+            "layer": n.layer.value,
+            "kind": n.kind,
+            "supersedes": n.supersedes,
+            "superseded_by": n.superseded_by,
+            "is_latest": n.is_latest,
+            "source_ids": (n.custom or {}).get("source_ids", []),
+            "valid_from": n.valid_from,
+            "valid_until": n.valid_until,
+            "update_type": (n.custom or {}).get("update_type"),
+            "conflicts_with": (n.custom or {}).get("conflicts_with", []),
+            "owner": n.owner,
+            "session_id": n.session_id,
+            "memory_at": n.memory_at,
+            "tags": n.tags,
+            "temporal_scope": (n.custom or {}).get("temporal_scope"),
+            "negation": (n.custom or {}).get("negation", False),
+        }
+        for n in nodes
+    ]
+
+
 class VectorStore(ABC):
     """Abstract interface for embedding-backed memory storage."""
 
@@ -85,6 +112,23 @@ class ChromaVectorStore(VectorStore):
         self._journal.execute(
             "CREATE TABLE IF NOT EXISTS projections (plan_id TEXT PRIMARY KEY, done INTEGER NOT NULL DEFAULT 0)"
         )
+        indexed = self._journal.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='requests'"
+        ).fetchone()
+        # request_key -> plan, written with the plan row; looked up on every write.
+        self._journal.execute(
+            "CREATE TABLE IF NOT EXISTS requests (request_key TEXT PRIMARY KEY, plan_id TEXT NOT NULL)"
+        )
+        if not indexed:
+            for plan_id, payload in self._journal.execute(
+                "SELECT id, payload FROM plans"
+            ).fetchall():
+                key = json.loads(payload).get("request_key")
+                if key:
+                    self._journal.execute(
+                        "INSERT OR IGNORE INTO requests (request_key, plan_id) VALUES (?, ?)",
+                        (key, plan_id),
+                    )
         self._journal.commit()
         self.client = chromadb.PersistentClient(
             path=f"{storage_dir}/chroma",
@@ -403,19 +447,22 @@ class ChromaVectorStore(VectorStore):
             self._journal.close()
 
     def completed_request(self, request_key: str) -> dict | None:
-        """Recover a write result when the client crashed before its result cache."""
+        """The committed result of ``request_key``, or None while it has not committed."""
         with self._guard():
-            for (payload,) in self._journal.execute(
-                "SELECT payload FROM plans WHERE done=1 ORDER BY rowid DESC"
-            ):
-                plan = json.loads(payload)
-                if plan.get("request_key") == request_key:
-                    return {
-                        "extra_node_ids": [n["id"] for n in plan["nodes"]],
-                        "commit_passed": True,
-                        "decisions": plan.get("decisions", []),
-                    }
-        return None
+            row = self._journal.execute(
+                "SELECT plans.payload FROM requests JOIN plans ON plans.id = requests.plan_id "
+                "WHERE requests.request_key = ? AND plans.done = 1",
+                (request_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        plan = json.loads(row[0])
+        return {
+            "extra_node_ids": [n["id"] for n in plan["nodes"]],
+            "commit_passed": bool(plan["nodes"] or plan["patches"]),
+            "decisions": plan.get("decisions", []),
+            "needs_review": plan.get("needs_review", []),
+        }
 
     def pending_projections(
         self, scope: tuple[str, str, str]
@@ -455,6 +502,7 @@ class ChromaVectorStore(VectorStore):
         request_key: str | None = None,
         processed_evidence: list[str] | None = None,
         decisions: list[dict] | None = None,
+        needs_review: list[str] | None = None,
     ) -> bool:
         """Recoverable append/link with revision and scope CAS, never erase documents.
 
@@ -481,28 +529,7 @@ class ChromaVectorStore(VectorStore):
             ).fetchone()
             if replay:
                 previous = json.loads(replay[0])
-                semantic = [
-                    {
-                        "id": n.node_id,
-                        "content": n.content,
-                        "layer": n.layer.value,
-                        "kind": n.kind,
-                        "supersedes": n.supersedes,
-                        "source_ids": (n.custom or {}).get("source_ids", []),
-                        "valid_from": n.valid_from,
-                        "valid_until": n.valid_until,
-                        "update_type": (n.custom or {}).get("update_type"),
-                        "conflicts_with": (n.custom or {}).get("conflicts_with", []),
-                        "owner": n.owner,
-                        "session_id": n.session_id,
-                        "memory_at": n.memory_at,
-                        "tags": n.tags,
-                        "temporal_scope": (n.custom or {}).get("temporal_scope"),
-                        "negation": (n.custom or {}).get("negation", False),
-                    }
-                    for n in nodes
-                ]
-                if previous.get("semantic") != semantic:
+                if previous.get("semantic") != _plan_semantic(nodes):
                     raise ValueError(
                         "stable operation ID reused with different semantics"
                     )
@@ -551,8 +578,17 @@ class ChromaVectorStore(VectorStore):
                     raise ValueError("invalid embedding dimension or nonfinite value")
             seen: set[str] = set()
             consumed: set[str] = set()
+            linked: set[str] = set()
             patches: dict[str, dict] = {}
             new_by_id = {n.node_id: n for n in nodes}
+
+            def patch_of(nid: str) -> dict:
+                if nid not in patches:
+                    old = current.get(nid) or new_by_id[nid]
+                    patches[nid] = old.to_metadata()
+                    patches[nid]["revision"] = old.revision + 1
+                return patches[nid]
+
             for node in nodes:
                 if (node.app_id, node.user_id, node.agent_id) != scope:
                     raise ValueError("new node crosses tenant scope")
@@ -563,33 +599,44 @@ class ChromaVectorStore(VectorStore):
                         raise ValueError(
                             "missing, forward or unvalidated version target"
                         )
-                    if old_id in consumed:
+                    if old_id in consumed or old_id in linked:
                         raise ValueError(
                             "two operations consume the same current target"
                         )
                     old = current.get(old_id) or new_by_id[old_id]
-                    patch = old.to_metadata()
+                    patch = patch_of(old_id)
                     patch.update(
                         is_latest=False,
-                        revision=old.revision + 1,
                         superseded_by=_LIST_SEP.join(
                             [*old.superseded_by, node.node_id]
                         ),
                     )
-                    patches[old_id] = patch
                     consumed.add(old_id)
+                # An older report is inserted behind a newer head that stays current.
+                for newer_id in node.superseded_by:
+                    if node.is_latest or newer_id not in current:
+                        raise ValueError(
+                            "historical version requires a validated newer head"
+                        )
+                    if newer_id in consumed:
+                        raise ValueError(
+                            "historical version cannot attach to a retired target"
+                        )
+                    newer = current[newer_id]
+                    patch = patch_of(newer_id)
+                    existing = patch["supersedes"].split(_LIST_SEP) if patch["supersedes"] else []
+                    patch["supersedes"] = _LIST_SEP.join([*existing, node.node_id])
+                    linked.add(newer_id)
                 seen.add(node.node_id)
             for nid in archives:
-                if nid not in current or nid in consumed:
+                if nid not in current or nid in consumed or nid in linked:
                     raise ValueError("archive requires one validated unconsumed target")
                 old = current[nid]
-                patch = old.to_metadata()
+                patch = patch_of(nid)
                 patch.update(
                     is_latest=False,
-                    revision=old.revision + 1,
                     custom=json.dumps({**(old.custom or {}), "archived": True}),
                 )
-                patches[nid] = patch
                 consumed.add(nid)
             # A derived claim supported by a retired fact must stop being current.
             # Remaining evidence becomes fresh for the next explicit digest.
@@ -637,31 +684,43 @@ class ChromaVectorStore(VectorStore):
                     )
                 patches.setdefault(fid, fact.to_metadata())["s2_evidence_count"] = 1
             if not nodes and not archives and not processed_evidence:
+                if request_key:
+                    # Nothing changes, but the request has completed: record it so a
+                    # retry replays it and deferred reviews know it has finished.
+                    empty_id = hashlib.sha256(
+                        f"request:{request_key}".encode()
+                    ).hexdigest()
+                    with self._journal:
+                        self._journal.execute(
+                            "INSERT OR IGNORE INTO plans(id,scope,epoch,payload,done) VALUES (?,?,?,?,1)",
+                            (
+                                empty_id,
+                                scope_key,
+                                epoch,
+                                json.dumps(
+                                    {
+                                        "decisions": decisions or [],
+                                        "needs_review": needs_review or [],
+                                        "request_key": request_key,
+                                        "nodes": [],
+                                        "patches": {},
+                                    }
+                                ),
+                            ),
+                        )
+                        self._journal.execute(
+                            "INSERT OR IGNORE INTO requests (request_key, plan_id) VALUES (?, ?)",
+                            (request_key, empty_id),
+                        )
                 return True
-            semantic = [
-                {
-                    "id": n.node_id,
-                    "content": n.content,
-                    "layer": n.layer.value,
-                    "kind": n.kind,
-                    "supersedes": n.supersedes,
-                    "source_ids": (n.custom or {}).get("source_ids", []),
-                    "valid_from": n.valid_from,
-                    "valid_until": n.valid_until,
-                    "update_type": (n.custom or {}).get("update_type"),
-                    "conflicts_with": (n.custom or {}).get("conflicts_with", []),
-                    "owner": n.owner,
-                    "session_id": n.session_id,
-                    "memory_at": n.memory_at,
-                    "tags": n.tags,
-                    "temporal_scope": (n.custom or {}).get("temporal_scope"),
-                    "negation": (n.custom or {}).get("negation", False),
-                }
-                for n in nodes
-            ]
+            semantic = _plan_semantic(nodes)
             audit = [
                 {
-                    "event": "SUPERSEDE" if n.supersedes else "ADD",
+                    "event": (
+                        "HISTORICAL"
+                        if n.superseded_by
+                        else ("SUPERSEDE" if n.supersedes else "ADD")
+                    ),
                     "node_id": n.node_id,
                     "user_id": n.user_id,
                     "old": None,
@@ -682,6 +741,7 @@ class ChromaVectorStore(VectorStore):
             )
             payload = {
                 "decisions": decisions or [],
+                "needs_review": needs_review or [],
                 "request_key": request_key,
                 "semantic": semantic,
                 "audit": audit,
@@ -701,5 +761,10 @@ class ChromaVectorStore(VectorStore):
                     "INSERT INTO plans(id,scope,epoch,payload) VALUES (?,?,?,?)",
                     (plan_id, scope_key, epoch, json.dumps(payload)),
                 )
+                if request_key:
+                    self._journal.execute(
+                        "INSERT OR IGNORE INTO requests (request_key, plan_id) VALUES (?, ?)",
+                        (request_key, plan_id),
+                    )
             self._finish_plan(plan_id, scope_key, epoch, payload)
             return True

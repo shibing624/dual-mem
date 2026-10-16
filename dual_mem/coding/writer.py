@@ -1,5 +1,7 @@
 """Retain full L0 evidence, generate candidates, decide with JEV, append versions."""
 
+import hashlib
+import json
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -11,6 +13,7 @@ from dual_mem.coding.preproc import has_any_tool_message
 from dual_mem.coding.reconciler import CodingMemoryReconciler
 from dual_mem.coding.store import CodingMemoryStore
 from dual_mem.coding.types import CodingDecisionError, CodingMemory
+from dual_mem.errors import IdempotencyConflictError
 from dual_mem.providers.jev import DecisionProvider
 from dual_mem.providers.llm import LLMClient
 
@@ -41,14 +44,40 @@ class CodingWriter:
         session_id: str | None = None,
         workspace_id: str | None = None,
         branch: str | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Return None for non-coding; propagate failures with retained L0 evidence.
 
         Successful result includes raw_id/source_ids and decisions. RAW_ONLY is
         explicit source retention, not a claim that candidates were persisted.
+
+        With ``request_id`` the write is idempotent: the raw source id and memory ids
+        are derived from it, the result is recorded in the publishing transaction,
+        and a repeat returns that result without new decisions. Reusing the id with
+        different input raises ``IdempotencyConflictError``.
         """
         if not has_any_tool_message(messages):
             return None
+        request_key = None
+        raw_id = None
+        record = None
+        fingerprint = ""
+        if request_id is not None:
+            scope_key = json.dumps([app_id, user_id, agent_id, request_id])
+            fingerprint = hashlib.sha256(
+                json.dumps(
+                    [messages, session_id, workspace_id, branch], ensure_ascii=False
+                ).encode()
+            ).hexdigest()
+            request_key = f"coding:{scope_key}"
+            saved = self.store.request_result(request_key)
+            if saved is not None:
+                if saved["fingerprint"] != fingerprint:
+                    raise IdempotencyConflictError(
+                        "request_id reused with different input"
+                    )
+                return saved["result"]
+            raw_id = str(uuid.uuid5(uuid.NAMESPACE_URL, request_key + ":raw"))
         # Retain even if scene classification fails, before any semantic service.
         raw_id = await self.store.retain_source(
             messages,
@@ -58,8 +87,10 @@ class CodingWriter:
             session_id=session_id,
             workspace_id=workspace_id,
             branch=branch,
+            raw_id=raw_id,
         )
         if not await classify_messages_is_coding(messages, self.jev):
+            # Not coding is re-decided on retry; it publishes nothing.
             return None
         drafts = await self.extractor.extract(
             messages,
@@ -107,7 +138,11 @@ class CodingWriter:
                     raise CodingDecisionError("coding write action/target mismatch")
                 now = datetime.now(timezone.utc)
                 mem = CodingMemory(
-                    memory_id=str(uuid.uuid4()),
+                    memory_id=(
+                        str(uuid.uuid5(uuid.NAMESPACE_URL, f"{request_key}:{op.draft_idx}"))
+                        if request_key
+                        else str(uuid.uuid4())
+                    ),
                     **draft.to_dict(),
                     created_at=now,
                     updated_at=now,
@@ -134,11 +169,6 @@ class CodingWriter:
                     "reason": op.reason,
                 }
             )
-        memory_ids = await self.store.add_many(
-            memories, expected_epoch=epoch, archive_ids=archives
-        )
-        if not memories and not archives:
-            self.store.assert_epoch((app_id, user_id, agent_id), epoch)
         if not drafts:
             decisions.append(
                 {
@@ -147,7 +177,8 @@ class CodingWriter:
                     "reason": "JEV confirmed no durable information",
                 }
             )
-        return {
+        memory_ids = [m.memory_id for m in memories]
+        result = {
             "success": True,
             "scene": "coding",
             "raw_id": raw_id,
@@ -160,6 +191,19 @@ class CodingWriter:
             "decisions": decisions,
             "ops": [asdict(op) for op in ops],
         }
+        if not memories and not archives:
+            self.store.assert_epoch((app_id, user_id, agent_id), epoch)
+        if request_key is not None:
+            # A crashed earlier attempt may have reserved these IDs without publishing.
+            self.store.discard_unpublished(memory_ids)
+            record = (request_key, {"fingerprint": fingerprint, "result": result})
+        await self.store.add_many(
+            memories,
+            expected_epoch=epoch,
+            archive_ids=archives,
+            request=record,
+        )
+        return result
 
     async def search(
         self,

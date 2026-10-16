@@ -32,6 +32,7 @@ class Category(str, Enum):
     profile = "profile"
     schema = "schema"
     intention = "intention"
+    preference = "preference"
 
 
 class MemoryStatus(str, Enum):
@@ -42,6 +43,8 @@ class ReconcileOp(str, Enum):
     ADD = "ADD"
     SKIP = "SKIP"
     DELETE = "DELETE"
+    RAW_ONLY = "RAW_ONLY"
+    INVALID = "INVALID"
 
 
 LAYER_TO_CATEGORY: dict[Layer, Category] = {

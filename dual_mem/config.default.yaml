@@ -13,6 +13,14 @@ reconcile_concurrency: 4
 reconcile_candidate_limit: 64
 reconcile_batch_size: 12
 reconcile_retry_attempts: 3
+# 低于该置信度的关系先按 SUPPLEMENT 独立写入，digest() 复核；0 = 关闭置信度路由。
+# NEED_CONTEXT / 多目标 UNSURE 总是延后复核，不会让写入失败。
+reconcile_review_confidence: 0.0
+# coverage 被拒或漏抽时带反馈重抽的次数；用尽后仍提交候选并把来源排队复核。
+extract_coverage_retries: 1
+review_max_attempts: 3
+s2_max_attempts: 3
+request_outcome_ttl_seconds: 604800
 jev_max_questions: 64
 jev_max_request_chars: 100000
 jev_max_question_chars: 60000

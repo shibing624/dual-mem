@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 from dual_mem.sdk_models import ChatMessage
@@ -96,6 +97,11 @@ class System2Writer:
         return result
 
     async def digest_pending(self) -> int:
+        """Run System2 per pending scope; returns the number of acknowledged scopes.
+
+        A scope with evidence rejected but not yet quarantined stays pending so the
+        next digest retries it; other scopes are acknowledged independently.
+        """
         async with self._digest_lock:
             tasks = self.factory.cache.list_pending_s2_scopes()
             scopes: dict[tuple[str, str, str], list[int]] = {}
@@ -104,14 +110,22 @@ class System2Writer:
                 scopes.setdefault(key, []).append(task["id"])
             started = time.perf_counter()
             sem = asyncio.Semaphore(self.factory.settings.reconcile_concurrency)
+            totals: dict[str, float] = {}
+            acknowledged = 0
 
             async def process(scope: tuple[str, str, str], ids: list[int]) -> None:
+                nonlocal acknowledged
                 async with sem:
                     agent = System2Agent(factory=self.factory)
-                    await agent.run(
+                    stats = await agent.run(
                         app_id=scope[0], user_id=scope[1], agent_id=scope[2]
                     )
+                    for key, value in stats.items():
+                        totals[key] = totals.get(key, 0.0) + float(value)
+                    if stats.get("retry_pending"):
+                        return
                     self.factory.cache.mark_s2_tasks_done(ids)
+                    acknowledged += 1
 
             # Preserve successful acknowledgements when a different scope fails.
             results = await asyncio.gather(
@@ -121,13 +135,21 @@ class System2Writer:
             self.last_digest_stats = {
                 "s2_agent_sec": time.perf_counter() - started,
                 "s2_agent_runs": float(len(scopes)),
+                **{f"s2_{key}": value for key, value in totals.items()},
             }
             for result in results:
                 if isinstance(result, BaseException):
                     raise result
             if self.factory.settings.purge_done_queues:
                 self.factory.cache.purge_done_queues()
-            return len(scopes)
+            return acknowledged
+
+    def failures(self) -> list[dict]:
+        """Evidence rejected by System2 (attempts, last error), for inspection."""
+        return [
+            {**row, "scope": json.loads(row["scope"])}
+            for row in self.factory.cache.list_s2_failures()
+        ]
 
 
 __all__ = ["System2Writer"]

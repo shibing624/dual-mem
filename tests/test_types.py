@@ -19,7 +19,13 @@ def test_four_canonical_layers():
 
 
 def test_reconcile_actions_include_skip():
-    assert {m.name for m in ReconcileOp} == {"ADD", "DELETE", "SKIP"}
+    assert {m.name for m in ReconcileOp} == {
+        "ADD",
+        "DELETE",
+        "SKIP",
+        "RAW_ONLY",
+        "INVALID",
+    }
 
 
 def test_status_members():

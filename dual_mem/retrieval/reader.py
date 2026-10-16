@@ -37,6 +37,9 @@ class Reader:
         created_after: int | None = None,
         request_id: str | None = None,
         collect_trace: bool = False,
+        as_of: int | None = None,
+        raw_limit: int = 0,
+        include_relations: bool = True,
     ) -> tuple[SearchMemories, ReadResult | None]:
         """Recall memories using explicit filters; no query-intent guessing is performed."""
         start = time.perf_counter()
@@ -60,6 +63,9 @@ class Reader:
             include_derived=include_derived,
             include_derived_fusion=include_derived_fusion,
             created_after=created_after,
+            as_of=as_of,
+            raw_limit=raw_limit,
+            include_relations=include_relations,
         )
 
         elapsed_ms = (time.perf_counter() - start) * 1000.0
@@ -71,6 +77,7 @@ class Reader:
                     len(memories.profile)
                     + len(memories.proactive)
                     + len(memories.normal)
+                    + len(memories.raw)
                 ),
                 elapsed_ms=elapsed_ms,
             )
@@ -81,6 +88,7 @@ class Reader:
                 "profile": len(memories.profile),
                 "normal": len(memories.normal),
                 "proactive": len(memories.proactive),
+                "raw": len(memories.raw),
                 "include_derived": include_derived,
             },
         )
@@ -162,4 +170,5 @@ class Reader:
             merged_timestamps=merged_timestamps,
             update_type=update_type,
             source_node_id=source_node_id,
+            needs_review=bool((node.custom or {}).get("needs_review")),
         )

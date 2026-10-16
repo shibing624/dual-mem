@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from conftest import FakeJev, FakeLLMClient
 from dual_mem.agent.reconciler import Reconciler, DecisionContextError
@@ -92,17 +94,102 @@ async def test_known_and_no_durable_value_are_distinct_model_decisions(
     (op,) = await decide(
         store, fake_embed, FakeJev({"p0:action": "RAW_ONLY", "p0:target": "NONE"})
     )
-    assert op.op == "SKIP" and op.decision["action"]["choice"] == "RAW_ONLY"
+    assert op.op == "RAW_ONLY" and op.memory_id is None
 
 
-async def test_incomplete_decision_fails_closed(store, fake_embed):
+async def test_need_context_appends_independently_for_review(store, fake_embed):
     seed(store, fake_embed)
-    with pytest.raises(DecisionContextError):
-        await decide(
-            store,
-            fake_embed,
-            FakeJev({"p0:action": "NEED_CONTEXT", "p0:target": "old"}),
-        )
+    (op,) = await decide(
+        store,
+        fake_embed,
+        FakeJev({"p0:action": "NEED_CONTEXT", "p0:target": "old"}),
+    )
+    assert op.op == "ADD" and op.update_type == "SUPPLEMENT"
+    assert op.supersedes == [] and op.target_ids == []
+    assert op.needs_review and op.review_reason == "NEED_CONTEXT"
+    assert op.review_targets == ["old"]
+    assert op.decision["action"]["choice"] == "NEED_CONTEXT"
+    assert op.decision["effective"] == "ADD_SUPPLEMENT"
+
+
+async def test_invalid_candidate_is_rejected_not_written(store, fake_embed):
+    seed(store, fake_embed)
+    (op,) = await decide(
+        store, fake_embed, FakeJev({"p0:action": "INVALID", "p0:target": "old"})
+    )
+    assert op.op == "INVALID" and not op.supersedes and not op.needs_review
+
+
+async def test_low_confidence_relation_is_deferred(store, fake_embed):
+    from dual_mem.providers.jev import JevAnswer
+
+    seed(store, fake_embed)
+    weak = JevAnswer(
+        type="choice",
+        choice="ADD_OVERRIDE",
+        confidence=0.4,
+        probabilities={"ADD_OVERRIDE": 0.4, "ADD_MERGE": 0.35},
+    )
+    jev = FakeJev({"p0:action": weak, "p0:target": "old"})
+    (op,) = await decide(store, fake_embed, jev, review_confidence=0.6)
+    assert op.update_type == "SUPPLEMENT" and op.supersedes == []
+    assert op.review_reason == "low-confidence ADD_OVERRIDE"
+    (strong,) = await decide(store, fake_embed, jev, review_confidence=0.3)
+    assert strong.update_type == "OVERRIDE" and strong.supersedes == ["old"]
+
+
+async def test_unsure_multiple_targets_keep_decision_and_defer(store, fake_embed):
+    seed(store, fake_embed, nid="a", content="Part A")
+    seed(store, fake_embed, nid="b", content="Part B")
+
+    def script(state, questions):
+        if "p0:target" in questions:
+            return {"p0:target": "MULTIPLE"}
+        if "p0:action" in questions:
+            return {"p0:action": "ADD_SUPPLEMENT"}
+        return {"p0:a": "INCLUDE", "p0:b": "UNSURE"}
+
+    (op,) = await decide(store, fake_embed, FakeJev(script))
+    assert op.update_type == "SUPPLEMENT" and op.target_ids == []
+    assert op.review_reason == "uncertain multiple targets"
+    assert set(op.review_targets) == {"a", "b"}
+
+
+async def test_older_source_cannot_override_newer_head(store, fake_embed):
+    seed(store, fake_embed, memory_at=2_000)
+    jev = FakeJev({"p0:action": "ADD_HISTORICAL", "p0:target": "old"})
+    rec = Reconciler(jev=jev, llm=FakeLLMClient(), embed=fake_embed, vector=store)
+    (op,) = await rec.reconcile(
+        new_memories=["User lives in Beijing"],
+        new_memories_meta=[{}],
+        app_id="app",
+        user_id="u",
+        agent_id="",
+        current_time="2026-10-15",
+        memory_at=1_000,
+    )
+    criteria = jev.calls[1]["questions"]["p0:action"]["criteria"]
+    assert "ADD_HISTORICAL" in criteria
+    assert not {"ADD_OVERRIDE", "ADD_NEGATE", "DELETE"} & set(criteria)
+    assert op.update_type == "HISTORICAL" and op.target_ids == ["old"]
+    assert op.supersedes == []
+
+
+async def test_newer_source_is_not_offered_historical(store, fake_embed):
+    seed(store, fake_embed, memory_at=1_000)
+    jev = FakeJev({"p0:action": "ADD_OVERRIDE", "p0:target": "old"})
+    rec = Reconciler(jev=jev, llm=FakeLLMClient(), embed=fake_embed, vector=store)
+    await rec.reconcile(
+        new_memories=["User lives in Beijing"],
+        new_memories_meta=[{}],
+        app_id="app",
+        user_id="u",
+        agent_id="",
+        current_time="2026-10-15",
+        memory_at=2_000,
+    )
+    criteria = jev.calls[1]["questions"]["p0:action"]["criteria"]
+    assert "ADD_OVERRIDE" in criteria and "ADD_HISTORICAL" not in criteria
 
 
 async def test_target_none_excludes_actions_that_require_target(store, fake_embed):
@@ -233,18 +320,55 @@ async def test_merge_has_one_generation_and_losslessness_check(
     assert len(llm.calls) == 1 and len(jev.calls) == 3
 
 
-async def test_jev_routes_large_materials_not_embedding_distance(store, fake_embed):
-    for i in range(3):
+async def test_large_scope_orders_material_by_similarity_without_gating(
+    store, fake_embed
+):
+    for i in range(5):
         seed(store, fake_embed, nid=str(i), content=f"fact {i}")
+    jev = FakeJev({"p0:action": "ADD_SUPPLEMENT", "p0:target": "NONE"})
+    (op,) = await decide(store, fake_embed, jev, content="fact 3", candidate_limit=2)
+    # Routing never decides the write: the proposal is still decided and appended.
+    assert op.op == "ADD" and op.update_type == "SUPPLEMENT"
+    state = jev.calls[0]["state"]
+    # The nearest head (identical text) is always compared; the rest is capped.
+    assert len(state["current"]) == 2 and state["current"][0]["id"] == "3"
+    assert len(jev.calls) == 2
+    # The proposal embedding computed for routing is reused at write time.
+    assert op.embedding == fake_embed.embed_sync("fact 3")
 
-    def script(state, questions):
-        if set(questions).issubset({"0", "1", "2"}):
-            return {q: "INCLUDE" if q == "1" else "EXCLUDE" for q in questions}
-        return {"p0:action": "ADD_OVERRIDE", "p0:target": "1"}
 
-    jev = FakeJev(script)
-    (op,) = await decide(store, fake_embed, jev, candidate_limit=1)
-    assert op.supersedes == ["1"] and len(jev.calls) == 5
+async def test_material_budget_keeps_most_similar_heads(store, fake_embed):
+    for i in range(6):
+        seed(store, fake_embed, nid=str(i), content=f"fact {i} " + "x" * 400)
+    jev = FakeJev()
+    await decide(
+        store,
+        fake_embed,
+        jev,
+        content="fact 4 " + "x" * 400,
+        max_state_chars=7_000,
+    )
+    ids = [c["id"] for c in jev.calls[0]["state"]["current"]]
+    assert 0 < len(ids) < 6 and ids[0] == "4"
+    assert len(json.dumps(jev.calls[0]["state"], ensure_ascii=False)) < 7_000
+
+
+async def test_oversized_source_fails_before_any_jev_call(store, fake_embed):
+    jev = FakeJev()
+    rec = Reconciler(
+        jev=jev, llm=FakeLLMClient(), embed=fake_embed, vector=store, max_state_chars=5_000
+    )
+    with pytest.raises(DecisionContextError, match="split the source"):
+        await rec.reconcile(
+            new_memories=["x"],
+            new_memories_meta=[{}],
+            app_id="app",
+            user_id="u",
+            agent_id="",
+            current_time="2026-10-15",
+            source_content="y" * 6_000,
+        )
+    assert jev.calls == []
 
 
 async def test_foreign_or_missing_history_is_rejected(store, fake_embed):
@@ -322,23 +446,23 @@ async def test_model_validity_iso_normalized_to_epoch(store, fake_embed):
         )
 
 
-async def test_target_choices_include_representation_time_and_source(store, fake_embed):
+async def test_target_choices_are_short_labels_full_node_in_state(store, fake_embed):
     profile = MemoryNode(
         node_id="profile",
-        content="User lives in Shanghai",
+        content="User lives in Shanghai " + "detail " * 80,
         layer=Layer.L2_PROFILE,
         kind="profile",
         app_id="app",
         user_id="u",
         embedding=fake_embed.embed_sync("profile"),
-        memory_at=123,
+        memory_at=1_792_022_400,
         custom={"source_ids": ["raw"]},
     )
     store.upsert([profile])
     jev = FakeJev({"p0:action": "ADD_OVERRIDE", "p0:target": "profile"})
     await decide(store, fake_embed, jev)
-    import json
-
-    choice = json.loads(jev.calls[0]["questions"]["p0:target"]["criteria"]["profile"])
-    assert choice["layer"] == "L2_PROFILE" and choice["kind"] == "profile"
-    assert choice["source_ids"] == ["raw"] and choice["memory_at"] == 123
+    label = jev.calls[0]["questions"]["p0:target"]["criteria"]["profile"]
+    assert label.startswith("[L2_PROFILE/profile 2026-10-15] User lives in Shanghai")
+    assert len(label) < 300 and label.endswith("…")
+    (node,) = jev.calls[0]["state"]["current"]
+    assert node["source_ids"] == ["raw"] and node["content"] == profile.content
