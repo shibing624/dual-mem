@@ -39,30 +39,23 @@ SKIP 是“当前事实已覆盖”，RAW_ONLY 是“没有持久增量”。原
 旧 novelty 门和 weak_candidate_score 是两个不同概念，但本设计两个都退出写入逻辑。
 对外 `MemoryDecision.action` 原样区分 `ADD` / `SKIP` / `RAW_ONLY` / `DELETE` / `INVALID`。
 
-## 降级而不是丢弃
+## 单次写入，不复核、不重试
 
-写入失败会让整段 session 在检索里消失，所以以下情况降级，不抛错：
+每次写入只做一次抽取、一次关系决策、一次提交；没有复核队列，也没有传输重试：
 
 | 情况 | 处理 | `WriteResult.status` |
 | --- | --- | --- |
-| coverage 判 INVALID / 空抽取被判 REEXTRACT | 带拒绝原因重抽 `extract_coverage_retries` 次；用尽后仍提交候选，L0 来源排入 `extract` 复核 | `pending_review` |
-| `NEED_CONTEXT`、MULTIPLE 展开出现 `UNSURE`、关系置信度 < `reconcile_review_confidence` | 按独立 `SUPPLEMENT` 写入并标 `needs_review`，排入 `relation` 复核 | `pending_review` |
+| 抽取为空 | 不调用模型复查，来源保留为 RAW_ONLY | `raw_only` |
+| 候选没有相似度 ≥ `reconcile_relation_threshold` 的 head/较早候选 | 直接 SUPPLEMENT（有效期时 TEMPORAL）追加，不调用 Jev | `committed` |
+| `NEED_CONTEXT`、关系置信度 < `reconcile_review_confidence` | 当场按独立 `SUPPLEMENT` 写入 | `committed` |
+| 同批多个候选取代同一 head / 指向未落库的较早候选 | 置信度最高者保留关系，其余独立写入；悬空关系剔除 | `committed` |
 | `INVALID` 候选 | 不写入，决策保留在结果里 | 由其余决策决定 |
 
-`digest()`（system1 与 dual 都执行）先跑 `ReviewWorker`：`relation` 项按当时的材料重新裁决，
-结果为 OVERRIDE/MERGE/NEGATE/CONFLICT/HISTORICAL 时生成新版本同时取代临时版本；SUPPLEMENT/TEMPORAL
-只清标记；SKIP/RAW_ONLY/INVALID 归档临时版本。`extract` 项重跑整条 System1。失败项保留，
-`review_max_attempts` 次后进入 `quarantined`，不阻塞其他项。`client.pending_reviews()` 查看队列。
-
-复核排队与写入的时序：复核项在版本计划提交**前**入队（进程死在提交后也不会丢），提交后再入队一次
-并清零失败计数。`extract` 项记录发起它的 `request_key`，`digest()` 只在该请求完成后才重新抽取：
-写入仍在进行或已失败等待重试时，这一项保留在队列里不动，避免和原写入各写一套记忆。同一个
-`request_id` 的重试若这次通过了 coverage，该复核视为不需要。没有产生任何版本的写入（REEXTRACT、
-全部 RAW_ONLY/SKIP）也在 journal 记一条空计划，重试从 journal 重放，复核据此判断"已完成"。
+没有产生任何版本的写入（全部 RAW_ONLY/SKIP）也在 journal 记一条空计划，重试从 journal 重放。
 `versions.db` 的 `requests` 表（request_key → plan）是对应索引，已有库打开时从 plans 补齐。
 
 仍然抛错的只有：provider 契约错误（缺题、越界选项）、动作与 target 不匹配、来源本身超出 JEV
-预算（`DecisionContextError`，REST 422）；同 scope 并发重试用尽（`StaleDecisionError`，REST 409，
+预算（`DecisionContextError`，REST 422）；外部写入改动了已链接的 head（`StaleDecisionError`，REST 409，
 可原样重试）；`request_id` 复用不同输入（`IdempotencyConflictError`，REST 409）。异常从 `dual_mem` 顶层导出。
 
 ## dual / digest
@@ -74,13 +67,11 @@ SKIP 是“当前事实已覆盖”，RAW_ONLY 是“没有持久增量”。原
 （只排序，不丢弃），便于跨 session 汇总（总额、次数、时间线）。超预算材料保留 pending 并报错。
 
 生成的 `kind` 可以是 `schema` / `summary` / `intention` / `preference`。`preference` 是由多条事实
-模式推出、但原文没直说的偏好，System1 不做这类推断，由 digest 产出并带 evidence_ids，同样走版本链。
+模式推出、但原文没直说的偏好，System1 不做这类推断，由 digest 产出并带 evidence_ids。
 
-被 JEV 拒绝的批次在同一次 digest 内二分重试，其余证据照常提交；单条事实仍失败时计数，
-该 scope 保持 pending，下次 digest 重试；同一事实失败 `s2_max_attempts` 次后隔离，不再阻塞。
-
-每批返回 `memories` 与 `processed_ids`；必须明确覆盖实际输入。JEV 校验推导与
-覆盖声明，之后按同一版本协议写入 L3。只有实际成功处理的证据才标记完成。
+每批一次生成，JEV 逐条校验 draft 只看其引用的证据；不通过的 draft 丢弃，通过的直接作为独立 L3
+节点追加（不走关系决策），与已有推导 cosine ≥ `s2_dedup_threshold` 的跳过。批次失败只记日志并丢弃，
+不二分、不计数、不隔离；这些事实保持未处理，之后该 scope 再次 digest 时重新参与。
 来源更新后，引用该来源的旧推导变成非 latest，其余证据恢复 fresh；下次 digest 重建。
 图投影待处理记录与版本同一提交；投影失败时，下次 digest 先恢复，已处理证据不会导致漏补图。
 新到达的 task IDs 不会被旧水位确认。失败 scope 保留 pending，成功 scope 可独立确认。

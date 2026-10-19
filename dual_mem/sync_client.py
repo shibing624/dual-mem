@@ -326,9 +326,6 @@ class SyncMemoryClient:
     def digest(self) -> DigestResult:
         return self._run(self._client.digest())
 
-    def pending_reviews(self, *, status: str = "pending") -> list[dict]:
-        return self._client.pending_reviews(status=status)
-
     def search_coding(
         self,
         *,

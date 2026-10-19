@@ -10,6 +10,7 @@ from dual_mem.config import Settings, ensure_storage_dir
 from dual_mem.providers.embedding import EmbedService
 from dual_mem.providers.llm import LLMClient
 from dual_mem.providers.jev import DecisionProvider, JevClient
+from dual_mem.providers.rerank import RerankClient
 from dual_mem.locks import LockRegistry
 from dual_mem.storage.cache_store import CacheStore
 from dual_mem.storage.graph_store import KuzuGraphStore
@@ -39,6 +40,7 @@ class ComponentFactory:
         self._graph = _UNSET
         self._llm = llm
         self._jev = jev
+        self._reranker = None
         self.commit_locks = LockRegistry()
         # True when the caller injected an LLM client (tests / custom backends). Such a
         # client is trusted as-is and bypasses the api_key/probe checks done by MemoryClient.
@@ -57,9 +59,17 @@ class ComponentFactory:
                 max_request_chars=self.settings.jev_max_request_chars,
                 max_question_chars=self.settings.jev_max_question_chars,
                 timeout=self.settings.jev_timeout,
-                retry_attempts=self.settings.jev_retry_attempts,
             )
         return self._jev
+
+    @property
+    def reranker(self) -> RerankClient | None:
+        if self._reranker is None and self.settings.rerank_endpoint:
+            self._reranker = RerankClient(
+                endpoint=self.settings.rerank_endpoint, model=self.settings.rerank_model,
+                api_key=self.settings.rerank_api_key, timeout=self.settings.rerank_timeout,
+            )
+        return self._reranker
 
     @property
     def embed(self) -> EmbedService:
@@ -75,8 +85,6 @@ class ComponentFactory:
                 queue_batch_window_ms=self.settings.embed_queue_window_ms,
                 input_max_tokens=self.settings.embed_max_tokens,
                 chars_per_token=self.settings.chars_per_token,
-                retry_attempts=self.settings.embed_retry_attempts,
-                retry_base_delay=self.settings.embed_retry_base_delay,
                 cache_size=self.settings.embed_cache_size,
             )
         return self._embed

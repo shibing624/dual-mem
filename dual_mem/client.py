@@ -22,7 +22,6 @@ import uuid
 from typing import Any
 
 from dual_mem.config import Settings
-from dual_mem.agent.review import ReviewWorker
 from dual_mem.isolation import build_filter
 from dual_mem.locks import LockRegistry
 from dual_mem.registry import _UNSET, ComponentFactory
@@ -274,11 +273,10 @@ class MemoryClient:
         ``user_id`` is required. With ``messages``, L0_RAW and the extractor see the shaped
         full dialogue after host-injected system turns are removed.
 
-        Cost per add: one candidate generation, then Jev target selection and (when a
-        target exists) one action round; MULTIPLE targets, MERGE verification and a
-        coverage regeneration each add calls. ``WriteResult.status`` reports
-        committed / known / raw_only / pending_review; pending items are resolved by
-        ``digest()``. Batch ``messages`` at session end to reduce cost.
+        Cost per add: one candidate generation; a candidate with no similar current
+        head is appended without a Jev call, otherwise one target question and (when a
+        target is chosen) one action question. ``WriteResult.status`` reports
+        committed / known / raw_only. Batch ``messages`` at session end to reduce cost.
         """
         # Only a caller-supplied id can be replayed; the coding store records nothing
         # for generated ids.
@@ -422,7 +420,6 @@ class MemoryClient:
             is_ephemeral=result.is_ephemeral,
             decisions=result.decisions,
             status=result.status,
-            needs_review=list(result.needs_review),
         )
 
     async def add_raw(
@@ -531,7 +528,6 @@ class MemoryClient:
             is_ephemeral=result.is_ephemeral,
             decisions=result.decisions,
             status=result.status,
-            needs_review=list(result.needs_review),
         )
 
     async def search(
@@ -837,39 +833,24 @@ class MemoryClient:
         ]
 
     async def digest(self) -> DigestResult:
-        """Review deferred write decisions, then (dual) run System2 cognition.
+        """Run pending System2 cognition (``dual`` mode only).
 
-        Both modes re-decide memories written with an undecided relation and re-extract
-        sources whose extraction was judged incomplete (``WriteResult.needs_review``).
-        Failing review items stay queued and are quarantined after
-        ``review_max_attempts``; they never fail the digest.
+        The write path keeps no deferred work, so this is purely the L3 cognition
+        queue; in ``system1`` it only housekeeps cached request outcomes.
         """
-        started = time.perf_counter()
-        review = await ReviewWorker(factory=self.factory).run()
-        timing: dict = {
-            "review_sec": time.perf_counter() - started,
-            "review_failed": float(review["failed"]),
-        }
+        timing: dict = {}
         if self.settings.request_outcome_ttl_seconds:
             cutoff = time.time() - self.settings.request_outcome_ttl_seconds
             self.factory.cache.purge_request_outcomes(older_than=cutoff)
             if self._coding_writer:
                 self._coding_writer.store.purge_requests(older_than=cutoff)
         if not isinstance(self.writer, System2Writer):
-            return DigestResult(
-                success=True, processed=0, reviewed=review["reviewed"], timing=timing
-            )
+            return DigestResult(success=True, processed=0, timing=timing)
         processed = await self.writer.digest_pending()
         timing.update(self.writer.last_digest_stats)
         if self.settings.purge_done_queues:
             self.factory.cache.purge_done_queues()
-        return DigestResult(
-            success=True, processed=processed, reviewed=review["reviewed"], timing=timing
-        )
-
-    def pending_reviews(self, *, status: str = "pending") -> list[dict]:
-        """Deferred decisions awaiting ``digest()`` (``status="quarantined"`` for failures)."""
-        return self.factory.cache.list_reviews(status=status)
+        return DigestResult(success=True, processed=processed, timing=timing)
 
     async def search_coding(
         self,
@@ -899,7 +880,7 @@ class MemoryClient:
         provider = self.factory._jev
         if provider is not None and hasattr(provider, "aclose"):
             await provider.aclose()
-        for provider in (self.factory._embed, self.factory._llm):
+        for provider in (self.factory._embed, self.factory._llm, self.factory._reranker):
             if (
                 provider is not _UNSET
                 and provider is not None

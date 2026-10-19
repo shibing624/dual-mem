@@ -2,15 +2,17 @@
 """
 Hybrid read engine (Hy-Memory parity, latency-optimized).
 
-Semantic recall + in-pool BM25 rerank + graph evidence fusion. The keyword signal is a
-re-rank over the already-recalled semantic pool (no full-collection BM25 scan), so an
-exact-term / rare-word / numeric match that semantic ranked low gets surfaced without a
-second store round-trip. profile = L2 (VDB) + L3 (graph forward/reverse RRF); L2 identity
+Semantic and lexical recall + calibrated BM25 rerank + graph evidence fusion.
+Lexical recall admits exact-term matches outside the semantic candidate pool;
+both routes use the same semantic/BM25 scoring scale. profile = L2 (VDB) + L3
+(graph forward/reverse RRF); L2 identity
 routes to normal; intentions to proactive when intention_limit > 0.
 """
 import asyncio
 import logging
 import math
+import re
+from dataclasses import replace
 
 from dual_mem.isolation import build_filter
 from dual_mem.registry import ComponentFactory
@@ -103,6 +105,91 @@ def attach_relations(vector, items: list[MemoryItem]) -> None:
             item.conflicts = [_brief(n) for n in conflicts]
 
 
+def _lexical_candidates(
+    *,
+    vector,
+    where: dict,
+    terms: list[str],
+    excluded: set[str],
+    limit: int,
+    as_of: int | None,
+) -> list[MemoryNode]:
+    """Best BM25 matches over every current memory of the scope not already recalled.
+
+    Memory scopes are per user (a few hundred to a few thousand nodes), so scoring them
+    in one pass is cheap and needs no index. Only nodes sharing a query term are
+    returned, best first.
+    """
+    nodes = [n for n in vector.get_many(where, limit=20_000) if _valid_at(n, as_of)]
+    if not nodes:
+        return []
+    scores = compute_bm25_scores(
+        terms, [f"{n.content} {' '.join(n.tags)}".strip() for n in nodes]
+    )
+    ranked = sorted(zip(nodes, scores), key=lambda pair: pair[1], reverse=True)
+    return [
+        node for node, score in ranked
+        if score > 0 and node.node_id not in excluded
+    ][:limit]
+
+
+def _cosine_score(query: list[float], embedding: list[float] | None) -> float:
+    if not embedding or len(query) != len(embedding):
+        return 0.0
+    norm = math.sqrt(sum(x * x for x in query) * sum(x * x for x in embedding))
+    return sum(a * b for a, b in zip(query, embedding)) / norm if norm else 0.0
+
+
+def _source_excerpt(content: str, query: str, anchors: list[str], max_chars: int = 3200) -> str:
+    """Select verbatim, role-labelled passages instead of head-truncating a source."""
+    if len(content) <= max_chars:
+        return content
+    turns = re.split(r"(?m)(?=^\[(?:user|assistant|tool|system)\]:)", content)
+    passages: list[str] = []
+    roles: list[str] = []
+    for turn in turns:
+        if not turn.strip():
+            continue
+        label = re.match(r"\[(\w+)\]:", turn)
+        role = label.group(1) if label else ""
+        start = 0
+        while start < len(turn):
+            end = min(start + 900, len(turn))
+            if end < len(turn):
+                boundary = turn.rfind(" ", start + 450, end)
+                if boundary > start:
+                    end = boundary
+            passage = turn[start:end].strip()
+            if start and role:
+                passage = f"[{role}]: […] {passage}"
+            passages.append(passage)
+            roles.append(role)
+            start = end
+    if not passages:
+        return content[:max_chars]
+    query_scores = compute_bm25_scores(tokenize(query), passages)
+    anchor_scores = compute_bm25_scores(tokenize(" ".join(anchors[:4])), passages)
+    query_max = max(query_scores, default=0) or 1
+    anchor_max = max(anchor_scores, default=0) or 1
+    ranked = sorted(range(len(passages)), key=lambda i: -(
+        query_scores[i] / query_max + anchor_scores[i] / anchor_max
+    ))
+    selected: set[int] = set()
+    size = 0
+    for index in ranked:
+        # A quoted answer needs the preceding user turn to resolve references.
+        neighbours = [index]
+        if roles[index] == "assistant" and index > 0 and roles[index - 1] == "user":
+            neighbours.append(index - 1)
+        for i in neighbours:
+            if i not in selected and size + len(passages[i]) + 8 <= max_chars:
+                selected.add(i)
+                size += len(passages[i]) + 8
+        if len(selected) >= 3:
+            break
+    return "\n[…]\n".join(passages[i] for i in sorted(selected))
+
+
 def _item_to_memory(item: dict) -> MemoryItem:
     if item.get("node") is None:
         item = _derived_to_item(item)
@@ -139,6 +226,7 @@ def _item_to_memory(item: dict) -> MemoryItem:
         memory_id=node.node_id,
         layer=node.layer.value,
         kind=node.kind or node.category.value,
+        owner=node.owner,
         is_latest=node.is_latest,
         revision=node.revision,
         supersedes=list(node.supersedes),
@@ -158,7 +246,6 @@ def _item_to_memory(item: dict) -> MemoryItem:
         merged_timestamps=merged_timestamps,
         update_type=update_type,
         source_node_id=source_node_id,
-        needs_review=bool((node.custom or {}).get("needs_review")),
     )
 
 
@@ -205,6 +292,8 @@ async def search_hybrid(
     # v10: enlarge semantic recall to ~hy's combined sem+kw pool (45+60=105),
     # compensating for ChromaDB's lack of native keyword index. L0_RAW excluded.
     vdb_sem_limit = max(int(math.ceil(final_limit * candidate_multiplier * 2.5)), 60)
+    # Extra candidates admitted from a lexical pass over the scope (pure keyword recall).
+    lexical_limit = max(final_limit // 2, 10)
     graph_limit = max(final_limit * 2, 20)
 
     use_derived = include_derived
@@ -216,7 +305,7 @@ async def search_hybrid(
         user_id=user_id,
         agent_ids=agent_ids,
         session_ids=session_ids,
-        layers=_VDB_RECALL_LAYERS,
+        layers=_VDB_RECALL_LAYERS + ([Layer.L3_DERIVED] if use_derived else []),
         statuses=recall_statuses,
         latest_only=True,
         created_after=created_after,
@@ -275,6 +364,16 @@ async def search_hybrid(
         nodes = await asyncio.to_thread(
             vector.query, embedding=query_embedding, where=where, top_k=raw_limit * 3
         )
+        lexical_nodes = await asyncio.to_thread(
+            _lexical_candidates, vector=vector, where=where, terms=tokenize(query),
+            excluded={n.node_id for n in nodes}, limit=raw_limit * 2, as_of=as_of,
+        )
+        if lexical_nodes:
+            embedded = await asyncio.to_thread(vector.get_by_ids, [n.node_id for n in lexical_nodes])
+            for candidate in lexical_nodes:
+                node = embedded.get(candidate.node_id, candidate)
+                node.score = _cosine_score(query_embedding, node.embedding)
+                nodes.append(node)
         if not nodes:
             return []
         semantic = sorted(nodes, key=lambda n: n.score, reverse=True)
@@ -319,12 +418,17 @@ async def search_hybrid(
                 "content": g.content,
                 "layer": g.layer,
                 "confidence": g.score,
+                "node": head,
             }
             for g in hits
             if g.score >= profile_min_score
             and (head := vector.get(g.node_id)) is not None
             and head.is_latest
+            and head.app_id in app_ids
+            and head.user_id == user_id
             and head.agent_id in (agent_ids or [head.agent_id])
+            and (not session_ids or head.session_id in session_ids)
+            and (created_after is None or head.gmt_created >= created_after)
             and _valid_at(head, as_of)
         ]
 
@@ -404,21 +508,52 @@ async def search_hybrid(
             intention_hits = intention_hits[:intention_limit]
         intention_hits = [h for h in intention_hits if _valid_at(h["node"], as_of)]
 
-    # BM25 re-rank over the recalled semantic pool only (no full-collection scan). A node
-    # with a strong exact-term match but a weak embedding similarity is rescued here; we
-    # fuse first and gate on the fused score afterwards so the keyword signal is not lost.
+    # Every route uses the same candidate calibration. A second profile lookup must
+    # not overwrite a fused fact/profile score with its larger raw cosine score.
+    seen_candidates = {h["node_id"] for h in vdb_semantic_hits}
+    for hit in profile_hits + graph_schema_hits:
+        if hit["node_id"] not in seen_candidates:
+            vdb_semantic_hits.append(hit)
+            seen_candidates.add(hit["node_id"])
+
+    # Admit lexical matches before calibration so both routes have identical BM25
+    # statistics. Raw BM25 scores cannot be fused with cosine similarities.
     terms = tokenize(query)
     bm25_by_nid: dict[str, float] = {}
-    if terms and vdb_semantic_hits:
+    if terms and w_bm25 > 0:
+        lexical = await asyncio.to_thread(
+            _lexical_candidates,
+            vector=vector,
+            where=normal_where,
+            terms=terms,
+            excluded={h["node_id"] for h in vdb_semantic_hits},
+            limit=lexical_limit,
+            as_of=as_of,
+        )
+        lexical_nodes = await asyncio.to_thread(
+            vector.get_by_ids, [n.node_id for n in lexical]
+        ) if lexical else {}
+        for candidate in lexical:
+            node = lexical_nodes.get(candidate.node_id, candidate)
+            vdb_semantic_hits.append(
+                {
+                    "node_id": node.node_id,
+                    "score": _cosine_score(query_embedding, node.embedding),
+                    "node": node,
+                }
+            )
         contents = [
             f"{h['node'].content} {' '.join(h['node'].tags)}".strip()
             for h in vdb_semantic_hits
         ]
-        raw = compute_bm25_scores(terms, contents)
-        calibrated = compute_bm25_confidences(terms, contents, raw)
-        for hit, score in zip(vdb_semantic_hits, calibrated, strict=True):
-            if score > 0:
-                bm25_by_nid[hit["node_id"]] = score
+        calibrated = compute_bm25_confidences(
+            terms, contents, compute_bm25_scores(terms, contents)
+        )
+        bm25_by_nid = {
+            hit["node_id"]: score
+            for hit, score in zip(vdb_semantic_hits, calibrated, strict=True)
+            if score > 0
+        }
     has_bm25 = bool(bm25_by_nid)
 
     vdb_scored: list[dict] = []
@@ -442,6 +577,60 @@ async def search_hybrid(
             }
         )
     vdb_scored.sort(key=lambda x: x["score"], reverse=True)
+    scored_by_id = {row["node_id"]: row for row in vdb_scored}
+
+    if raw_limit > 0:
+        # Extracted memories are also retrieval keys for their source conversations.
+        # This recovers surrounding details without a second extraction/model call.
+        anchors: dict[str, list[str]] = {}
+        source_scores: dict[str, float] = {}
+        for row in vdb_scored[:max(final_limit, raw_limit * 4)]:
+            node = row["node"]
+            source_ids = ((node.custom or {}).get("source_ids") or []) if node.layer == Layer.L3_DERIVED else []
+            if not source_ids:
+                source_ids = [(node.custom or {}).get("source_node_id")]
+            for source in source_ids:
+                if not source:
+                    continue
+                anchors.setdefault(source, []).append(node.content)
+                source_scores[source] = max(source_scores.get(source, 0), row["score"])
+        sources = await asyncio.to_thread(vector.get_by_ids, list(anchors))
+        # L3 sources point to facts; fact sources point to L0. Follow that one hop,
+        # while checking scope before reading any linked text into the response.
+        for source_id, node in list(sources.items()):
+            if (node.app_id not in app_ids or node.user_id != user_id
+                    or (agent_ids and node.agent_id not in agent_ids)):
+                continue
+            raw_id = (node.custom or {}).get("source_node_id") if node.layer != Layer.L0_RAW else None
+            if raw_id:
+                anchors.setdefault(raw_id, []).extend(anchors[source_id])
+                source_scores[raw_id] = max(source_scores.get(raw_id, 0), source_scores[source_id])
+        extra_ids = [nid for nid in anchors if nid not in sources]
+        if extra_ids:
+            sources.update(await asyncio.to_thread(vector.get_by_ids, extra_ids))
+        sources = {
+            nid: node for nid, node in sources.items()
+            if node.layer == Layer.L0_RAW and node.app_id in app_ids and node.user_id == user_id
+            and (not agent_ids or node.agent_id in agent_ids)
+            and (not session_ids or node.session_id in session_ids)
+            and (created_after is None or node.gmt_created >= created_after)
+            and _valid_at(node, as_of)
+        }
+        linked = sorted(sources, key=lambda nid: -source_scores[nid])
+        merged = rrf.rrf_fuse({
+            "direct": [{"node_id": row["node_id"]} for row in raw_hits],
+            "linked": [{"node_id": nid} for nid in linked],
+        })
+        raw_nodes = {row["node_id"]: row["node"] for row in raw_hits} | sources
+        top = max((row["rrf_score"] for row in merged), default=0) or 1
+        raw_hits = [
+            {"node_id": row["node_id"],
+             "node": replace(raw_nodes[row["node_id"]], content=_source_excerpt(
+                 raw_nodes[row["node_id"]].content, query, anchors.get(row["node_id"], [])
+             )),
+             "score": _RAW_SCORE_SCALE * row["rrf_score"] / top, "source": "raw"}
+            for row in merged[:raw_limit]
+        ]
 
     # Forward derived: batch the evidence-count lookup into a single graph round-trip instead of
     # one evidence_of() call per schema (the previous serial loop dominated read latency).
@@ -509,19 +698,44 @@ async def search_hybrid(
         )
         for f_item in fused:
             src = by_id.get(f_item["node_id"], {})
+            scored = scored_by_id.get(f_item["node_id"])
+            # RRF orders graph routes internally; its ~0.01 values cannot compete
+            # with cosine/BM25 scores when the public routes are flattened.
+            relevance = scored["score"] if scored else (
+                _cosine_score(query_embedding, src["node"].embedding) * w_sem
+                if has_bm25 else _cosine_score(query_embedding, src["node"].embedding)
+            )
             fused_derived.append(
                 {
                     "node_id": f_item["node_id"],
                     "node": src.get("node"),
                     "content": src.get("content", ""),
                     "layer": src.get("layer", Layer.L3_DERIVED.value),
-                    "score": float(f_item.get("rrf_score", 0.0)),
+                    "score": relevance,
                     "source": "profile_derived",
                     "confidence": src.get("confidence"),
                 }
             )
 
-    expandable = vdb_scored + list(profile_hits)
+    reranker = factory.reranker
+    if reranker is not None:
+        pool = {row["node_id"]: row for row in vdb_scored + fused_derived}
+        curated = sorted(pool.values(), key=lambda row: -row["score"])[
+            :max(final_limit, settings.rerank_candidate_limit)
+        ]
+        candidates = curated + raw_hits
+        scores = await reranker.rerank(
+            query=query, documents=[row["node"].content for row in candidates]
+        )
+        score_by_id = {row["node_id"]: score for row, score in zip(candidates, scores, strict=True)}
+        # Only cross-encoder scores compete after reranking, never a mix with
+        # uncalibrated cosine scores from candidates outside the rerank budget.
+        vdb_scored = [row for row in vdb_scored if row["node_id"] in score_by_id]
+        fused_derived = [row for row in fused_derived if row["node_id"] in score_by_id]
+        for row in vdb_scored + fused_derived + raw_hits:
+            row["score"] = score_by_id[row["node_id"]]
+
+    expandable = vdb_scored
     meta_by_nid: dict[str, dict] = {
         it["node_id"]: it for it in expandable if it.get("node_id")
     }
@@ -549,10 +763,6 @@ async def search_hybrid(
                 merged["evolution_chain"] = exp["evolution_chain"]
                 merged["is_evolved"] = True
             else:
-                merged["is_evolved"] = False
-            # 只让 L3 或 profile 层的 chain 保持展开，normal fact 不携带 chain 标记
-            if merged["is_evolved"] and _layer_of(merged) in _NORMAL_SOURCES:
-                merged["evolution_chain"] = None
                 merged["is_evolved"] = False
             expanded.append(merged)
     else:
@@ -583,6 +793,7 @@ async def search_hybrid(
             if it.get("node")
         }.values()
     )
+    profile_results.sort(key=lambda x: x.get("score", 0), reverse=True)
     if profile_limit == 0:
         profile_results = []
     elif profile_limit > 0:

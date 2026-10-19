@@ -283,6 +283,7 @@ class LLMClient:
             base_url=base_url,
             api_key=api_key,
             timeout=timeout,
+            max_retries=0,
             default_headers=extra_headers or None,
             http_client=httpx.AsyncClient(timeout=timeout),
         )

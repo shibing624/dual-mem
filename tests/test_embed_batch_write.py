@@ -51,4 +51,5 @@ async def test_known_skip_needs_no_structured_embedding(tmp_storage):
     jev.responses = {"p0:action": "SKIP", "p0:target": original.extra_node_ids[0]}
     result = await c.add(content="Known", user_id="u")
     assert result.extracted_count == 0 and not result.is_ephemeral
-    assert len(embed.batches) == 1 and len(embed.direct) == 2
+    # Candidate embeddings are computed once per write (routing) and reused at commit.
+    assert len(embed.batches) == 2 and len(embed.direct) == 2

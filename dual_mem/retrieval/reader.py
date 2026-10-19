@@ -152,6 +152,7 @@ class Reader:
             memory_id=node.node_id,
             layer=node.layer.value,
             kind=node.kind or node.category.value,
+            owner=node.owner,
             is_latest=node.is_latest,
             revision=node.revision,
             supersedes=list(node.supersedes),
@@ -170,5 +171,5 @@ class Reader:
             merged_timestamps=merged_timestamps,
             update_type=update_type,
             source_node_id=source_node_id,
-            needs_review=bool((node.custom or {}).get("needs_review")),
+
         )

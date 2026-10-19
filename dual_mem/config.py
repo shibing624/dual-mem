@@ -90,8 +90,6 @@ LLM_COMPLETION_RESERVE = 4096
 
 # Embed input budget (tokens per API call; longer inputs are head-truncated).
 EMBED_MAX_TOKENS = 8000
-EMBED_RETRY_ATTEMPTS = 3
-EMBED_RETRY_BASE_DELAY = 0.5
 
 
 # Presets change only material budget. Jev remains authoritative in every preset.
@@ -145,8 +143,6 @@ class Settings(BaseSettings):
     embed_timeout: int = 30
     # Max input tokens per embed API call; longer texts are head-truncated (L1 anchors only).
     embed_max_tokens: int = EMBED_MAX_TOKENS
-    embed_retry_attempts: int = EMBED_RETRY_ATTEMPTS
-    embed_retry_base_delay: float = EMBED_RETRY_BASE_DELAY
 
     auth_disabled: bool = True
     app_whitelist: list[str] = ["default"]
@@ -161,25 +157,21 @@ class Settings(BaseSettings):
     jev_api_key: str = ""
     jev_model: str = "jev-1.13.0"
     jev_timeout: float = 30.0
-    jev_retry_attempts: int = 3
     jev_max_questions: int = 64
     jev_max_request_chars: int = 100_000
     jev_max_question_chars: int = 60_000
     reconcile_concurrency: int = 4
     reconcile_candidate_limit: int = 64
-    reconcile_batch_size: int = 12
-    reconcile_retry_attempts: int = 3
+    reconcile_batch_size: int = 1
+    # Relation routing: a candidate is compared (one Jev target question) only with its
+    # own nearest current heads / earlier candidates at or above this cosine; with none
+    # it is appended directly without a model call.
+    reconcile_target_limit: int = 5
+    reconcile_relation_threshold: float = 0.6
     # Relations Jev chose below this confidence are written as an independent
-    # SUPPLEMENT and re-decided by digest(). 0 disables the confidence route
-    # (NEED_CONTEXT / uncertain multi-target are always deferred).
+    # SUPPLEMENT immediately, without later review. 0 disables this confidence route.
     reconcile_review_confidence: float = 0.0
-    # Extraction regenerations after Jev rejects coverage or finds missed facts.
-    # When exhausted the candidates are still committed and the source is reviewed.
-    extract_coverage_retries: int = 1
-    # Failed review items are retried on each digest and quarantined after this.
-    review_max_attempts: int = 3
-    # A single System2 fact rejected on this many digests is quarantined.
-    s2_max_attempts: int = 3
+    # Maximum current facts per System2 generation batch (also context-budgeted).
     system2_max_prompt_facts: int = 120
     # Idempotent add(request_id=...) outcomes (chat and coding paths) are kept this
     # many seconds and purged by digest() (0 = forever).
@@ -190,8 +182,6 @@ class Settings(BaseSettings):
     # is the last-resort size cap (e.g. when user turns alone are huge); it is layered ON TOP of
     # — and does not conflict with — the role-aware history shaping below.
     extract_max_content_tokens: int = 0
-    # Retry once on empty/unparseable JSON (temperature=0 + JSON-only reinforcement prompt).
-    extract_retry_on_failure: bool = True
     # Few-shot 示例：extract prompt 末尾追加示例，引导 4B 模型稳定格式。
     extract_few_shot_enabled: bool = False
     # Multi-turn extract input shaping (messages=...): no user/assistant turn is ever dropped.
@@ -211,6 +201,8 @@ class Settings(BaseSettings):
     persist_history: bool = False
     # Drop reconcile/s2 queue rows after digest drains them (keeps cache.db small).
     purge_done_queues: bool = True
+    # An L3 derived memory at least this cosine-similar to an existing one is skipped.
+    s2_dedup_threshold: float = 0.97
 
     # Hybrid read fusion tunables (semantic vs in-pool BM25 rerank weight; graph derived evidence
     # boost). Sum of the two weights need not be 1; evidence boost saturates at the given count.
@@ -219,6 +211,12 @@ class Settings(BaseSettings):
     normal_candidate_multiplier: float = 3.0
     hybrid_evidence_boost_max: float = 0.3
     hybrid_evidence_saturate: int = 5
+    # Optional query/document cross-encoder. No generation or retry is involved.
+    rerank_endpoint: str = ""
+    rerank_model: str = ""
+    rerank_api_key: str = ""
+    rerank_timeout: float = 30.0
+    rerank_candidate_limit: int = 128
     # Coding/tool-use memory subsystem — separate write/store path for engineering
     # conversations containing tool calls. When enabled, add() first checks for tool
     # messages; if found, Jev decides coding vs chat, and coding memories
@@ -228,17 +226,15 @@ class Settings(BaseSettings):
 
     @field_validator(
         "jev_timeout",
-        "jev_retry_attempts",
         "jev_max_questions",
         "jev_max_request_chars",
         "jev_max_question_chars",
         "reconcile_concurrency",
         "reconcile_candidate_limit",
         "reconcile_batch_size",
-        "reconcile_retry_attempts",
-        "review_max_attempts",
-        "s2_max_attempts",
         "system2_max_prompt_facts",
+        "rerank_timeout",
+        "rerank_candidate_limit",
     )
     @classmethod
     def _positive_decision_limit(cls, value: int | float) -> int | float:
@@ -246,7 +242,7 @@ class Settings(BaseSettings):
             raise ValueError("decision and cognition limits must be positive")
         return value
 
-    @field_validator("extract_coverage_retries", "request_outcome_ttl_seconds")
+    @field_validator("request_outcome_ttl_seconds")
     @classmethod
     def _non_negative(cls, value: int) -> int:
         if value < 0:

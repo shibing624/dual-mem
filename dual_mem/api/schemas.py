@@ -32,7 +32,6 @@ class AddResponse(BaseModel):
     extra_node_ids: list[str] = []
     is_ephemeral: bool = False
     decisions: list[dict] = []
-    needs_review: list[str] = []
 
 
 class SearchRequest(BaseModel):

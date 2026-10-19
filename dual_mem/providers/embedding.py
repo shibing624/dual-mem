@@ -16,8 +16,6 @@ import httpx
 from dual_mem.config import (
     CHARS_PER_TOKEN,
     EMBED_MAX_TOKENS,
-    EMBED_RETRY_ATTEMPTS,
-    EMBED_RETRY_BASE_DELAY,
 )
 from dual_mem.providers.usage import UsageCallback, UsageEvent
 
@@ -57,8 +55,6 @@ class EmbedService:
         cache_size: int = DEFAULT_CACHE_SIZE,
         input_max_tokens: int = EMBED_MAX_TOKENS,
         chars_per_token: float = CHARS_PER_TOKEN,
-        retry_attempts: int = EMBED_RETRY_ATTEMPTS,
-        retry_base_delay: float = EMBED_RETRY_BASE_DELAY,
         usage_callback: UsageCallback | None = None,
     ) -> None:
         self.model = model
@@ -66,8 +62,6 @@ class EmbedService:
         self.input_max_tokens = input_max_tokens
         self.chars_per_token = chars_per_token
         self.input_max_chars = int(input_max_tokens * chars_per_token)
-        self.retry_attempts = retry_attempts
-        self.retry_base_delay = retry_base_delay
         self.usage_callback = usage_callback
         self._api_dimensions = embedding_api_dimensions(model, dim)
         if self._api_dimensions is None:
@@ -80,6 +74,7 @@ class EmbedService:
             base_url=base_url,
             api_key=api_key,
             timeout=timeout,
+            max_retries=0,
             http_client=httpx.AsyncClient(timeout=timeout),
         )
 
@@ -112,39 +107,16 @@ class EmbedService:
         if self._api_dimensions is not None:
             kwargs["dimensions"] = self._api_dimensions
 
-        last_exc: Exception | None = None
         start = time.perf_counter()
-        for attempt in range(self.retry_attempts):
-            try:
-                resp = await self.client.embeddings.create(**kwargs)
-                vectors = [item.embedding for item in resp.data]
-                if self.usage_callback is not None:
-                    elapsed_ms = (time.perf_counter() - start) * 1000
-                    self.usage_callback(
-                        UsageEvent(
-                            kind="embed_batch",
-                            model=self.model,
-                            latency_ms=elapsed_ms,
-                            text_chars=sum(len(p) for p in prepared),
-                            batch_size=len(prepared),
-                        )
-                    )
-                return vectors
-            except Exception as exc:
-                last_exc = exc
-                if attempt < self.retry_attempts - 1:
-                    delay = self.retry_base_delay * (2**attempt)
-                    logger.warning(
-                        "embed_batch attempt %d/%d failed (%s: %s); retry in %.1fs",
-                        attempt + 1,
-                        self.retry_attempts,
-                        type(exc).__name__,
-                        exc,
-                        delay,
-                    )
-                    await asyncio.sleep(delay)
-        assert last_exc is not None
-        raise last_exc
+        resp = await self.client.embeddings.create(**kwargs)
+        vectors = [item.embedding for item in resp.data]
+        if self.usage_callback is not None:
+            self.usage_callback(UsageEvent(
+                kind="embed_batch", model=self.model,
+                latency_ms=(time.perf_counter() - start) * 1000,
+                text_chars=sum(len(p) for p in prepared), batch_size=len(prepared),
+            ))
+        return vectors
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Embed a list of texts and return one vector per input; empty list short-circuits.

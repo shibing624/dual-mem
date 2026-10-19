@@ -35,7 +35,7 @@ async def test_extract_single_call_no_basic_info():
     llm = FakeLLMClient(
         responses={"extract": {"identity": [], "facts": [], "intentions": [], "basic_info": {}}}
     )
-    extractor = Extractor(llm=llm, retry_on_failure=False)
+    extractor = Extractor(llm=llm)
 
     out = await extractor.extract(
         content="hi there",
@@ -51,7 +51,7 @@ async def test_extract_single_call_no_basic_info():
     assert out["basic_info"] == {}
 
 
-async def test_extract_retries_on_empty_json():
+async def test_extract_does_not_retry_empty_json():
     calls = {"n": 0}
 
     def flaky_extract(*, system, user):
@@ -66,7 +66,7 @@ async def test_extract_retries_on_empty_json():
         }
 
     llm = FakeLLMClient(responses={"extract": flaky_extract})
-    extractor = Extractor(llm=llm, retry_on_failure=True)
+    extractor = Extractor(llm=llm)
 
     out = await extractor.extract(
         content="x" * 500,
@@ -77,13 +77,8 @@ async def test_extract_retries_on_empty_json():
         session_id="se",
     )
 
-    assert len(out["identity"]) == 1
-    assert sum(1 for c in llm.calls if c["type"] == "chat_json") == 2
-    # Retry runs at temperature=0 with a JSON-only reinforcement appended to the system prompt.
-    assert llm.calls[1]["kw"]["temperature"] == 0.0
-    assert "json_object" not in llm.calls[1]["kw"]
-    assert "JSON" in llm.calls[1]["system"]
-    assert llm.calls[1]["system"] != llm.calls[0]["system"]
+    assert out["identity"] == []
+    assert sum(1 for c in llm.calls if c["type"] == "chat_json") == 1
 
 
 async def test_extract_truncates_long_content():
@@ -94,7 +89,7 @@ async def test_extract_truncates_long_content():
         return {"identity": [], "facts": [], "intentions": [], "basic_info": {}}
 
     llm = FakeLLMClient(responses={"extract": capture})
-    extractor = Extractor(llm=llm, max_content_chars=10_000, retry_on_failure=False)
+    extractor = Extractor(llm=llm, max_content_chars=10_000)
 
     await extractor.extract(
         content="a" * 20_000,

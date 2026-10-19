@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from datetime import date, datetime, time, timezone
@@ -11,7 +12,6 @@ from typing import Any
 from dual_mem.agent.extractor import Extractor
 from dual_mem.agent.reconciler import ReconcileOp, Reconciler, build_apply_custom
 from dual_mem.errors import (
-    CoverageError,
     DecisionContextError,
     DecisionPlanError,
     StaleDecisionError,
@@ -22,13 +22,119 @@ from dual_mem.types import Layer, MemoryNode
 
 logger = logging.getLogger("dual_mem.agent.mem")
 
-_COVERAGE_FEEDBACK = (
-    "the candidates did not faithfully cover every explicit fact, update, number and "
-    "independent event in the source, or contained unsupported content"
-)
-_EMPTY_FEEDBACK = (
-    "extraction returned no candidates although the source contains durable facts"
-)
+
+def _confidence(op: ReconcileOp) -> float:
+    """Confidence of the action decision; unrecorded confidence ranks lowest."""
+    return float((op.decision.get("action") or {}).get("confidence") or 0.0)
+
+
+def _as_supplement(op: ReconcileOp) -> ReconcileOp:
+    """Rewrite one op as an independent append that retires nothing."""
+    op.op = "ADD"
+    op.update_type = "SUPPLEMENT"
+    op.supersedes = []
+    op.target_ids = []
+    op.conflicts_with = []
+    op.negation = False
+    op.memory_id = None
+    op.expected_revisions = {}
+    op.decision["effective"] = "ADD_SUPPLEMENT"
+    return op
+
+
+def _settle_target_claims(
+    ops: list[ReconcileOp], *, resolved: dict[str, str]
+) -> list[ReconcileOp]:
+    """Make one batch executable in a single deterministic pass.
+
+    Two inconsistencies can be produced by one decision round and cannot be fixed by
+    asking again (the model has the same information):
+
+    - several proposals retire the same current head — a head may only be consumed
+      once, so the highest-confidence claim keeps its relation and the others are
+      written as independent memories;
+    - a proposal targets an earlier *proposal* of this batch that produced no memory
+      (RAW_ONLY / INVALID) — that relation can never resolve, so the dangling target
+      is dropped and the proposal keeps whatever other targets it has.
+
+    Resolving here costs one in-memory pass and no model calls; replanning the batch
+    costs a full Jev round-trip and usually reproduces the same conflict.
+    """
+    claims: dict[str, list[int]] = {}
+    for idx, op in enumerate(ops):
+        if op.op == "DELETE":
+            targets = list(op.target_ids) or ([op.memory_id] if op.memory_id else [])
+        elif op.op == "ADD" and op.update_type in ("OVERRIDE", "NEGATE"):
+            targets = list(op.supersedes)
+        else:
+            continue
+        for target in {resolved.get(t, t) for t in targets}:
+            claims.setdefault(target, []).append(idx)
+
+    losers: set[int] = set()
+    for target, idxs in claims.items():
+        if len(idxs) < 2:
+            continue
+        ranked = sorted(idxs, key=lambda i: (-_confidence(ops[i]), i))
+        for idx in ranked[1:]:
+            losers.add(idx)
+    if not losers:
+        settled = ops
+    else:
+        settled = []
+        for idx, op in enumerate(ops):
+            if idx not in losers:
+                settled.append(op)
+                continue
+            logger.warning(
+                "proposal %s lost the claim on its target; writing it as an independent memory",
+                op.proposal_ids,
+            )
+            settled.append(_as_supplement(op))
+
+    # An earlier proposal that produced no memory cannot be a relation target.
+    proposal_ids = {pid for op in ops for pid in op.proposal_ids}
+    has_memory = {
+        pid
+        for op in settled
+        if op.op == "ADD" or (op.op == "SKIP" and op.memory_id)
+        for pid in op.proposal_ids
+    }
+    dead = proposal_ids - has_memory
+    for op in settled:
+        dangling = [t for t in op.target_ids if t in dead]
+        if not dangling:
+            continue
+        op.target_ids = [t for t in op.target_ids if t not in dead]
+        op.supersedes = [t for t in op.supersedes if t not in dead]
+        op.conflicts_with = [t for t in op.conflicts_with if t not in dead]
+        op.expected_revisions = {
+            k: v for k, v in op.expected_revisions.items() if k not in dead
+        }
+        if op.memory_id in dead:
+            op.memory_id = None
+        if not op.target_ids and op.op == "DELETE":
+            op.op = "RAW_ONLY"
+        elif not op.target_ids and (
+            op.op == "SKIP" or op.update_type in ("OVERRIDE", "NEGATE")
+        ):
+            logger.warning(
+                "proposal %s targets a proposal without memory; writing it independently",
+                op.proposal_ids,
+            )
+            _as_supplement(op)
+    return settled
+
+
+def _independent(ops: list[ReconcileOp]) -> list[ReconcileOp]:
+    """Drop every relation: memories become independent appends, nothing is retired."""
+    out: list[ReconcileOp] = []
+    for op in ops:
+        if op.op in ("DELETE", "SKIP") or (op.op == "ADD" and op.target_ids):
+            out.append(_as_supplement(op))
+        else:
+            out.append(op)
+    return out
 
 
 def _validity(value: Any, *, end_of_day: bool) -> int | str | None:
@@ -71,7 +177,6 @@ class MemAgent:
             max_content_chars=int(
                 settings.extract_max_content_tokens * settings.chars_per_token
             ),
-            retry_on_failure=settings.extract_retry_on_failure,
             few_shot_enabled=settings.extract_few_shot_enabled,
         )
         self.reconciler = Reconciler(
@@ -83,6 +188,8 @@ class MemAgent:
             batch_size=settings.reconcile_batch_size,
             max_state_chars=settings.jev_max_question_chars,
             review_confidence=settings.reconcile_review_confidence,
+            target_limit=settings.reconcile_target_limit,
+            relation_threshold=settings.reconcile_relation_threshold,
         )
 
     @staticmethod
@@ -98,16 +205,35 @@ class MemAgent:
             for item in extracted.get(key) or []:
                 if isinstance(item, str):
                     item = {"content": item}
+                if (key == "identity" and isinstance(item, dict) and not item.get("content")
+                        and isinstance(item.get("attribute"), str) and item["attribute"].strip()
+                        and item.get("value") not in (None, "", [], {})):
+                    value = item["value"]
+                    if isinstance(value, (dict, list)):
+                        value = json.dumps(value, ensure_ascii=False)
+                    item = dict(item, content=f"The user's {item['attribute']} is {value}.",
+                                dimension=item["attribute"])
                 if (
                     not isinstance(item, dict)
                     or not str(item.get("content") or "").strip()
                 ):
                     continue
+                item_layer, item_kind = layer, kind
+                labelled = str(item.get("type") or "").strip().lower()
+                if key == "facts" and labelled == "profile":
+                    item_layer, item_kind = Layer.L2_PROFILE, "profile"
+                elif key == "facts" and labelled == "intention":
+                    item_layer, item_kind = Layer.L1_FACT, "intention"
+                speaker = str(item.get("speaker") or item.get("owner") or "").lower()
+                owner = {"user": "user", "assistant": "agent", "agent": "agent"}.get(speaker, "")
+                if owner == "agent":
+                    item_layer, item_kind = Layer.L1_FACT, "fact"
                 entry = {
                     **item,
                     "content": str(item["content"]).strip(),
-                    "layer": layer.value,
-                    "kind": kind,
+                    "layer": item_layer.value,
+                    "kind": item_kind,
+                    "owner": owner,
                     "source_ids": list(source_ids),
                     "valid_from": _validity(item.get("valid_from"), end_of_day=False),
                     "valid_until": _validity(item.get("valid_until"), end_of_day=True),
@@ -129,43 +255,9 @@ class MemAgent:
                 )
         return [m["content"] for m in meta], meta
 
-    async def _needs_reextract(self, *, content: str, extracted: dict) -> tuple[bool, float | None]:
-        verdict = await self.factory.jev.evaluate(
-            state={"content": content, "extracted": extracted},
-            questions={
-                "value": {
-                    "type": "choice",
-                    "instructions": "Does this source contain durable facts, profiles, events or explicit intentions worth extracting? Extraction returned no candidates.",
-                    "criteria": {
-                        "RAW_ONLY": "No durable increment; retain raw evidence",
-                        "REEXTRACT": "Meaningful facts were missed; do not silently drop them",
-                    },
-                }
-            },
-        )
-        return verdict["value"].choice != "RAW_ONLY", verdict["value"].confidence
-
     @staticmethod
     def request_key(raw: MemoryNode, request_id: str) -> str:
         return f"write:{raw.node_id}:{request_id}"
-
-    def _queue_source_review(self, raw: MemoryNode, *, reason: str, request_id: str) -> None:
-        """Queue re-extraction of ``raw``; it runs only after ``request_key`` completes.
-
-        Queued before the write commits (crash safety) and again after it commits
-        (reopens an item a concurrent digest deferred while the write was in flight).
-        """
-        self.factory.cache.enqueue_review(
-            kind="extract",
-            app_id=raw.app_id,
-            user_id=raw.user_id,
-            agent_id=raw.agent_id,
-            node_id=raw.node_id,
-            payload={
-                "reason": reason,
-                "request_key": self.request_key(raw, request_id),
-            },
-        )
 
     async def _complete_without_plan(
         self, raw: MemoryNode, request_id: str, commit: CommitResult
@@ -179,58 +271,25 @@ class MemAgent:
             scope=(raw.app_id, raw.user_id, raw.agent_id),
             request_key=self.request_key(raw, request_id),
             decisions=[d.to_dict() for d in commit.decisions],
-            needs_review=list(commit.needs_review),
         )
 
     def recover(
-        self, raw_node: MemoryNode, request_id: str, *, review_attempt: bool = False
+        self, raw_node: MemoryNode, request_id: str
     ) -> tuple[list[str], CommitResult, bool] | None:
-        """Return the result of an already committed write and restore its reviews.
-
-        A process can die after the version plan commits but before its review
-        intents or result are recorded; the plan journal holds both.
-        """
+        """Return the result of an already committed write (plan journal replay)."""
         request_key = self.request_key(raw_node, request_id)
         done = self.factory.vector.completed_request(request_key)
         if done is None:
             return None
         decisions = [MemoryDecision(**d) for d in done["decisions"]]
-        nodes = self.factory.vector.get_by_ids(done["extra_node_ids"])
-        for node_id in done["needs_review"]:
-            if node_id == raw_node.node_id:
-                if not review_attempt:
-                    self._queue_source_review(
-                        raw_node,
-                        reason=next(d.review_reason for d in decisions if d.review_reason),
-                        request_id=request_id,
-                    )
-                continue
-            node = nodes.get(node_id)
-            if node is None or not (node.custom or {}).get("needs_review"):
-                continue
-            self.factory.cache.enqueue_review(
-                kind="relation",
-                app_id=node.app_id,
-                user_id=node.user_id,
-                agent_id=node.agent_id,
-                node_id=node_id,
-                payload={
-                    "reason": node.custom.get("review_reason", ""),
-                    "candidates": node.custom.get("review_targets", []),
-                    "source_id": raw_node.node_id,
-                    "request_key": request_key,
-                },
-            )
         return (
             list(done["extra_node_ids"]),
             CommitResult(
                 done["commit_passed"],
                 "recovered completed write",
                 decisions,
-                list(done["needs_review"]),
             ),
-            bool(decisions)
-            and all(d.action == "RAW_ONLY" and not d.review_reason for d in decisions),
+            bool(decisions) and all(d.action == "RAW_ONLY" for d in decisions),
         )
 
     async def run_system1(
@@ -241,19 +300,16 @@ class MemAgent:
         messages: list[ChatMessage] | None = None,
         request_id: str = "",
         source_node_ids: list[str] | None = None,
-        review_attempt: bool = False,
     ) -> tuple[list[str], CommitResult, bool]:
-        """Extract, decide and commit; degrade instead of dropping the source.
+        """Extract, decide and commit.
 
-        Coverage rejections regenerate the extraction with the rejection as feedback.
-        When ``extract_coverage_retries`` is exhausted, the last candidates are still
-        decided and committed, and the L0 source is queued for review by ``digest()``.
-        ``review_attempt`` marks the call made by that review (no further queuing).
+        Exactly one extraction pass and one decision pass. A coverage rejection or an
+        empty extraction is logged and the source stays RAW_ONLY — regenerating inside
+        the write path doubles latency for a rare case, and there is no review queue to
+        come back to it later.
         """
         if request_id:
-            recovered = self.recover(
-                raw_node, request_id, review_attempt=review_attempt
-            )
+            recovered = self.recover(raw_node, request_id)
             if recovered is not None:
                 return recovered
         current_time = datetime.fromtimestamp(
@@ -261,212 +317,120 @@ class MemAgent:
             tz=timezone.utc,
         ).isoformat()
         source_ids = source_node_ids or [raw_node.node_id]
-        retries = self.factory.settings.extract_coverage_retries
-        feedback = ""
-        for attempt in range(retries + 1):
-            last = attempt == retries
-            extracted = await self.extractor.extract_system1(
-                content=content,
-                current_time=current_time,
-                current_messages=messages,
-                feedback=feedback,
-            )
-            self.factory.cache.log_pipeline(
-                request_id=request_id,
-                stage="EXTRACT",
-                payload={"candidates": extracted, "attempt": attempt},
-            )
-            memories, meta = self._collect_new_memories(extracted, source_ids)
-            if not memories:
-                missed, confidence = await self._needs_reextract(
-                    content=content, extracted=extracted
-                )
-                if missed and not last:
-                    feedback = _EMPTY_FEEDBACK
-                    continue
-                pending: list[str] = []
-                if missed:
-                    if review_attempt:
-                        raise DecisionContextError(
-                            "Jev found durable information missed by extraction"
-                        )
-                    pending = [raw_node.node_id]
-                commit = CommitResult(
-                    False,
-                    "Jev: missed durable information; queued for review"
-                    if missed
-                    else "Jev: raw evidence only",
-                    [
-                        MemoryDecision(
-                            action="RAW_ONLY",
-                            source_ids=source_ids,
-                            reason=(
-                                "REEXTRACT: extraction missed durable information"
-                                if missed
-                                else "RAW_ONLY: no durable increment"
-                            ),
-                            confidence=confidence,
-                            review_reason="REEXTRACT" if missed else None,
-                        )
-                    ],
-                    pending,
-                )
-                if missed:
-                    self._queue_source_review(
-                        raw_node, reason="REEXTRACT", request_id=request_id
+        extracted = await self.extractor.extract_system1(
+            content=content,
+            current_time=current_time,
+            current_messages=messages,
+        )
+        self.factory.cache.log_pipeline(
+            request_id=request_id,
+            stage="EXTRACT",
+            payload={"candidates": extracted},
+        )
+        memories, meta = self._collect_new_memories(extracted, source_ids)
+        if not memories:
+            # Nothing explicit to store: the raw evidence stays searchable. No model
+            # call is spent asking whether the extractor missed something.
+            commit = CommitResult(
+                False,
+                "no explicit candidates; raw evidence only",
+                [
+                    MemoryDecision(
+                        action="RAW_ONLY",
+                        source_ids=source_ids,
+                        reason="RAW_ONLY: no explicit candidates",
                     )
-                await self._complete_without_plan(raw_node, request_id, commit)
-                if missed:
-                    self._queue_source_review(
-                        raw_node, reason="REEXTRACT", request_id=request_id
-                    )
-                return [], commit, not missed
-            try:
-                return await self._decide_and_commit(
-                    memories=memories,
-                    meta=meta,
-                    content=content,
-                    raw_node=raw_node,
-                    request_id=request_id,
-                    current_time=current_time,
-                    check_coverage=True,
-                )
-            except CoverageError:
-                if not last:
-                    feedback = _COVERAGE_FEEDBACK
-                    continue
-                if review_attempt:
-                    raise
-            logger.warning(
-                "write %s: coverage still rejected after %d regenerations; "
-                "committing candidates and queuing the source for review",
-                raw_node.node_id,
-                retries,
+                ],
             )
-            # Queue before committing: a crash after the commit must not lose it.
-            self._queue_source_review(
-                raw_node, reason="coverage", request_id=request_id
-            )
-            return await self._decide_and_commit(
-                memories=memories,
-                meta=meta,
-                content=content,
-                raw_node=raw_node,
-                request_id=request_id,
-                current_time=current_time,
-                check_coverage=False,
-                source_review=True,
-            )
-        raise AssertionError("unreachable")
+            await self._complete_without_plan(raw_node, request_id, commit)
+            return [], commit, True
+        return await self._decide_and_commit(
+            memories=memories,
+            meta=meta,
+            raw_node=raw_node,
+            request_id=request_id,
+            current_time=current_time,
+        )
 
     async def _decide_and_commit(
         self,
         *,
         memories: list[str],
         meta: list[dict],
-        content: str,
         raw_node: MemoryNode,
         request_id: str,
         current_time: str,
-        check_coverage: bool,
-        source_review: bool = False,
     ) -> tuple[list[str], CommitResult, bool]:
+        """One decision pass, one commit.
+
+        The commit checks revisions of the heads the plan actually links (no scope-wide
+        epoch: concurrent appends in the same scope do not invalidate each other).
+        Internally inconsistent relations become independent appends without another
+        decision pass; an externally changed linked head raises StaleDecisionError.
+        """
         scope = (raw_node.app_id, raw_node.user_id, raw_node.agent_id)
-        lock = self.factory.commit_locks.get("decision::" + "::".join(scope))
         request_key = self.request_key(raw_node, request_id)
-        plan_feedback: dict | None = None
-        last_plan_error: DecisionPlanError | None = None
+        # Extraction (the slow LLM part) overlaps freely; only decide+commit is
+        # serialized per scope so a concurrent write always sees the previous one's
+        # heads. That removes stale plans instead of retrying them.
+        async with self.factory.commit_locks.get("decision::" + "::".join(scope)):
+            return await self._decide_locked(
+                memories=memories,
+                meta=meta,
+                raw_node=raw_node,
+                request_id=request_id,
+                current_time=current_time,
+                scope=scope,
+                request_key=request_key,
+            )
 
-        def _rejected(exc: DecisionPlanError, ops: list[ReconcileOp]) -> dict:
-            return {
-                "constraint": str(exc),
-                "instructions": (
-                    "Reconsider the entire batch; every retiring current target may be consumed once. "
-                    "Distinct events and current state are separate dimensions. "
-                    "Preserve all candidates; choose corresponding earlier proposals for dependent versions when needed. "
-                    "An earlier proposal can be a relation target only if its action creates a memory or resolves to a current head. "
-                    "Do not guess or change source content. "
-                    "SKIP, OVERRIDE, MERGE, NEGATE, CONFLICT and HISTORICAL require a selected current head or materialized earlier proposal; DELETE requires a current head; NONE is not coverage."
-                ),
-                "decisions": [
-                    {
-                        "proposals": op.proposal_ids,
-                        "action": op.decision.get("action", {}).get("choice", op.op),
-                        "update_type": op.update_type,
-                        "targets": op.target_ids,
-                    }
-                    for op in ops
-                ],
-            }
+    async def _decide_locked(
+        self,
+        *,
+        memories: list[str],
+        meta: list[dict],
+        raw_node: MemoryNode,
+        request_id: str,
+        current_time: str,
+        scope: tuple[str, str, str],
+        request_key: str,
+    ) -> tuple[list[str], CommitResult, bool]:
+        ops = await self.reconciler.reconcile(
+            new_memories=memories,
+            new_memories_meta=meta,
+            app_id=raw_node.app_id,
+            user_id=raw_node.user_id,
+            agent_id=raw_node.agent_id,
+            current_time=current_time,
+            exclude_ids=[raw_node.node_id],
+            memory_at=raw_node.memory_at,
+        )
 
-        async def plan_and_commit() -> (
-            tuple[list[ReconcileOp], list[MemoryNode], list[str], bool]
-        ):
-            nonlocal plan_feedback, last_plan_error
-            last_plan_error = None
-            try:
-                ops = await self.reconciler.reconcile(
-                    new_memories=memories,
-                    new_memories_meta=meta,
-                    app_id=raw_node.app_id,
-                    user_id=raw_node.user_id,
-                    agent_id=raw_node.agent_id,
-                    current_time=current_time,
-                    exclude_ids=[raw_node.node_id],
-                    source_content=content,
-                    plan_feedback=plan_feedback,
-                    memory_at=raw_node.memory_at,
-                    check_coverage=check_coverage,
-                )
-            except DecisionPlanError as exc:
-                last_plan_error = exc
-                plan_feedback = _rejected(exc, [])
-                return [], [], [], False
-            try:
-                nodes, expected, archives = await self._prepare_nodes(
-                    ops, raw_node, request_id
-                )
-            except DecisionPlanError as exc:
-                last_plan_error = exc
-                plan_feedback = _rejected(exc, ops)
-                return ops, [], [], False
-            if source_review:
-                for op in ops:
-                    op.review_reason = op.review_reason or "coverage"
-            # Review intents are durable before the version plan; ReviewWorker
-            # resolves intents whose node was not committed or not flagged.
-            pending = self._queue_relation_reviews(ops, nodes, raw_node, request_key)
-            if source_review:
-                pending.append(raw_node.node_id)
-            committed = await asyncio.to_thread(
+        async def commit(plan: list[ReconcileOp]):
+            nodes, expected, archives = await self._prepare_nodes(plan, raw_node, request_id)
+            ok = await asyncio.to_thread(
                 self.factory.vector.apply_version_plan,
                 nodes=nodes,
                 expected=expected,
                 archives=archives,
                 scope=scope,
-                expected_epoch=ops[0].scope_epoch,
                 request_key=request_key,
-                decisions=[d.to_dict() for d in self.decisions(ops, nodes)],
-                needs_review=pending,
+                decisions=[d.to_dict() for d in self.decisions(plan, nodes)],
             )
-            return ops, nodes, archives, committed
+            return ok, nodes, archives
 
-        attempts = self.factory.settings.reconcile_retry_attempts
-        for attempt in range(attempts):
-            # First attempts overlap model I/O. A final scoped retry avoids a
-            # same-user stampede while leaving other scopes concurrent.
-            if attempt + 1 == attempts:
-                async with lock:
-                    ops, nodes, archives, committed = await plan_and_commit()
-            else:
-                ops, nodes, archives, committed = await plan_and_commit()
-            if committed:
-                return self._committed(
-                    ops, nodes, archives, raw_node, request_id, source_review
-                )
-        if last_plan_error is not None:
-            raise last_plan_error
-        raise StaleDecisionError("targets changed concurrently; retry write")
+        try:
+            ok, nodes, archives = await commit(ops)
+        except DecisionPlanError as exc:
+            logger.warning("write %s: %s; committing relations as independent memories",
+                           raw_node.node_id, exc)
+            ops = _independent(ops)
+            ok, nodes, archives = await commit(ops)
+        if not ok:
+            # Decide+commit holds the scope lock, so only an external writer (API
+            # update/delete) can move a linked head. Surface it; never re-plan.
+            raise StaleDecisionError("targets changed concurrently; retry write")
+        return self._committed(ops, nodes, archives, raw_node, request_id)
 
     def _committed(
         self,
@@ -475,7 +439,6 @@ class MemAgent:
         archives: list[str],
         raw_node: MemoryNode,
         request_id: str,
-        source_review: bool = False,
     ) -> tuple[list[str], CommitResult, bool]:
         self.factory.cache.log_pipeline(
             request_id=request_id,
@@ -488,65 +451,20 @@ class MemAgent:
                         "update_type": op.update_type,
                         "proposal_ids": op.proposal_ids,
                         "decision": op.decision,
-                        "review_reason": op.review_reason,
                     }
                     for op in ops
                 ],
             },
         )
-        # Re-assert the intents queued before the commit: a digest that ran while
-        # the plan was in flight may have resolved them as "not committed".
-        pending = self._queue_relation_reviews(
-            ops, nodes, raw_node, self.request_key(raw_node, request_id)
-        )
-        if source_review:
-            self._queue_source_review(
-                raw_node, reason="coverage", request_id=request_id
-            )
-            pending.append(raw_node.node_id)
         return (
             [n.node_id for n in nodes],
             CommitResult(
                 bool(nodes or archives),
                 "Jev relation decisions",
                 self.decisions(ops, nodes),
-                pending,
             ),
-            all(op.op == "RAW_ONLY" for op in ops) and not source_review,
+            all(op.op == "RAW_ONLY" for op in ops),
         )
-
-    def _queue_relation_reviews(
-        self,
-        ops: list[ReconcileOp],
-        nodes: list[MemoryNode],
-        raw: MemoryNode,
-        request_key: str,
-    ) -> list[str]:
-        by_pid = {
-            pid: node.node_id
-            for node in nodes
-            for pid in (node.custom or {}).get("proposal_ids", [])
-        }
-        pending: list[str] = []
-        for op in ops:
-            if not op.needs_review or op.op != "ADD":
-                continue
-            node_id = by_pid[op.proposal_ids[0]]
-            self.factory.cache.enqueue_review(
-                kind="relation",
-                app_id=raw.app_id,
-                user_id=raw.user_id,
-                agent_id=raw.agent_id,
-                node_id=node_id,
-                payload={
-                    "reason": op.review_reason,
-                    "candidates": op.review_targets,
-                    "source_id": raw.node_id,
-                    "request_key": request_key,
-                },
-            )
-            pending.append(node_id)
-        return pending
 
     @staticmethod
     def decisions(
@@ -570,7 +488,6 @@ class MemAgent:
                 source_ids=op.source_ids,
                 reason=op.reason,
                 confidence=op.decision.get("action", {}).get("confidence"),
-                review_reason=op.review_reason or None,
             )
             for op in ops
         ]
@@ -581,6 +498,9 @@ class MemAgent:
         raw: MemoryNode,
         request_id: str,
     ) -> tuple[list[MemoryNode], dict[str, int], list[str]]:
+        # Settle in-batch collisions first: it can rewrite ops (relation -> independent
+        # append), which changes which proposals need a node id.
+        ops = _settle_target_claims(ops, resolved={})
         adds = [op for op in ops if op.op == "ADD"]
         ids = {
             pid: str(
@@ -685,7 +605,7 @@ class MemAgent:
                         valid_from=op.valid_from,
                         valid_until=op.valid_until,
                         embedding=op.embedding,
-                        owner=raw.owner,
+                        owner=op.owner or raw.owner,
                     )
                 )
         # Dependencies are earlier proposal references. Every target must exist before apply.

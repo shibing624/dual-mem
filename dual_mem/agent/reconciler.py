@@ -1,17 +1,20 @@
 """Jev relation decisions over a bounded set of comparison material.
 
-Embedding similarity only *orders* which current heads Jev compares against when
-the scope exceeds the material or context budget. It never decides whether a
-candidate is written: every proposal still receives a Jev decision.
+Embedding similarity bounds which current heads Jev compares against. It never
+discards a candidate: without a comparison target the candidate is appended;
+otherwise Jev chooses its relation.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+
+import numpy as np
 
 from dual_mem.errors import CoverageError, DecisionContextError, DecisionPlanError
 from dual_mem.isolation import build_filter
@@ -24,7 +27,6 @@ logger = logging.getLogger("dual_mem.agent.reconciler")
 
 _ACTIONS = {
     "ADD_OVERRIDE": "Replace a corresponding PERSISTENT STATE VALUE or explicitly correct a prior claim. Current residence replaces previous residence, even when returning to an ancestor value. NEVER replace a different completed event: two moves are two retained events.",
-    "ADD_MERGE": "Complementary fragments about ONE object; preserve every number, source and distinct event.",
     "ADD_SUPPLEMENT": "Append a new dimension or a DISTINCT OCCURRENCE. A genuinely different completed move/purchase/visit is an independent event, even when it changes a state or repeats an earlier value. Repeating a report of the SAME occurrence is SKIP, not a new event. Keep all earlier events. Initial state without baseline also belongs here.",
     "ADD_TEMPORAL": "Explicit LIMITED exception (this week/temporarily/until a date) coexisting with a long-term baseline. 'Currently/目前/现在' alone is not a limited exception.",
     "ADD_NEGATE": "Explicit termination or denial of an existing claim.",
@@ -39,7 +41,7 @@ _ACTIONS = {
 
 _WITH_TARGET = (
     "ADD_OVERRIDE",
-    "ADD_MERGE",
+    "ADD_SUPPLEMENT",
     "ADD_NEGATE",
     "ADD_CONFLICT",
     "SKIP",
@@ -48,7 +50,7 @@ _WITH_TARGET = (
     "NEED_CONTEXT",
 )
 # A source older than its target may not retire that target: OVERRIDE, NEGATE,
-# DELETE and MERGE all end the head's currency, so none is offered.
+# DELETE ends the head's currency too, so it is not offered here.
 _WITH_NEWER_TARGET = (
     "ADD_HISTORICAL",
     "ADD_CONFLICT",
@@ -66,8 +68,18 @@ _WITHOUT_TARGET = (
 _TARGET_REQUIRED_ACTIONS: set[str] = {
     *_WITH_TARGET,
     *_WITH_NEWER_TARGET,
-} - {"INVALID", "NEED_CONTEXT"}
+} - {"INVALID", "NEED_CONTEXT", "ADD_SUPPLEMENT"}
 _OPTION_CHARS = 240
+# Older versions shown per candidate head; the newest ones decide currency.
+_HISTORY_LIMIT = 3
+_TARGET_INSTRUCTIONS = (
+    "For proposal id={pid}, select the ONE executable relation target. Option labels are short; "
+    "the full nodes and their history_versions are in state.current (earlier proposals in state.proposals). "
+    "Select a target only when this proposal repeats, replaces, negates, retracts or conflicts with it, "
+    "or is an older report of that same state. Match the SAME dimension: a residence state targets a "
+    "residence state, never a move event. A distinct completed event, a new dimension, an explicit "
+    "limited exception or a complementary detail is NONE, even when the topic is related."
+)
 # Instructions of the target/action/coverage questions plus JSON framing.
 _QUESTION_OVERHEAD = 4000
 
@@ -87,7 +99,7 @@ def _action_question(
             else (
                 "Multiple targets cannot be represented by one SKIP alias. "
                 if older_than_target
-                else "Multiple targets cannot be represented by one SKIP alias; use MERGE when they jointly cover the claim. "
+                else "Multiple targets cannot be represented by one SKIP alias; use ADD_SUPPLEMENT when they jointly cover the claim. "
             )
         )
         if older_than_target:
@@ -107,7 +119,10 @@ def _action_question(
                 if allow_delete
                 else "An earlier proposal cannot be deleted before it is committed. "
             )
-            merge_instruction = "ADD_MERGE when both are fragments of one object and every unaffected fact survives. "
+            # No ADD_MERGE: combining texts costs a generation plus a losslessness
+            # check per batch and fails on any omitted detail. Complementary fragments
+            # are written as separate memories and read as a group (same object).
+            merge_instruction = "Use ADD_SUPPLEMENT when both are complementary fragments of one object; both are kept."
         instructions = (
             f"Decide the relation for proposal id={pid}. "
             "state.selected_targets already names one or more current heads or earlier proposals. "
@@ -155,6 +170,7 @@ class ReconcileOp:
     content: str | None = None
     layer: str | None = None
     kind: str = "fact"
+    owner: str = ""
     supersedes: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     memory_id: str | None = None
@@ -171,10 +187,6 @@ class ReconcileOp:
     decision: dict[str, Any] = field(default_factory=dict)
     scope_epoch: int = 0
     target_ids: list[str] = field(default_factory=list)
-    # Written as an independent SUPPLEMENT until review resolves its relation.
-    needs_review: bool = False
-    review_reason: str = ""
-    review_targets: list[str] = field(default_factory=list)
     # Proposal embedding reused at write time when the content is unchanged.
     embedding: list[float] | None = None
 
@@ -197,40 +209,18 @@ def _timestamp(value: Any) -> int | None:
     )
 
 
-def collect_merged_timestamps(
-    *,
-    update_type: str,
-    new_memory_at: int | None,
-    old_nodes: list[MemoryNode],
-    extra: list[int] | None = None,
-) -> list[int]:
-    if update_type != "MERGE":
-        return []
-    stamps = [new_memory_at, *(extra or [])]
-    for old in old_nodes:
-        stamps.append(old.memory_at)
-        stamps.extend((old.custom or {}).get("merged_timestamps") or [])
-    return sorted({int(ts) for ts in stamps if ts is not None})
-
-
-def reflect_custom(
-    op: ReconcileOp, *, merged_timestamps: list[int] | None = None
-) -> dict:
+def reflect_custom(op: ReconcileOp) -> dict:
     return {
         key: value
         for key, value in {
             "update_type": op.update_type,
             "temporal_scope": op.temporal_scope,
             "negation": op.negation,
-            "merged_timestamps": merged_timestamps,
             "conflicts_with": op.conflicts_with,
             "source_ids": op.source_ids,
             "proposal_ids": op.proposal_ids,
             "decision": op.decision,
             "kind": op.kind,
-            "needs_review": op.needs_review,
-            "review_reason": op.review_reason,
-            "review_targets": op.review_targets,
         }.items()
         if value
     }
@@ -244,16 +234,7 @@ def build_apply_custom(
     extra: list[int] | None = None,
     source_node_id: str = "",
 ) -> dict:
-    old = list(vector.get_by_ids(op.supersedes).values()) if op.supersedes else []
-    custom = reflect_custom(
-        op,
-        merged_timestamps=collect_merged_timestamps(
-            update_type=op.update_type,
-            new_memory_at=new_memory_at,
-            old_nodes=old,
-            extra=extra,
-        ),
-    )
+    custom = reflect_custom(op)
     if source_node_id:
         custom["source_node_id"] = source_node_id
     return custom
@@ -266,7 +247,7 @@ def _date(ts: int | None) -> str:
 
 
 class Reconciler:
-    """Batch atomic Jev questions, then generate text only for selected MERGEs."""
+    """Batch atomic Jev questions, then execute the resulting relations."""
 
     def __init__(
         self,
@@ -279,8 +260,12 @@ class Reconciler:
         batch_size: int = 12,
         max_state_chars: int = 60_000,
         review_confidence: float = 0.0,
+        target_limit: int = 5,
+        relation_threshold: float = 0.6,
     ) -> None:
         self.jev, self.llm, self.embed, self.vector = jev, llm, embed, vector
+        self.target_limit = target_limit
+        self.relation_threshold = relation_threshold
         self.candidate_limit, self.batch_size = candidate_limit, batch_size
         self.max_state_chars = max_state_chars
         self.review_confidence = review_confidence
@@ -342,23 +327,20 @@ class Reconciler:
 
     @staticmethod
     def _context_node(node: MemoryNode) -> dict:
-        return {
+        material = {
             "id": node.node_id,
             "content": node.content,
             "layer": node.layer.value,
             "kind": node.kind,
             "is_latest": node.is_latest,
-            "revision": node.revision,
             "memory_at": node.memory_at,
             "valid_from": node.valid_from,
             "valid_until": node.valid_until,
-            "supersedes": node.supersedes,
             "update_type": (node.custom or {}).get("update_type"),
-            "source_ids": (node.custom or {}).get("source_ids", []),
             "owner": node.owner,
-            "session_id": node.session_id,
             "conflicts_with": (node.custom or {}).get("conflicts_with", []),
         }
+        return {key: value for key, value in material.items() if value not in (None, "", [])}
 
     @staticmethod
     def _option(item: dict) -> str:
@@ -369,93 +351,32 @@ class Reconciler:
         kind = item.get("kind") or "fact"
         return f"[{item.get('layer')}/{kind} {_date(item.get('memory_at'))}] {text}"
 
-    async def _route(
+    async def _neighbours(
         self,
         *,
         where: dict,
         meta: list[dict],
         excluded: set[str],
         embeddings: dict[str, list[float]],
-    ) -> list[MemoryNode]:
-        """Order current heads by their best similarity to any proposal."""
+    ) -> dict[str, list[MemoryNode]]:
+        """Per proposal: the few current heads similar enough to be a relation target."""
         missing = [m for m in meta if m["id"] not in embeddings]
         if missing:
             vectors = await self.embed.embed_batch([m["content"] for m in missing])
             embeddings.update({m["id"]: v for m, v in zip(missing, vectors)})
-        best: dict[str, MemoryNode] = {}
+        out: dict[str, list[MemoryNode]] = {}
         for item in meta:
-            for node in self.vector.query(
+            nodes = self.vector.query(
                 embedding=embeddings[item["id"]],
                 where=where,
-                top_k=self.candidate_limit + len(excluded),
-            ):
-                if node.node_id in excluded:
-                    continue
-                if node.node_id not in best or node.score > best[node.node_id].score:
-                    best[node.node_id] = node
-        ranked = sorted(best.values(), key=lambda n: n.score, reverse=True)
-        return ranked[: self.candidate_limit]
-
-    async def _material(
-        self,
-        *,
-        scope: tuple[str, str, str],
-        meta: list[dict],
-        excluded: set[str],
-        base_chars: int,
-        embeddings: dict[str, list[float]],
-    ) -> list[tuple[MemoryNode, dict]]:
-        where = build_filter(
-            app_ids=[scope[0]],
-            user_id=scope[1],
-            agent_ids=[scope[2]],
-            layers=[Layer.L1_FACT, Layer.L2_PROFILE, Layer.L3_DERIVED],
-            latest_only=True,
-            statuses=[MemoryStatus.ACTIVE],
-        )
-        heads = [
-            n
-            for n in self.vector.get_many(
-                where, limit=self.candidate_limit + len(excluded) + 1
+                top_k=self.target_limit + len(excluded),
             )
-            if n.node_id not in excluded
-        ]
-        ranked = len(heads) > self.candidate_limit
-        if ranked:
-            heads = await self._route(
-                where=where, meta=meta, excluded=excluded, embeddings=embeddings
-            )
-
-        def contexts(nodes: list[MemoryNode]) -> list[tuple[MemoryNode, dict]]:
-            return [
-                (n, dict(self._context_node(n), history_versions=self.history(n, scope)))
+            out[item["id"]] = [
+                n
                 for n in nodes
-            ]
-
-        def size(item: dict) -> int:
-            return len(json.dumps(item, ensure_ascii=False)) + _OPTION_CHARS + 64
-
-        material = contexts(heads)
-        sizes = [size(c) for _, c in material]
-        if base_chars + sum(sizes) > self.max_state_chars and not ranked:
-            material = contexts(
-                await self._route(
-                    where=where, meta=meta, excluded=excluded, embeddings=embeddings
-                )
-            )
-            sizes = [size(c) for _, c in material]
-        dropped = 0
-        while material and base_chars + sum(sizes) > self.max_state_chars:
-            material.pop()
-            sizes.pop()
-            dropped += 1
-        if dropped:
-            logger.warning(
-                "reconcile scope=%s: %d lowest-ranked heads omitted to fit the Jev budget",
-                scope,
-                dropped,
-            )
-        return material
+                if n.node_id not in excluded and n.score >= self.relation_threshold
+            ][: self.target_limit]
+        return out
 
     async def reconcile(
         self,
@@ -470,8 +391,21 @@ class Reconciler:
         source_content: str = "",
         plan_feedback: dict | None = None,
         memory_at: int | None = None,
-        check_coverage: bool = True,
+        check_coverage: bool = False,
     ) -> list[ReconcileOp]:
+        """Decide every proposal with at most two Jev rounds over a small state.
+
+        - A proposal with no current head or earlier proposal above
+          ``relation_threshold`` cosine has nothing to update, cover or conflict with:
+          it is appended directly (SUPPLEMENT, or TEMPORAL when it carries an explicit
+          validity bound). No model call is spent on it.
+        - Every other proposal gets ONE target question whose options are only its own
+          nearest heads/earlier proposals (<= ``target_limit``), then one action
+          question when a target was chosen. Choosing NONE appends directly.
+        - The Jev state holds proposals and the union of candidate heads only; the
+          source conversation is not resent (candidates are already faithful text).
+        """
+        del source_content, plan_feedback, check_coverage
         if not new_memories:
             return []
         if len(new_memories) != len(new_memories_meta):
@@ -482,140 +416,107 @@ class Reconciler:
             dict(m, content=content, id=f"p{i}")
             for i, (content, m) in enumerate(zip(new_memories, new_memories_meta))
         ]
-        base_state: dict[str, Any] = {
-            "source": source_content,
-            "current_time": current_time,
-            "proposals": meta,
-        }
-        if plan_feedback:
-            base_state["previous_plan_rejected"] = plan_feedback
+        proposal_ids = {item["id"] for item in meta}
         base_chars = (
-            len(json.dumps(base_state, ensure_ascii=False))
-            + len(meta) * (_OPTION_CHARS + 64)
+            len(json.dumps({"current_time": current_time, "proposals": meta}, ensure_ascii=False))
             + _QUESTION_OVERHEAD
         )
         if base_chars > self.max_state_chars:
             raise DecisionContextError(
                 "source and proposals exceed the Jev context budget; split the source"
             )
-        embeddings: dict[str, list[float]] = {}
-        material = await self._material(
-            scope=scope,
-            meta=meta,
-            excluded=set(exclude_ids or []),
-            base_chars=base_chars,
-            embeddings=embeddings,
+        where = build_filter(
+            app_ids=[scope[0]],
+            user_id=scope[1],
+            agent_ids=[scope[2]],
+            layers=[Layer.L1_FACT, Layer.L2_PROFILE, Layer.L3_DERIVED],
+            latest_only=True,
+            statuses=[MemoryStatus.ACTIVE],
         )
-        existing = [n for n, _ in material]
-        current = [c for _, c in material]
-        by_id = {n.node_id: n for n in existing}
-        head_options = {n.node_id: self._option(c) for n, c in zip(existing, current)}
-        proposal_ids = {item["id"] for item in meta}
-        ops: list[ReconcileOp] = []
-        for start in range(0, len(meta), self.batch_size):
-            proposals = meta[start : start + self.batch_size]
-            questions: dict[str, dict] = {}
-            target_options: dict[str, dict[str, str]] = {}
-            if (
-                check_coverage
-                and start == 0
-                and source_content
-                and any(m.get("layer") != Layer.L3_DERIVED.value for m in meta)
+        embeddings: dict[str, list[float]] = {}
+        near = await self._neighbours(
+            where=where, meta=meta, excluded=set(exclude_ids or []), embeddings=embeddings
+        )
+        by_id: dict[str, MemoryNode] = {n.node_id: n for ns in near.values() for n in ns}
+
+        # Earlier proposals of the same write are relation targets only when similar.
+        vec = {pid: np.asarray(v, dtype=float) for pid, v in embeddings.items()}
+        for pid in vec:
+            norm = float(np.linalg.norm(vec[pid]))
+            if norm:
+                vec[pid] = vec[pid] / norm
+        options: dict[str, dict[str, str]] = {}
+        contexts: dict[str, dict] = {}
+        for idx, item in enumerate(meta):
+            pid = item["id"]
+            opts: dict[str, str] = {}
+            for node in near[pid]:
+                if node.node_id not in contexts:
+                    contexts[node.node_id] = dict(
+                        self._context_node(node),
+                        history_versions=self.history(node, scope)[:_HISTORY_LIMIT],
+                    )
+                opts[node.node_id] = self._option(contexts[node.node_id])
+            earlier = sorted(
+                (
+                    (float(vec[pid] @ vec[p["id"]]), p)
+                    for p in meta[:idx]
+                ),
+                key=lambda x: -x[0],
+            )
+            for sim, p in earlier[: self.target_limit]:
+                if sim >= self.relation_threshold:
+                    opts[p["id"]] = self._option(p)
+            options[pid] = opts
+
+        ops: list[ReconcileOp | None] = [None] * len(meta)
+        undecided: list[int] = []
+        for idx, item in enumerate(meta):
+            if options[item["id"]]:
+                undecided.append(idx)
+            else:
+                ops[idx] = self._routed_op(item, proposal_ids, by_id, scope_epoch)
+
+        async def decide(chunk: list[int]) -> None:
+            proposals = [meta[i] for i in chunk]
+            head_ids = {
+                nid for item in proposals for nid in options[item["id"]] if nid in contexts
+            }
+            refs = {
+                nid for item in proposals for nid in options[item["id"]] if nid in proposal_ids
+            }
+            state: dict[str, Any] = {
+                "current_time": current_time,
+                "proposals": [p for p in meta if p["id"] in refs or p in proposals],
+                "current": [contexts[nid] for nid in contexts if nid in head_ids],
+            }
+            # Keep the state inside the Jev budget by dropping the least similar heads.
+            while (
+                state["current"]
+                and len(json.dumps(state, ensure_ascii=False)) + _QUESTION_OVERHEAD
+                > self.max_state_chars
             ):
-                questions["coverage"] = {
+                dropped = state["current"].pop()["id"]
+                for item in proposals:
+                    options[item["id"]].pop(dropped, None)
+            questions = {
+                f"{item['id']}:target": {
                     "type": "choice",
-                    "instructions": "Do the complete candidate proposals faithfully cover all explicit meaningful facts, updates, numbers and independent events in the incoming source? Do not demand inferred preferences or restated context. Check source text, not a coverage declaration. Missing explicit updates or unsupported invented candidates require INVALID.",
+                    "instructions": _TARGET_INSTRUCTIONS.format(pid=item["id"]),
                     "criteria": {
-                        "VALID": "Faithful explicit coverage",
-                        "INVALID": "Missing or invented meaningful content",
+                        **options[item["id"]],
+                        "NONE": "No corresponding existing target",
                     },
                 }
-            for offset, item in enumerate(proposals):
-                pid = item["id"]
-                earlier = meta[: start + offset]
-                options = dict(head_options)
-                options.update({p["id"]: self._option(p) for p in earlier})
-                if len(options) > 253:
-                    raise DecisionContextError(
-                        "proposal target choices exceed Jev budget; split source into smaller writes"
-                    )
-                target_options[pid] = options
-                if not options:
-                    questions[f"{pid}:action"] = _action_question(
-                        pid, has_targets=False
-                    )
-                if item.get("layer") != Layer.L3_DERIVED.value:
-                    questions[f"{pid}:representation"] = {
-                        "type": "choice",
-                        "instructions": f"Choose representation for candidate {pid} using source evidence and corresponding current heads. Current state/location, explicit preference or identity belongs to PROFILE even when phrased as a report. Preserve a corresponding dimension's representation across updates. A distinct past relocation event belongs to FACT. Explicit intentions are not inferred goals.",
-                        "criteria": {
-                            "FACT": "Explicit fact or distinct event",
-                            "PROFILE": "State, identity or profile dimension",
-                            "INTENTION": "Explicit planned action",
-                        },
-                    }
-                if options:
-                    questions[f"{pid}:target"] = {
-                        "type": "choice",
-                        "instructions": f"For proposal id={pid}, select the ONE executable relation target before deciding its action. Option labels are short; the full nodes and their history_versions are in state.current. Select a current head or earlier proposal only when this proposal covers, replaces, merges, negates or conflicts with it, or is an older report of that same state. Choose NONE for an independent supplement, an explicit limited TEMPORAL exception, or RAW_ONLY, even when a baseline is relevant context. An explicit retraction must select the persisted current head directly because an earlier proposal cannot be deleted. Do not select an ancestor merely because its content matches. Match the SAME representation and dimension: a residence state must target a residence state, never a move event. A completed event targets NONE unless explicitly correcting that SAME occurrence. A-to-B then B-to-A are different events; choose NONE. For repeated residence, select the residence profile that covers the claim, not a move mentioning that city. Choose MULTIPLE if more than one is required.",
-                        "criteria": {
-                            **options,
-                            "NONE": "No corresponding existing target",
-                            "MULTIPLE": "Requires multiple targets; needs expanded evaluation",
-                        },
-                    }
-            state = dict(
-                base_state,
-                current=current,
-                proposals=(
-                    meta if "coverage" in questions else meta[: start + len(proposals)]
-                ),
-            )
+                for item in proposals
+            }
             answers = await self._evaluate(state=state, questions=questions)
-            if "coverage" in questions and answers["coverage"].choice != "VALID":
-                raise CoverageError("Jev rejected incomplete source coverage")
             targets_by_pid: dict[str, list[str]] = {}
-            uncertain: dict[str, list[str]] = {}
             for item in proposals:
-                pid = item["id"]
-                target_answer = answers.get(f"{pid}:target")
-                target = target_answer.choice if target_answer else "NONE"
-                options = target_options[pid]
-                if target not in (*options, "NONE", "MULTIPLE"):
-                    raise DecisionContextError(
-                        "unknown target returned by decision provider"
-                    )
-                if target == "MULTIPLE":
-                    include = {
-                        f"{pid}:{nid}": {
-                            "type": "choice",
-                            "instructions": f"Is target {nid} required as corresponding evidence for proposal {pid}?",
-                            "criteria": {
-                                "INCLUDE": "Required corresponding evidence",
-                                "EXCLUDE": "Unrelated",
-                                "UNSURE": "Insufficient evidence",
-                            },
-                        }
-                        for nid in options
-                    }
-                    selected = await self._evaluate(state=state, questions=include)
-                    targets = [
-                        nid
-                        for nid in options
-                        if selected[f"{pid}:{nid}"].choice == "INCLUDE"
-                    ]
-                    if any(a.choice == "UNSURE" for a in selected.values()):
-                        # Relation is unresolved: append independently, review later.
-                        uncertain[pid] = [
-                            nid
-                            for nid in options
-                            if selected[f"{pid}:{nid}"].choice != "EXCLUDE"
-                            and nid not in proposal_ids
-                        ]
-                        targets = []
-                else:
-                    targets = [] if target == "NONE" else [str(target)]
-                targets_by_pid[pid] = targets
+                choice = answers[f"{item['id']}:target"].choice
+                if choice not in (*options[item["id"]], "NONE"):
+                    raise DecisionContextError("unknown target returned by decision provider")
+                targets_by_pid[item["id"]] = [] if choice == "NONE" else [str(choice)]
 
             def older(targets: list[str]) -> bool:
                 return memory_at is not None and any(
@@ -627,41 +528,91 @@ class Reconciler:
             action_questions = {
                 f"{item['id']}:action": _action_question(
                     item["id"],
-                    has_targets=bool(targets_by_pid[item["id"]]),
+                    has_targets=True,
                     allow_delete=not any(
-                        target in proposal_ids for target in targets_by_pid[item["id"]]
+                        t in proposal_ids for t in targets_by_pid[item["id"]]
                     ),
-                    allow_skip=len(targets_by_pid[item["id"]]) == 1,
+                    allow_skip=True,
                     older_than_target=older(targets_by_pid[item["id"]]),
                 )
                 for item in proposals
-                if f"{item['id']}:action" not in answers
+                if targets_by_pid[item["id"]]
             }
             if action_questions:
                 answers.update(
                     await self._evaluate(
-                        state={**state, "selected_targets": targets_by_pid},
+                        state={**state, "selected_targets": {
+                            k: v for k, v in targets_by_pid.items() if v
+                        }},
                         questions=action_questions,
                     )
                 )
-
-            for item in proposals:
-                ops.append(
-                    self._build_op(
-                        item=item,
-                        answers=answers,
-                        targets=targets_by_pid[item["id"]],
-                        uncertain=uncertain.get(item["id"]),
-                        proposal_ids=proposal_ids,
-                        by_id=by_id,
-                        scope_epoch=scope_epoch,
+            for i, item in zip(chunk, proposals):
+                if not targets_by_pid[item["id"]]:
+                    ops[i] = self._routed_op(
+                        item,
+                        proposal_ids,
+                        by_id,
+                        scope_epoch,
+                        target_answer=answers[f"{item['id']}:target"],
                     )
+                    continue
+                ops[i] = self._build_op(
+                    item=item,
+                    answers=answers,
+                    targets=targets_by_pid[item["id"]],
+                    uncertain=None,
+                    proposal_ids=proposal_ids,
+                    by_id=by_id,
+                    scope_epoch=scope_epoch,
                 )
-        await self._generate_merges(ops, by_id)
-        for op in ops:
-            if op.op == "ADD" and op.update_type != "MERGE":
+
+        chunks = [
+            undecided[i : i + self.batch_size]
+            for i in range(0, len(undecided), self.batch_size)
+        ]
+        if chunks:
+            await asyncio.gather(*(decide(c) for c in chunks))
+        result = [op for op in ops if op is not None]
+        for op in result:
+            if op.op == "ADD":
                 op.embedding = embeddings.get(op.proposal_ids[0])
-        return ops
+        return result
+
+    def _routed_op(
+        self,
+        item: dict,
+        proposal_ids: set[str],
+        by_id: dict[str, MemoryNode],
+        scope_epoch: int,
+        target_answer: JevAnswer | None = None,
+    ) -> ReconcileOp:
+        """Independent append for a proposal with no relation target."""
+        limited = bool(item.get("valid_until") or item.get("temporal_scope"))
+        action = "ADD_TEMPORAL" if limited else "ADD_SUPPLEMENT"
+        answers = {
+            f"{item['id']}:action": JevAnswer(
+                type="choice",
+                choice=action,
+                confidence=1.0,
+                probabilities={action: 1.0},
+            )
+        }
+        if target_answer is not None:
+            answers[f"{item['id']}:target"] = target_answer
+        op = self._build_op(
+            item=item,
+            answers=answers,
+            targets=[],
+            uncertain=None,
+            proposal_ids=proposal_ids,
+            by_id=by_id,
+            scope_epoch=scope_epoch,
+        )
+        op.decision["routed"] = (
+            "jev_target_none" if target_answer is not None else "no_similar_target"
+        )
+        return op
 
     def _build_op(
         self,
@@ -681,28 +632,28 @@ class Reconciler:
         if action not in _ACTIONS:
             raise DecisionContextError("unsupported action returned by decision provider")
         relation = action in _TARGET_REQUIRED_ACTIONS
-        if action != "NEED_CONTEXT" and action != "INVALID" and relation != bool(targets):
+        # ADD_SUPPLEMENT is offered with a selected target (complementary fragment):
+        # the target is then context only and no link is written.
+        if (
+            action not in ("NEED_CONTEXT", "INVALID")
+            and not (action == "ADD_SUPPLEMENT" and targets)
+            and relation != bool(targets)
+        ):
             raise DecisionContextError(f"{action} does not match the selected target")
         if action == "DELETE" and any(t in proposal_ids for t in targets):
             raise DecisionContextError("DELETE cannot target an uncommitted proposal")
         if action == "SKIP" and len(targets) != 1:
             raise DecisionContextError("SKIP requires exactly one covering target")
 
-        review_reason = ""
-        review_targets: list[str] = []
+        # An undecided relation (NEED_CONTEXT, ambiguous MULTIPLE, low confidence) is
+        # written as an independent SUPPLEMENT immediately. Nothing is queued for a
+        # later review pass: a deferred relation that is never revisited costs more
+        # than the occasional extra memory.
         effective = action
-        if uncertain is not None and action not in ("RAW_ONLY", "INVALID"):
-            review_reason, review_targets = "uncertain multiple targets", uncertain
-            if action == "NEED_CONTEXT":
-                effective = "ADD_SUPPLEMENT"
-        elif action == "NEED_CONTEXT":
-            review_reason, review_targets = "NEED_CONTEXT", list(targets)
+        if action == "NEED_CONTEXT" or (
+            uncertain is not None and action not in ("RAW_ONLY", "INVALID")
+        ) or (relation and (answer.confidence or 0.0) < self.review_confidence):
             effective = "ADD_SUPPLEMENT"
-        elif relation and (answer.confidence or 0.0) < self.review_confidence:
-            review_reason = f"low-confidence {action}"
-            review_targets = list(targets)
-            effective = "ADD_SUPPLEMENT"
-        review_targets = [t for t in review_targets if t not in proposal_ids]
         linked = targets if effective in _TARGET_REQUIRED_ACTIONS else []
         update_type = effective.removeprefix("ADD_") if effective.startswith("ADD_") else ""
         if update_type == "HISTORICAL" and any(t not in by_id for t in linked):
@@ -722,10 +673,17 @@ class Reconciler:
             kind = {"FACT": "fact", "PROFILE": "profile", "INTENTION": "intention"}[
                 representation.choice
             ]
-        valid_from = _timestamp(item.get("valid_from"))
-        valid_until = _timestamp(item.get("valid_until"))
+        # An unusable validity bound is dropped, never fatal: the candidate text is
+        # still a real memory and refusing the whole write loses it.
+        try:
+            valid_from = _timestamp(item.get("valid_from"))
+            valid_until = _timestamp(item.get("valid_until"))
+        except DecisionContextError:
+            logger.warning("candidate %s: dropping malformed validity bound", pid)
+            valid_from = valid_until = None
         if valid_from is not None and valid_until is not None and valid_from > valid_until:
-            raise DecisionContextError("invalid temporal range")
+            logger.warning("candidate %s: dropping inverted validity range", pid)
+            valid_from = valid_until = None
         decision: dict[str, Any] = {
             "action": answer.model_dump(),
             "target": target_answer.model_dump() if target_answer else None,
@@ -737,7 +695,8 @@ class Reconciler:
             content=item["content"],
             layer=layer,
             kind=kind,
-            supersedes=(linked if update_type in ("OVERRIDE", "NEGATE", "MERGE") else []),
+            owner=item.get("owner", ""),
+            supersedes=(linked if update_type in ("OVERRIDE", "NEGATE") else []),
             target_ids=linked,
             memory_id=linked[0] if linked and effective in ("DELETE", "SKIP") else None,
             update_type=update_type,
@@ -753,103 +712,7 @@ class Reconciler:
             decision=decision,
             reason=_ACTIONS[action],
             scope_epoch=scope_epoch,
-            needs_review=bool(review_reason),
-            review_reason=review_reason,
-            review_targets=review_targets,
         )
-
-    async def _generate_merges(
-        self, ops: list[ReconcileOp], by_id: dict[str, MemoryNode]
-    ) -> None:
-        merges = [op for op in ops if op.update_type == "MERGE"]
-        if not merges:
-            return
-        # One generation call for the whole selected merge set.
-        ops_by_id = {pid: op for op in ops for pid in op.proposal_ids}
-
-        def dependency_of(nid: str, path: set[str]) -> ReconcileOp:
-            if nid in path:
-                raise DecisionContextError("cyclic merge dependency")
-            dependency = ops_by_id.get(nid)
-            if dependency is None:
-                raise DecisionContextError("missing merge dependency")
-            if dependency.op != "ADD" and not (
-                dependency.op == "SKIP" and dependency.memory_id
-            ):
-                raise DecisionPlanError(
-                    "operation targets an earlier proposal that produced no memory"
-                )
-            return dependency
-
-        def fragments(nid: str, path: set[str]) -> list[str]:
-            if nid in by_id:
-                return [by_id[nid].content]
-            dependency = dependency_of(nid, path)
-            if dependency.op == "SKIP":
-                return fragments(str(dependency.memory_id), path | {nid})
-            texts = [dependency.content or ""]
-            if dependency.update_type == "MERGE":
-                for target in dependency.supersedes:
-                    texts.extend(fragments(target, path | {nid}))
-            return texts
-
-        def sources(nid: str, path: set[str]) -> list[str]:
-            if nid in by_id:
-                return list((by_id[nid].custom or {}).get("source_ids") or [nid])
-            dependency = dependency_of(nid, path)
-            if dependency.op == "SKIP":
-                return sources(str(dependency.memory_id), path | {nid})
-            result = list(dependency.source_ids)
-            if dependency.update_type == "MERGE":
-                for target in dependency.supersedes:
-                    result.extend(sources(target, path | {nid}))
-            return result
-
-        material = [
-            {
-                "proposal_id": op.proposal_ids[0],
-                "new": op.content,
-                "old": [text for nid in op.supersedes for text in fragments(nid, set())],
-            }
-            for op in merges
-        ]
-        data = await self.llm.chat_json(
-            system='Combine compatible memory fragments without judging relations. Preserve every number, event and unrelated dimension. Return {"merges":[{"proposal_id":...,"content":...}]}. Never omit facts.',
-            user=json.dumps(material, ensure_ascii=False),
-            max_tokens=4096,
-        )
-        generated = {m["proposal_id"]: m["content"] for m in data.get("merges", [])}
-        if any(not isinstance(text, str) or not text.strip() for text in generated.values()):
-            raise DecisionContextError("merge generation returned empty content")
-        if set(generated) != {op.proposal_ids[0] for op in merges}:
-            raise DecisionContextError("merge generation lacks source coverage")
-        verify = {
-            op.proposal_ids[0]: {
-                "type": "choice",
-                "instructions": f"Does merged text for {op.proposal_ids[0]} preserve all meaningful facts, all numbers and all distinct events from sources?",
-                "criteria": {
-                    "VALID": "Lossless and faithful",
-                    "INVALID": "Missing or invented detail",
-                },
-            }
-            for op in merges
-        }
-        checked = await self._evaluate(
-            state={"sources": material, "merged": generated}, questions=verify
-        )
-        if any(a.choice != "VALID" for a in checked.values()):
-            raise DecisionContextError("Jev rejected lossy merge")
-        for op in merges:
-            op.content = generated[op.proposal_ids[0]]
-            op.source_ids = list(
-                dict.fromkeys(
-                    [
-                        *op.source_ids,
-                        *(sid for target in op.supersedes for sid in sources(target, set())),
-                    ]
-                )
-            )
-
 
 __all__ = [
     "CoverageError",
@@ -858,6 +721,5 @@ __all__ = [
     "ReconcileOp",
     "Reconciler",
     "build_apply_custom",
-    "collect_merged_timestamps",
     "reflect_custom",
 ]

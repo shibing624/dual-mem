@@ -6,6 +6,15 @@ from dual_mem.config import Settings
 from dual_mem.types import Layer, MemoryStatus
 
 
+def _head(embed, content, nid="seed"):
+    from dual_mem.types import MemoryNode
+
+    return MemoryNode(
+        node_id=nid, content=content, layer=Layer.L1_FACT, app_id="default",
+        user_id="u", embedding=embed.embed_sync(content),
+    )
+
+
 def client(tmp_storage, embed, extract, jev=None, mode="system1", **kw):
     return MemoryClient(
         settings=Settings(storage_dir=tmp_storage, mode=mode, **kw),
@@ -18,14 +27,7 @@ def client(tmp_storage, embed, extract, jev=None, mode="system1", **kw):
 async def test_one_generation_and_two_jev_phases_for_facts_profiles_intentions(
     tmp_storage, fake_embed
 ):
-    def script(state, questions):
-        return {
-            "p0:representation": "FACT",
-            "p1:representation": "PROFILE",
-            "p2:representation": "INTENTION",
-        }
-
-    jev = FakeJev(script)
+    jev = FakeJev()
     c = client(
         tmp_storage,
         fake_embed,
@@ -42,6 +44,8 @@ async def test_one_generation_and_two_jev_phases_for_facts_profiles_intentions(
     nodes = c.factory.vector.get_by_ids(result.extra_node_ids)
     assert {n.layer for n in nodes.values()} == {Layer.L1_FACT, Layer.L2_PROFILE}
     assert {n.kind for n in nodes.values()} == {"fact", "profile", "intention"}
+    # One generation; each later proposal has its own small target state.
+    # NONE everywhere means no action round or retry.
     assert len(c.factory.llm.calls) == 1 and len(jev.calls) == 2
     assert all(
         (n.custom or {})["source_ids"] == [result.memory_id] for n in nodes.values()
@@ -66,11 +70,11 @@ async def test_extractor_ephemeral_field_cannot_discard_update(
     assert c.factory.vector.get(result.memory_id).status == MemoryStatus.ACTIVE
 
 
-async def test_empty_extraction_jev_decides_raw_only(tmp_storage, fake_embed):
+async def test_empty_extraction_is_raw_only_without_model_call(tmp_storage, fake_embed):
     c = client(tmp_storage, fake_embed, {"facts": []})
     result = await c.add(content="Thanks", user_id="u")
     assert result.is_ephemeral and not result.commit_passed
-    assert len(c.factory.jev.calls) == 1 and c.factory.vector.get(result.memory_id)
+    assert len(c.factory.jev.calls) == 0 and c.factory.vector.get(result.memory_id)
 
 
 async def test_failed_jev_keeps_raw_evidence_for_idempotent_retry(
@@ -78,15 +82,16 @@ async def test_failed_jev_keeps_raw_evidence_for_idempotent_retry(
 ):
     jev = FakeJev(RuntimeError("service unavailable"))
     c = client(tmp_storage, fake_embed, {"facts": [{"content": "Moved"}]}, jev)
+    c.factory.vector.upsert([_head(fake_embed, "Lives somewhere")])
     with pytest.raises(RuntimeError, match="unavailable"):
         await c.add(content="Moved", user_id="u", request_id="retry-me")
-    assert len(c.factory.vector.get_many({"user_id": "u"}, limit=100)) == 1
+    assert len(c.factory.vector.get_many({"user_id": "u"}, limit=100)) == 2
     jev.responses = None
     result = await c.add(content="Moved", user_id="u", request_id="retry-me")
     assert result.extracted_count == 1
     repeated = await c.add(content="Moved", user_id="u", request_id="retry-me")
     assert repeated.extra_node_ids == result.extra_node_ids
-    assert len(c.factory.vector.get_many({"user_id": "u"}, limit=100)) == 2
+    assert len(c.factory.vector.get_many({"user_id": "u"}, limit=100)) == 3
     assert len(jev.calls) == 2
     with pytest.raises(ValueError, match="different input"):
         await c.add(content="different", user_id="u", request_id="retry-me")
@@ -106,7 +111,8 @@ async def test_exact_text_distinct_events_are_not_hash_deduplicated(
         first.memory_id != second.memory_id
         and first.extra_node_ids != second.extra_node_ids
     )
-    assert len(c.factory.jev.calls) == 3
+    # First write has no heads (direct append); the second compares one target.
+    assert len(c.factory.jev.calls) == 1
 
 
 async def test_batch_skip_predecessor_resolves_to_current_head(tmp_storage, fake_embed):
@@ -127,53 +133,17 @@ async def test_batch_skip_predecessor_resolves_to_current_head(tmp_storage, fake
     assert not c.factory.vector.get(old).is_latest
 
 
-async def test_model_missed_durable_extraction_regenerates_then_queues_review(
-    tmp_storage, fake_embed
-):
+async def test_empty_extraction_is_not_regenerated(tmp_storage, fake_embed):
+    """One extraction pass only; a miss keeps the source and never re-runs."""
     c = client(tmp_storage, fake_embed, {"facts": []}, FakeJev({"value": "REEXTRACT"}))
     result = await c.add(content="Moved to Beijing", user_id="u")
-    # One regeneration carried the rejection, then the source was queued.
     extract_calls = [
         call for call in c.factory.llm.calls if "Generate faithful" in call["system"]
     ]
-    assert len(extract_calls) == 2
-    assert "rejected" in extract_calls[1]["system"]
-    assert result.status == "pending_review"
-    assert result.needs_review == [result.memory_id]
+    assert len(extract_calls) == 1
+    assert result.status == "raw_only"
     assert result.decisions[0].action == "RAW_ONLY"
-    assert result.decisions[0].review_reason == "REEXTRACT"
-    (review,) = c.pending_reviews()
-    assert review["kind"] == "extract" and review["node_id"] == result.memory_id
     assert len(c.factory.vector.get_many({"user_id": "u"}, limit=100)) == 1
-
-
-async def test_review_reextracts_missed_source_on_digest(tmp_storage, fake_embed):
-    c = client(tmp_storage, fake_embed, {"facts": []}, FakeJev({"value": "REEXTRACT"}))
-    written = await c.add(content="Moved to Beijing", user_id="u")
-    c.factory.llm.responses["extract"] = {"facts": [{"content": "Moved to Beijing"}]}
-    c.factory.jev.responses = None
-    digest = await c.digest()
-    assert digest.reviewed == 1 and c.pending_reviews() == []
-    (fact,) = c.factory.vector.get_many({"layer": Layer.L1_FACT.value}, limit=10)
-    assert fact.content == "Moved to Beijing"
-    assert fact.custom["source_ids"] == [written.memory_id]
-
-
-async def test_review_failure_is_retried_then_quarantined(tmp_storage, fake_embed):
-    c = client(
-        tmp_storage,
-        fake_embed,
-        {"facts": []},
-        FakeJev({"value": "REEXTRACT"}),
-        review_max_attempts=2,
-    )
-    await c.add(content="Moved to Beijing", user_id="u")
-    first = await c.digest()
-    assert first.success and first.reviewed == 0 and len(c.pending_reviews()) == 1
-    await c.digest()
-    assert c.pending_reviews() == []
-    (stuck,) = c.pending_reviews(status="quarantined")
-    assert stuck["attempts"] == 2 and "missed" in stuck["error"]
 
 
 async def test_request_retry_after_result_cache_failure_does_not_rerun_jev(
@@ -195,49 +165,10 @@ async def test_request_retry_after_result_cache_failure_does_not_rerun_jev(
     assert len(c.factory.vector.get_many({"user_id": "u"}, limit=100)) == 2
 
 
-async def test_rejected_coverage_regenerates_with_feedback(tmp_storage, fake_embed):
-    calls = {"n": 0}
-
-    def extract(system, user):
-        calls["n"] += 1
-        if "rejected" in system:
-            return {
-                "facts": [
-                    {"content": "User is named Alice"},
-                    {"content": "User moved to Shanghai"},
-                ]
-            }
-        return {"facts": [{"content": "User is named Alice"}]}
-
-    def jev(state, questions):
-        if "coverage" in questions:
-            return {"coverage": "VALID" if len(state["proposals"]) == 2 else "INVALID"}
-        return {}
-
+async def test_rejected_coverage_still_commits_candidates(tmp_storage, fake_embed):
+    """A coverage rejection is logged; the candidates are decided and committed anyway."""
     c = MemoryClient(
         settings=Settings(storage_dir=tmp_storage),
-        embed=fake_embed,
-        llm=FakeLLMClient({"extract": extract}),
-        jev=FakeJev(jev),
-    )
-    result = await c.add(
-        content="My name is Alice and I moved to Shanghai", user_id="u"
-    )
-    assert calls["n"] == 2 and result.status == "committed"
-    facts = c.factory.vector.get_many({"layer": "L1_FACT"})
-    assert {f.content for f in facts} == {
-        "User is named Alice",
-        "User moved to Shanghai",
-    }
-    assert c.pending_reviews() == []
-    await c.aclose()
-
-
-async def test_exhausted_coverage_commits_candidates_and_queues_source(
-    tmp_storage, fake_embed
-):
-    c = MemoryClient(
-        settings=Settings(storage_dir=tmp_storage, extract_coverage_retries=0),
         embed=fake_embed,
         llm=FakeLLMClient({"extract": {"facts": [{"content": "User is named Alice"}]}}),
         jev=FakeJev({"coverage": "INVALID"}),
@@ -249,10 +180,8 @@ async def test_exhausted_coverage_commits_candidates_and_queues_source(
     assert len(raw) == 1 and "Shanghai" in raw[0].content
     (fact,) = c.factory.vector.get_many({"layer": "L1_FACT"})
     assert fact.content == "User is named Alice"
-    assert result.status == "pending_review"
-    assert result.needs_review == [raw[0].node_id]
-    assert all(d.review_reason == "coverage" for d in result.decisions)
-    assert [r["kind"] for r in c.pending_reviews()] == ["extract"]
+    assert result.status != "raw_only"
+    assert all("coverage" not in call["questions"] for call in c.factory.jev.calls)
     await c.aclose()
 
 
@@ -303,9 +232,89 @@ async def test_conflicting_batch_targets_replan_with_jev_feedback(
         ]
     )
     r = await c.add(content="Moved Beijing to Shanghai, now Shanghai", user_id="u")
-    assert len(j.calls) == 4 and j.calls[2]["state"]["previous_plan_rejected"]
+    # The collision is settled inside the batch (no Jev replan): one claim retires the
+    # head, the other is written as an independent memory, and both survive.
+    assert len(j.calls) == 4 and all(
+        "previous_plan_rejected" not in call["state"] for call in j.calls
+    )
     assert len(r.extra_node_ids) == 2 and not c.factory.vector.get("old").is_latest
+    assert sorted(d.update_type for d in r.decisions) == ["OVERRIDE", "SUPPLEMENT"]
     assert len(c.factory.llm.calls) == 1
+    await c.aclose()
+
+
+async def test_most_confident_claim_wins_the_target(tmp_storage, fake_embed):
+    """When two proposals claim one head, the higher-confidence relation is kept."""
+    from dual_mem.providers.jev import JevAnswer
+    from dual_mem.types import MemoryNode
+
+    def script(state, questions):
+        ids = [n["id"] for n in state["current"]]
+        return {
+            "p0:action": JevAnswer(
+                type="choice", choice="ADD_OVERRIDE", confidence=0.6,
+                probabilities={"ADD_OVERRIDE": 0.6},
+            ),
+            "p0:target": ids[0],
+            "p1:action": JevAnswer(
+                type="choice", choice="ADD_OVERRIDE", confidence=0.9,
+                probabilities={"ADD_OVERRIDE": 0.9},
+            ),
+            "p1:target": ids[0],
+        }
+
+    j = FakeJev(script)
+    c = client(
+        tmp_storage,
+        fake_embed,
+        {"facts": [{"content": "Moved to Shanghai"}, {"content": "Currently Shanghai"}]},
+        jev=j,
+    )
+    c.factory.vector.upsert(
+        [
+            MemoryNode(
+                node_id="old",
+                content="Currently Beijing",
+                layer=Layer.L2_PROFILE,
+                app_id="default",
+                user_id="u",
+                embedding=fake_embed.embed_sync("Currently Beijing"),
+            )
+        ]
+    )
+    r = await c.add(content="Moved to Shanghai, now Shanghai", user_id="u")
+    assert not c.factory.vector.get("old").is_latest
+    # p1 (0.9) keeps the override; p0 (0.6) is appended independently.
+    kept = [d for d in r.decisions if d.update_type == "OVERRIDE"]
+    assert len(kept) == 1 and kept[0].proposal_ids == ["p1"]
+    assert len(r.extra_node_ids) == 2
+    await c.aclose()
+
+
+async def test_stale_cas_raises_without_internal_retry(
+    tmp_storage, fake_embed, monkeypatch
+):
+    """A lost CAS surfaces immediately; the caller owns retrying."""
+    from dual_mem import StaleDecisionError
+    c = client(tmp_storage, fake_embed, {"facts": [{"content": "Lives in Beijing"}]})
+    c.factory.vector.upsert([_head(fake_embed, "Lives in Shanghai")])
+    c.factory.jev.responses = {"p0:target": "seed", "p0:action": "ADD_OVERRIDE"}
+    store = type(c.factory.vector)
+    original = store.apply_version_plan
+    calls = {"n": 0}
+
+    def flaky(self, **kw):
+        calls["n"] += 1
+        return False if calls["n"] <= 1 else original(self, **kw)
+
+    monkeypatch.setattr(store, "apply_version_plan", flaky)
+    with pytest.raises(StaleDecisionError):
+        await c.add(content="I live in Beijing", user_id="u")
+    assert calls["n"] == 1
+    # The same call succeeds once the conflict is gone.
+    r = await c.add(content="I live in Beijing", user_id="u", request_id="retry-1")
+    assert r.status == "committed" and len(r.extra_node_ids) == 1
+    assert not c.factory.vector.get("seed").is_latest
     await c.aclose()
 
 
@@ -329,8 +338,9 @@ async def test_target_none_constrains_action_then_writes(
     )
     result = await c.add(content="我喜欢喝茶，住在北京", user_id="u")
     assert result.extracted_count == 2
-    action_options = jev.calls[1]["questions"]["p1:action"]["criteria"]
-    assert "ADD_SUPPLEMENT" in action_options and "SKIP" not in action_options
+    # NONE is an independent append: no action question is asked.
+    assert len(jev.calls) == 1 and "p1:action" not in jev.calls[0]["questions"]
+    assert result.decisions[1].update_type == "SUPPLEMENT"
     assert all(
         not any(name.endswith(":repair") for name in call["questions"])
         for call in jev.calls
@@ -338,13 +348,16 @@ async def test_target_none_constrains_action_then_writes(
     await c.aclose()
 
 
-async def test_relation_to_raw_only_proposal_replans_batch(tmp_storage, fake_embed):
+async def test_relation_to_raw_only_proposal_is_settled_without_replan(
+    tmp_storage, fake_embed
+):
+    """A dangling relation is dropped in-batch; no second decision round."""
     def script(state, questions):
-        fixed = bool(state.get("previous_plan_rejected"))
         return {
-            "p0:action": "RAW_ONLY",
-            "p1:target": "NONE" if fixed else "p0",
-            "p1:action": "ADD_SUPPLEMENT" if fixed else "SKIP",
+            "p0:target": "seed",
+            "p0:action": "INVALID",
+            "p1:target": "p0",
+            "p1:action": "SKIP",
         }
 
     jev = FakeJev(script)
@@ -359,9 +372,40 @@ async def test_relation_to_raw_only_proposal_replans_batch(tmp_storage, fake_emb
         },
         jev=jev,
     )
+    c.factory.vector.upsert([_head(fake_embed, "种子")])
     result = await c.add(content="包含两个候选", user_id="u")
     assert result.extracted_count == 1
+    # One decision round: the SKIP that pointed at the RAW_ONLY proposal is written
+    # as an independent memory instead of triggering a replan.
     assert len(jev.calls) == 4
-    feedback = jev.calls[2]["state"]["previous_plan_rejected"]
-    assert feedback["decisions"][0]["action"] == "RAW_ONLY"
+    assert result.decisions[1].update_type == "SUPPLEMENT"
+    await c.aclose()
+
+
+async def test_extracted_speakers_are_preserved_and_assistant_is_not_user_profile(tmp_storage, fake_embed):
+    c = client(tmp_storage, fake_embed, {"facts": [
+        {"content": "The user owns a telemetry watch", "type": "profile", "speaker": "user"},
+        {"content": "The assistant recommended a monitoring service", "type": "profile", "speaker": "assistant"},
+    ]})
+    result = await c.add(content="My watch records telemetry. You recommended a monitoring service.", user_id="u")
+    nodes = c.factory.vector.get_by_ids(result.extra_node_ids)
+    user = next(n for n in nodes.values() if n.owner == "user")
+    assistant = next(n for n in nodes.values() if n.owner == "agent")
+    assert user.layer == Layer.L2_PROFILE and user.kind == "profile"
+    assert assistant.layer == Layer.L1_FACT and assistant.kind == "fact"
+    await c.aclose()
+
+
+async def test_atomic_attribute_value_profiles_are_not_discarded(tmp_storage, fake_embed):
+    c = client(tmp_storage, fake_embed, {"identity": [
+        {"attribute": "diet", "value": "vegetarian"},
+        {"attribute": "residence", "value": "Bristol"},
+        {"attribute": "devices", "value": ["ThinkPad T14"]},
+    ]})
+    result = await c.add(content="Vegetarian, live in Bristol, own a ThinkPad T14", user_id="u")
+    nodes = c.factory.vector.get_by_ids(result.extra_node_ids)
+    assert len(nodes) == 3 and all(n.layer == Layer.L2_PROFILE for n in nodes.values())
+    assert any("vegetarian" in n.content for n in nodes.values())
+    assert any("Bristol" in n.content for n in nodes.values())
+    assert any("ThinkPad T14" in n.content for n in nodes.values())
     await c.aclose()

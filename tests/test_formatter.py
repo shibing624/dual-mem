@@ -8,6 +8,18 @@ from dual_mem.retrieval.formatter import (
 from dual_mem.sdk_models import EvolutionItem, MemoryItem, SearchMemories
 
 
+def test_speaker_and_derived_provenance_are_visible_in_context():
+    assistant = MemoryItem(memory_id="a", content="Use command inspect_csv.py", category="fact",
+                           score=0.9, layer="L1_FACT", owner="agent")
+    assert assistant.to_dict()["owner"] == "agent"
+    assert "[assistant]" in format_search_hit_line(assistant.to_dict())
+    derived = MemoryItem(memory_id="d", content="User seems to value privacy", category="preference",
+                         score=0.8, layer="L3_DERIVED")
+    assert "[derived]" in format_search_hit_line(derived.to_dict())
+    grouped = format_memories({"normal": [assistant.to_dict()], "profile": [derived.to_dict()]})
+    assert "[assistant]" in grouped and "[derived]" in grouped
+
+
 def test_format_groups_chain_head_only_and_raw_truncate():
     result = {
         "profile": [

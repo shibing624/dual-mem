@@ -53,8 +53,8 @@ class MemoryDecision:
 
     ``action`` is ``ADD`` / ``SKIP`` (already known) / ``RAW_ONLY`` (no durable
     increment) / ``DELETE`` / ``INVALID`` (unsupported candidate, not written).
-    ``review_reason`` is set when the relation was undecided and the memory was
-    appended independently until ``digest()`` reviews it.
+    An undecided relation is written as an independent SUPPLEMENT immediately; the
+    SDK keeps no deferred review queue.
     """
 
     action: str
@@ -64,19 +64,16 @@ class MemoryDecision:
     source_ids: list[str] = field(default_factory=list)
     reason: str = ""
     confidence: float | None = None
-    review_reason: str | None = None
 
     def to_dict(self) -> dict:
         return _omit_none(asdict(self))
 
 
-WRITE_STATUSES = ("committed", "known", "raw_only", "pending_review")
+WRITE_STATUSES = ("committed", "known", "raw_only")
 
 
-def write_status(decisions: list[MemoryDecision], *, pending: bool = False) -> str:
-    """Summarize decisions: committed > known > raw_only; any review → pending_review."""
-    if pending or any(d.review_reason for d in decisions):
-        return "pending_review"
+def write_status(decisions: list[MemoryDecision]) -> str:
+    """Summarize decisions: committed > known > raw_only."""
     actions = {d.action for d in decisions}
     if actions & {"ADD", "DELETE"}:
         return "committed"
@@ -94,8 +91,6 @@ class CommitResult:
     # 可读的提交/跳过原因
     reason: str = ""
     decisions: list[MemoryDecision] = field(default_factory=list)
-    # 已排队等待 digest() 复核的节点 id
-    needs_review: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Flatten this commit decision into a dict for logging or contract responses."""
@@ -123,10 +118,8 @@ class WriteResult:
     # True 表示 Jev 判定 RAW_ONLY，仅保留来源
     is_ephemeral: bool = False
     decisions: list[MemoryDecision] = field(default_factory=list)
-    # committed / known / raw_only / pending_review（见 ``write_status``）
+    # committed / known / raw_only（见 ``write_status``）
     status: str = "committed"
-    # 等待 digest() 复核的节点 id（关系未定的版本，或需重新抽取的 L0 来源）
-    needs_review: list[str] = field(default_factory=list)
     # REST 风格错误码；成功时为 None
     error_code: int | None = None
     # 错误描述；成功时为 None
@@ -203,8 +196,7 @@ class MemoryItem:
     previous: list[EvolutionItem] | None = None
     # conflicts_with 指向的、仍然有效的对立版本内容
     conflicts: list[EvolutionItem] | None = None
-    # 关系尚未裁决，独立追加，等待 digest() 复核
-    needs_review: bool = False
+    owner: str = ""
 
     def to_dict(self) -> dict:
         """Serialize this memory item with its (optional) evolution chain expanded."""
@@ -225,6 +217,8 @@ class MemoryItem:
         }
         if self.valid_from is not None:
             out["valid_from"] = self.valid_from
+        if self.owner:
+            out["owner"] = self.owner
         if self.valid_until is not None:
             out["valid_until"] = self.valid_until
         if self.memory_at is not None:
@@ -245,8 +239,6 @@ class MemoryItem:
             out["previous"] = [item.to_dict() for item in self.previous]
         if self.conflicts:
             out["conflicts"] = [item.to_dict() for item in self.conflicts]
-        if self.needs_review:
-            out["needs_review"] = True
         return out
 
     def to_search_result(self) -> dict[str, Any]:
@@ -362,14 +354,12 @@ class ReadResult:
 
 @dataclass
 class DigestResult:
-    """Outcome of MemoryClient.digest: review pending decisions, then (dual) System2."""
+    """Outcome of MemoryClient.digest: (dual) System2 cognition."""
 
     # digest 调用是否成功
     success: bool
     # 成功处理的 System2 app/user/agent scope 数（system1 恒为 0）
     processed: int = 0
-    # 本次复核完成的待定决策条数（system1 / dual 都会执行）
-    reviewed: int = 0
     # 本次 digest 各阶段耗时与计数（性能分析用；非 dual 或无任务时为空）
     timing: dict = field(default_factory=dict)
 

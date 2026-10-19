@@ -31,6 +31,14 @@ class JevAnswer(BaseModel):
     @model_validator(mode="after")
     def validate_answer(self) -> JevAnswer:
         if self.type == "choice":
+            # Self-hosted System One servers (train-jev) return only choice +
+            # probabilities; the chosen option's probability is its confidence.
+            if (
+                self.confidence is None
+                and self.choice
+                and self.choice in self.probabilities
+            ):
+                self.confidence = min(max(float(self.probabilities[self.choice]), 0.0), 1.0)
             if not self.choice or self.confidence is None:
                 raise ValueError("choice answer requires choice and confidence")
             if self.choice not in self.probabilities:
@@ -68,7 +76,6 @@ class JevClient:
         max_request_chars: int = 100_000,
         max_question_chars: int = 60_000,
         timeout: float = 30,
-        retry_attempts: int = 3,
         http_client: httpx.AsyncClient | None = None,
         usage_callback: UsageCallback | None = None,
     ) -> None:
@@ -82,13 +89,12 @@ class JevClient:
                 max_questions,
                 max_request_chars,
                 max_question_chars,
-                retry_attempts,
             )
             <= 0
             or timeout <= 0
         ):
             raise ValueError(
-                "Jev limits, concurrency, timeout and retries must be positive"
+                "Jev limits, concurrency and timeout must be positive"
             )
         self._headers = {"Authorization": f"Bearer {api_key}"}
         self.endpoint = endpoint
@@ -98,7 +104,6 @@ class JevClient:
         self.max_questions = max_questions
         self.max_request_chars = max_request_chars
         self.max_question_chars = max_question_chars
-        self.retry_attempts = retry_attempts
         self._semaphore = asyncio.Semaphore(concurrency)
         self._owns_client = http_client is None
         self._client = http_client or httpx.AsyncClient(
@@ -154,92 +159,43 @@ class JevClient:
         self, *, state: dict[str, Any], questions: dict[str, dict[str, Any]]
     ) -> dict[str, JevAnswer]:
         async with self._semaphore:
-            for attempt in range(self.retry_attempts):
-                started = time.perf_counter()
-                self.request_count += 1
-                response = None
-                usage: dict = {}
-                success = False
-                try:
-                    response = await self._client.post(
-                        self.endpoint,
-                        headers=self._headers,
-                        json={
-                            "model": self.model,
-                            "state": state,
-                            "questions": questions,
-                        },
-                    )
-                    if response.status_code in (429, 529, 502, 503, 504):
-                        response.raise_for_status()
-                    response.raise_for_status()
-                    payload = response.json()
-                    raw = payload.get("answers")
-                    if not isinstance(raw, dict) or set(raw) != set(questions):
-                        raise ValueError(
-                            "Jev response must cover exactly the requested questions"
-                        )
-                    answers = {
-                        name: JevAnswer.model_validate(value)
-                        for name, value in raw.items()
-                    }
-                    for name, answer in answers.items():
-                        question = questions[name]
-                        if answer.type != question["type"]:
-                            raise ValueError("Jev answer type does not match question")
-                        if (
-                            answer.type == "choice"
-                            and answer.choice not in question["criteria"]
-                        ):
-                            raise ValueError("Jev selected an unknown option")
-                    usage = payload.get("usage") or {}
-                    self.input_tokens += int(usage.get("input_tokens", 0))
-                    self.output_tokens += int(usage.get("output_tokens", 0))
-                    success = True
-                    return answers
-                except (httpx.TransportError, httpx.HTTPStatusError) as exc:
-                    if isinstance(
-                        exc, httpx.HTTPStatusError
-                    ) and exc.response.status_code not in (429, 529, 502, 503, 504):
-                        raise
-                    if attempt + 1 >= self.retry_attempts:
-                        raise
-                    delay = min(0.25 * 2**attempt, 2.0)
-                    if isinstance(exc, httpx.HTTPStatusError):
-                        try:
-                            delay = min(
-                                max(
-                                    float(
-                                        exc.response.headers.get("Retry-After", delay)
-                                    ),
-                                    0,
-                                ),
-                                10,
-                            )
-                        except ValueError:
-                            pass
-                finally:
-                    self.last_latency_ms = (time.perf_counter() - started) * 1000
-                    if self.usage_callback:
-                        self.usage_callback(
-                            UsageEvent(
-                                kind="jev",
-                                model=self.model,
-                                latency_ms=self.last_latency_ms,
-                                prompt_tokens=int(usage.get("input_tokens", 0)),
-                                completion_tokens=int(usage.get("output_tokens", 0)),
-                                batch_size=len(questions),
-                                success=success,
-                                attempt=attempt + 1,
-                                status_code=(
-                                    response.status_code
-                                    if response is not None
-                                    else None
-                                ),
-                            )
-                        )
-                await asyncio.sleep(delay)
-        raise RuntimeError("Jev retry budget exhausted")
+            started = time.perf_counter()
+            self.request_count += 1
+            response = None
+            usage: dict = {}
+            success = False
+            try:
+                response = await self._client.post(
+                    self.endpoint, headers=self._headers,
+                    json={"model": self.model, "state": state, "questions": questions},
+                )
+                response.raise_for_status()
+                payload = response.json()
+                raw = payload.get("answers")
+                if not isinstance(raw, dict) or set(raw) != set(questions):
+                    raise ValueError("Jev response must cover exactly the requested questions")
+                answers = {name: JevAnswer.model_validate(value) for name, value in raw.items()}
+                for name, answer in answers.items():
+                    question = questions[name]
+                    if answer.type != question["type"]:
+                        raise ValueError("Jev answer type does not match question")
+                    if answer.type == "choice" and answer.choice not in question["criteria"]:
+                        raise ValueError("Jev selected an unknown option")
+                usage = payload.get("usage") or {}
+                self.input_tokens += int(usage.get("input_tokens", 0))
+                self.output_tokens += int(usage.get("output_tokens", 0))
+                success = True
+                return answers
+            finally:
+                self.last_latency_ms = (time.perf_counter() - started) * 1000
+                if self.usage_callback:
+                    self.usage_callback(UsageEvent(
+                        kind="jev", model=self.model, latency_ms=self.last_latency_ms,
+                        prompt_tokens=int(usage.get("input_tokens", 0)),
+                        completion_tokens=int(usage.get("output_tokens", 0)),
+                        batch_size=len(questions), success=success, attempt=1,
+                        status_code=response.status_code if response is not None else None,
+                    ))
 
     async def aclose(self) -> None:
         if self._owns_client:

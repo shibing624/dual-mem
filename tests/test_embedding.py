@@ -2,6 +2,8 @@ import json
 
 import httpx
 import respx
+import pytest
+from openai import APIStatusError
 
 from dual_mem.config import CHARS_PER_TOKEN, EMBED_MAX_TOKENS
 from dual_mem.providers.embedding import EmbedService
@@ -144,3 +146,24 @@ def test_embed_max_tokens_derived_char_budget():
     )
     assert svc.input_max_chars == 20480
     assert svc.input_max_tokens == 8192
+
+
+@respx.mock
+async def test_embedding_transport_failure_is_not_retried():
+    route = respx.post("https://api.test/v1/embeddings").mock(return_value=httpx.Response(503))
+    svc = _make_service()
+    with pytest.raises(APIStatusError):
+        await svc.embed("hello")
+    assert route.call_count == 1 and svc.client.max_retries == 0
+    await svc.aclose()
+
+
+@respx.mock
+async def test_generation_transport_failure_is_not_retried():
+    from dual_mem.providers.llm import LLMClient
+    route = respx.post("https://api.test/v1/chat/completions").mock(return_value=httpx.Response(503))
+    llm = LLMClient(base_url="https://api.test/v1", api_key="sk-x", model="test")
+    with pytest.raises(APIStatusError):
+        await llm.chat_json(system="test", user="test")
+    assert route.call_count == 1 and llm.client.max_retries == 0
+    await llm.aclose()

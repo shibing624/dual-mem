@@ -136,7 +136,7 @@ class ChromaVectorStore(VectorStore):
         )
         self.collection = self.client.get_or_create_collection(
             name=_COLLECTION,
-            metadata={"hnsw:space": "cosine"},
+            metadata={"hnsw:space": "cosine", "hnsw:num_threads": 4},
         )
 
         try:
@@ -144,7 +144,7 @@ class ChromaVectorStore(VectorStore):
                 self._validate_schema()
                 self._recover_pending()
         except BaseException:
-            self._journal.close()
+            self.close()
             raise
 
     @contextmanager
@@ -445,6 +445,10 @@ class ChromaVectorStore(VectorStore):
     def close(self) -> None:
         with self._lock:
             self._journal.close()
+            # Client.close() only exists in newer chromadb; pyproject allows >=1.0.
+            close = getattr(self.client, "close", None)
+            if close is not None:
+                close()
 
     def completed_request(self, request_key: str) -> dict | None:
         """The committed result of ``request_key``, or None while it has not committed."""
@@ -461,7 +465,6 @@ class ChromaVectorStore(VectorStore):
             "extra_node_ids": [n["id"] for n in plan["nodes"]],
             "commit_passed": bool(plan["nodes"] or plan["patches"]),
             "decisions": plan.get("decisions", []),
-            "needs_review": plan.get("needs_review", []),
         }
 
     def pending_projections(
@@ -502,7 +505,6 @@ class ChromaVectorStore(VectorStore):
         request_key: str | None = None,
         processed_evidence: list[str] | None = None,
         decisions: list[dict] | None = None,
-        needs_review: list[str] | None = None,
     ) -> bool:
         """Recoverable append/link with revision and scope CAS, never erase documents.
 
@@ -700,7 +702,6 @@ class ChromaVectorStore(VectorStore):
                                 json.dumps(
                                     {
                                         "decisions": decisions or [],
-                                        "needs_review": needs_review or [],
                                         "request_key": request_key,
                                         "nodes": [],
                                         "patches": {},
@@ -741,7 +742,6 @@ class ChromaVectorStore(VectorStore):
             )
             payload = {
                 "decisions": decisions or [],
-                "needs_review": needs_review or [],
                 "request_key": request_key,
                 "semantic": semantic,
                 "audit": audit,

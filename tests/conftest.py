@@ -6,6 +6,8 @@ os.environ.setdefault("DUAL_MEM_LLM_API_KEY", "sk-test-fake")
 os.environ.setdefault("DUAL_MEM_EMBED_API_KEY", "sk-test-fake")
 os.environ.setdefault("DUAL_MEM_AUTH_DISABLED", "true")
 os.environ.setdefault("DUAL_MEM_CONFIG_FILE", "/nonexistent/dual_mem_test_config.yaml")
+# Fake hash embeddings have no semantic similarity; route every candidate to Jev.
+os.environ.setdefault("DUAL_MEM_RECONCILE_RELATION_THRESHOLD", "-1")
 
 import pytest
 
@@ -240,6 +242,29 @@ class FakeJev:
 @pytest.fixture
 def fake_jev():
     return FakeJev()
+
+
+@pytest.fixture(autouse=True)
+def release_chroma_systems():
+    """Drop chromadb's process-global System cache after every test.
+
+    ``chromadb.PersistentClient`` keeps one Rust System per path in
+    ``SharedSystemClient._identifier_to_system`` for the whole process. Each test
+    uses a fresh tmp path and many tests never ``aclose()`` their client, so the
+    full suite accumulated ~hundreds of live Systems and eventually blocked inside
+    native ``Bindings(...)`` around 48% (single files always passed).
+    """
+    yield
+    try:
+        from chromadb.api.shared_system_client import SharedSystemClient
+    except ImportError:  # pragma: no cover
+        return
+    for system in list(SharedSystemClient._identifier_to_system.values()):
+        try:
+            system.stop()
+        except Exception:  # pragma: no cover - best-effort teardown
+            pass
+    SharedSystemClient.clear_system_cache()
 
 
 @pytest.fixture(autouse=True)

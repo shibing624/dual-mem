@@ -112,9 +112,10 @@ class GraphStore(ABC):
 class KuzuGraphStore(GraphStore):
     """Kuzu-embedded-database implementation of the memory knowledge graph."""
 
-    def __init__(self, storage_dir: str):
+    def __init__(self, storage_dir: str, *, max_db_size: int = 64 * 1024 * 1024 * 1024):
         self._lock = threading.RLock()
-        self.db = kuzu.Database(f"{storage_dir}/kuzu")
+        self.db = kuzu.Database(f"{storage_dir}/kuzu", max_num_threads=4,
+                                buffer_pool_size=128 * 1024 * 1024, max_db_size=max_db_size)
         self.conn = kuzu.Connection(self.db)
         with self._lock:
             for ddl in _SCHEMA_DDL:

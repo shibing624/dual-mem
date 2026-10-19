@@ -43,7 +43,10 @@ async def test_out_of_order_old_session_is_inserted_as_history(tmp_storage, fake
             "p0:representation": "PROFILE",
         }
 
-    c = make(tmp_storage, fake_embed, None, FakeJev(script))
+    def profile(system, user):
+        return {"facts": [{"content": echo(system, user)["facts"][0]["content"], "type": "profile"}]}
+
+    c = make(tmp_storage, fake_embed, profile, FakeJev(script))
     shanghai = await c.add(content="I live in Shanghai", user_id="u", memory_at=2_000)
     beijing = await c.add(content="I live in Beijing", user_id="u", memory_at=1_000)
     assert beijing.decisions[0].update_type == "HISTORICAL"
@@ -98,44 +101,32 @@ async def test_historical_cannot_attach_twice_to_one_head_in_a_plan(tmp_storage,
     await c.aclose()
 
 
-async def test_need_context_is_written_then_resolved_by_digest(tmp_storage, fake_embed):
-    phase = {"review": False}
-
+async def test_need_context_is_written_as_an_independent_supplement(
+    tmp_storage, fake_embed
+):
     def script(state, questions):
         heads = state.get("current", [])
         if not heads:
             return {}
         if "p0:target" in questions:
             return {"p0:target": heads[0]["id"]}
-        if phase["review"]:
-            return {"p0:action": "ADD_OVERRIDE"}
         return {"p0:action": "NEED_CONTEXT"}
 
     c = make(tmp_storage, fake_embed, None, FakeJev(script))
     first = await c.add(content="Lives in Shanghai", user_id="u")
     second = await c.add(content="Lives in Beijing now", user_id="u")
-    assert second.status == "pending_review" and second.commit_passed
-    assert second.decisions[0].review_reason == "NEED_CONTEXT"
-    provisional = c.factory.vector.get(second.extra_node_ids[0])
-    assert provisional.is_latest and provisional.custom["needs_review"]
+    # Undecided relation -> independent supplement, committed immediately.
+    assert second.status == "committed" and second.commit_passed
+    written = c.factory.vector.get(second.extra_node_ids[0])
+    assert written.is_latest and written.supersedes == []
     assert c.factory.vector.get(first.extra_node_ids[0]).is_latest
-
-    hits = await c.search(query="Lives in Beijing now", user_id="u", min_score=0)
-    (flagged,) = [i for i in hits.memories.normal if i.memory_id == provisional.node_id]
-    assert flagged.needs_review
-
-    phase["review"] = True
-    digest = await c.digest()
-    assert digest.reviewed == 1 and c.pending_reviews() == []
-    (current,) = [n for n in head(c, layer=Layer.L1_FACT)]
-    assert current.content == "Lives in Beijing now"
-    assert set(current.supersedes) == {first.extra_node_ids[0], provisional.node_id}
-    assert not c.factory.vector.get(first.extra_node_ids[0]).is_latest
-    assert "needs_review" not in (current.custom or {})
     await c.aclose()
 
 
-async def test_review_confirming_supplement_only_clears_flag(tmp_storage, fake_embed):
+async def test_low_confidence_relation_writes_independent_supplement(
+    tmp_storage, fake_embed
+):
+    """A low-confidence relation is written standalone; nothing waits for a review."""
     weak = JevAnswer(type="choice", choice="ADD_CONFLICT", confidence=0.3,
                      probabilities={"ADD_CONFLICT": 0.3})
 
@@ -143,22 +134,16 @@ async def test_review_confirming_supplement_only_clears_flag(tmp_storage, fake_e
         heads = state.get("current", [])
         if "p0:target" in questions:
             return {"p0:target": heads[0]["id"] if heads else "NONE"}
-        if state.get("review"):
-            return {}
         return {"p0:action": weak} if heads else {}
 
     jev = FakeJev(script)
     c = make(tmp_storage, fake_embed, None, jev, reconcile_review_confidence=0.5)
     await c.add(content="Likes tea", user_id="u")
     second = await c.add(content="Likes coffee", user_id="u")
-    assert second.decisions[0].review_reason == "low-confidence ADD_CONFLICT"
-    # On review the relation question is re-asked without the confidence route.
-    jev.responses = lambda state, questions: (
-        {"p0:target": "NONE"} if "p0:target" in questions else {}
-    )
-    assert (await c.digest()).reviewed == 1
+    assert second.decisions[0].action == "ADD"
+    assert second.status == "committed"
     node = c.factory.vector.get(second.extra_node_ids[0])
-    assert node.is_latest and "needs_review" not in (node.custom or {})
+    assert node.is_latest and node.supersedes == []
     assert len(head(c, layer=Layer.L1_FACT)) == 2
     await c.aclose()
 
@@ -166,8 +151,7 @@ async def test_review_confirming_supplement_only_clears_flag(tmp_storage, fake_e
 @pytest.mark.parametrize(
     "answers,status,action",
     [
-        ({"p0:action": "RAW_ONLY"}, "raw_only", "RAW_ONLY"),
-        ({"p0:action": "INVALID"}, "raw_only", "INVALID"),
+        ({"p0:action": "INVALID", "p0:target": "h"}, "raw_only", "INVALID"),
         ({}, "committed", "ADD"),
     ],
 )
@@ -175,6 +159,9 @@ async def test_write_status_distinguishes_outcomes(
     tmp_storage, fake_embed, answers, status, action
 ):
     c = make(tmp_storage, fake_embed, {"facts": [{"content": "hello"}]}, FakeJev(answers))
+    c.factory.vector.upsert([MemoryNode(node_id="h", content="hi", layer=Layer.L1_FACT,
+                                        app_id="default", user_id="u",
+                                        embedding=fake_embed.embed_sync("hi"))])
     result = await c.add(content="hello", user_id="u")
     assert result.status == status and result.decisions[0].action == action
     assert result.is_ephemeral == (action == "RAW_ONLY")
@@ -274,6 +261,9 @@ def test_api_maps_decision_errors(tmp_storage, fake_embed):
         client = MemoryClient(
             settings=settings, embed=fake_embed, llm=FakeLLMClient(), jev=Failing(exc)
         )
+        client.factory.vector.upsert([MemoryNode(
+            node_id="h", content="y", layer=Layer.L1_FACT, app_id="default",
+            user_id="u", embedding=fake_embed.embed_sync("y"))])
         api = TestClient(create_app(client=client, settings=settings))
         response = api.post("/v1/memories/", json={"content": "x", "user_id": "u"})
         assert response.status_code == status

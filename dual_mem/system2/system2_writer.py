@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 
 from dual_mem.sdk_models import ChatMessage
@@ -97,11 +96,7 @@ class System2Writer:
         return result
 
     async def digest_pending(self) -> int:
-        """Run System2 per pending scope; returns the number of acknowledged scopes.
-
-        A scope with evidence rejected but not yet quarantined stays pending so the
-        next digest retries it; other scopes are acknowledged independently.
-        """
+        """Run System2 once per pending scope; returns the number of acknowledged scopes."""
         async with self._digest_lock:
             tasks = self.factory.cache.list_pending_s2_scopes()
             scopes: dict[tuple[str, str, str], list[int]] = {}
@@ -122,8 +117,6 @@ class System2Writer:
                     )
                     for key, value in stats.items():
                         totals[key] = totals.get(key, 0.0) + float(value)
-                    if stats.get("retry_pending"):
-                        return
                     self.factory.cache.mark_s2_tasks_done(ids)
                     acknowledged += 1
 
@@ -143,13 +136,5 @@ class System2Writer:
             if self.factory.settings.purge_done_queues:
                 self.factory.cache.purge_done_queues()
             return acknowledged
-
-    def failures(self) -> list[dict]:
-        """Evidence rejected by System2 (attempts, last error), for inspection."""
-        return [
-            {**row, "scope": json.loads(row["scope"])}
-            for row in self.factory.cache.list_s2_failures()
-        ]
-
 
 __all__ = ["System2Writer"]

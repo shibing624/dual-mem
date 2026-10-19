@@ -53,5 +53,13 @@ async def test_independent_scopes_overlap_decision_io(tmp_storage, fake_embed):
         llm=FakeLLMClient(),
         jev=jev,
     )
+    from dual_mem.types import MemoryNode
+
+    # Each scope needs a head, otherwise the candidate is appended without Jev.
+    c.factory.vector.upsert([
+        MemoryNode(node_id=f"h{i}", content="old state", layer=Layer.L1_FACT,
+                   app_id="default", user_id=str(i), embedding=fake_embed.embed_sync("old state"))
+        for i in range(4)
+    ])
     await asyncio.gather(*(c.add(content="state", user_id=str(i)) for i in range(4)))
     assert jev.peak == 4

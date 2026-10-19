@@ -107,7 +107,7 @@ async def test_invalid_response_never_becomes_a_write_decision(payload):
         assert jev.request_count == 1
 
 
-async def test_transient_retry_and_context_rejection():
+async def test_transport_failure_is_not_retried_and_context_rejection():
     calls = 0
     events = []
 
@@ -123,23 +123,23 @@ async def test_transient_retry_and_context_rejection():
             http_client=transport,
             usage_callback=events.append,
         )
-        await jev.evaluate(state={}, questions=questions(1))
-        assert calls == 2
-        assert len(events) == 2
-        assert [e.success for e in events] == [False, True]
-        assert [e.status_code for e in events] == [503, 200]
-        assert [e.attempt for e in events] == [1, 2]
-        assert events[1].prompt_tokens == 12
+        with pytest.raises(httpx.HTTPStatusError):
+            await jev.evaluate(state={}, questions=questions(1))
+        assert calls == 1
+        assert len(events) == 1
+        assert [e.success for e in events] == [False]
+        assert [e.status_code for e in events] == [503]
+        assert [e.attempt for e in events] == [1]
         assert all(e.batch_size == 1 and e.latency_ms >= 0 for e in events)
         jev.max_question_chars = 100
         with pytest.raises(ValueError, match="context budget"):
             await jev.evaluate(state={"long": "x" * 200}, questions=questions(1))
-        assert calls == 2
+        assert calls == 1
 
 
 @pytest.mark.parametrize(
     "option",
-    ["concurrency", "max_questions", "max_request_chars", "retry_attempts", "timeout"],
+    ["concurrency", "max_questions", "max_request_chars", "timeout"],
 )
 def test_invalid_limits(option):
     with pytest.raises(ValueError, match="positive"):

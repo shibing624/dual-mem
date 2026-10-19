@@ -1,12 +1,10 @@
 import json
-from dataclasses import replace
 import pytest
 from conftest import FakeLLMClient, FakeJev
 from dual_mem.registry import ComponentFactory
 from dual_mem.config import Settings
 from dual_mem.types import Layer, MemoryNode
 from dual_mem.system2.system2_agent import System2Agent
-from dual_mem.agent.reconciler import DecisionContextError
 
 
 def factory(tmp_storage, embed, response=None, jev=None, cap=2):
@@ -16,7 +14,7 @@ def factory(tmp_storage, embed, response=None, jev=None, cap=2):
         return {
             "memories": [
                 {
-                    "content": "derived " + ",".join(ids),
+                    "content": "derived " + ",".join(f["content"] for f in facts),
                     "kind": "schema",
                     "evidence_ids": ids,
                 }
@@ -50,14 +48,13 @@ def seed(f, count=5):
     return nodes
 
 
-async def test_all_facts_paged_with_exact_coverage_and_real_evidence(
-    tmp_storage, fake_embed
-):
+async def test_all_facts_paged_with_real_evidence(tmp_storage, fake_embed):
     f = factory(tmp_storage, fake_embed)
     original = seed(f)
     stats = await System2Agent(factory=f).run(app_id="app", user_id="u")
     assert stats["created_schemas"] == 3
-    assert len(f.llm.calls) == 3 and len(f.jev.calls) == 9
+    # One generation + one validation per batch; no relation decisions for L3 nodes.
+    assert len(f.llm.calls) == 3 and len(f.jev.calls) == 3
     derived = f.vector.get_many({"layer": Layer.L3_DERIVED.value}, limit=100)
     assert {nid for n in derived for nid in n.custom["source_ids"]} == {
         n.node_id for n in original
@@ -76,73 +73,51 @@ async def test_all_facts_paged_with_exact_coverage_and_real_evidence(
 @pytest.mark.parametrize(
     "response",
     [
-        {"memories": [], "processed_ids": []},
+        {"memories": "invalid", "processed_ids": ["0"]},
         {
             "memories": [{"content": "invented", "evidence_ids": ["foreign"]}],
             "processed_ids": ["0"],
         },
         {"memories": [{"content": "", "evidence_ids": ["0"]}], "processed_ids": ["0"]},
-        {"memories": "invalid", "processed_ids": ["0"]},
     ],
 )
-async def test_invalid_generation_leaves_uncovered_sources_fresh_and_counted(
+async def test_invalid_generation_is_dropped_not_retried(
     tmp_storage, fake_embed, response
 ):
+    """Malformed generation drops that batch once; nothing is queued or retried."""
     f = factory(tmp_storage, fake_embed, response)
     seed(f, 1)
     stats = await System2Agent(factory=f).run(app_id="app", user_id="u")
-    assert stats["failed_batches"] == 1 and stats["retry_pending"] == 1
+    assert stats["failed_batches"] == 1 and stats["batches"] == 1
     assert f.vector.get("0").s2_evidence_count == 0
     assert f.vector.get_many({"layer": Layer.L3_DERIVED.value}) == []
-    (failure,) = f.cache.list_s2_failures()
-    assert failure["fact_id"] == "0" and failure["attempts"] == 1
+    # Second digest retries naturally because the fact was never marked processed.
+    calls = len(f.llm.calls)
+    await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert len(f.llm.calls) == calls + 1
     f.close()
 
 
-async def test_rejected_inference_not_acknowledged(tmp_storage, fake_embed):
-    f = factory(tmp_storage, fake_embed, jev=FakeJev({"coverage": "INVALID"}))
-    seed(f, 1)
-    stats = await System2Agent(factory=f).run(app_id="app", user_id="u")
-    assert stats["failed_batches"] == 1
-    assert f.vector.get("0").s2_evidence_count == 0
-    assert "coverage=INVALID" in f.cache.list_s2_failures()[0]["error"]
-    f.close()
-
-
-async def test_bad_fact_is_bisected_out_and_rest_commits(tmp_storage, fake_embed):
+async def test_rejected_draft_is_dropped_but_batch_still_commits(
+    tmp_storage, fake_embed
+):
     def response(system, user):
         ids = [x["id"] for x in json.loads(user)["facts"]]
-        if "2" in ids:
-            return {"memories": [{"content": "bad", "evidence_ids": ["foreign"]}], "processed_ids": ids}
         return {
-            "memories": [{"content": "ok " + ",".join(ids), "kind": "summary", "evidence_ids": ids}],
+            "memories": [
+                {"content": "good " + ",".join(ids), "kind": "schema", "evidence_ids": ids},
+                {"content": "bad " + ",".join(ids), "kind": "schema", "evidence_ids": ids},
+            ],
             "processed_ids": ids,
         }
 
-    f = factory(tmp_storage, fake_embed, response, cap=4)
-    seed(f, 4)
+    f = factory(tmp_storage, fake_embed, response, cap=4, jev=FakeJev({"draft:1": "INVALID"}))
+    seed(f, 2)
     stats = await System2Agent(factory=f).run(app_id="app", user_id="u")
-    assert stats["retry_pending"] == 1
-    assert {n: f.vector.get(n).s2_evidence_count for n in "0123"} == {
-        "0": 1,
-        "1": 1,
-        "2": 0,
-        "3": 1,
-    }
-    assert [r["fact_id"] for r in f.cache.list_s2_failures()] == ["2"]
-    f.close()
-
-
-async def test_repeatedly_failing_fact_is_quarantined(tmp_storage, fake_embed):
-    f = factory(tmp_storage, fake_embed, {"memories": "invalid", "processed_ids": ["0"]})
-    f.settings.s2_max_attempts = 2
-    seed(f, 1)
-    for _ in range(2):
-        await System2Agent(factory=f).run(app_id="app", user_id="u")
-    calls = len(f.llm.calls)
-    stats = await System2Agent(factory=f).run(app_id="app", user_id="u")
-    assert stats["quarantined_facts"] == 1 and stats["retry_pending"] == 0
-    assert len(f.llm.calls) == calls
+    assert stats["failed_batches"] == 0 and stats["created_schemas"] == 1
+    (kept,) = f.vector.get_many({"layer": Layer.L3_DERIVED.value})
+    assert kept.content.startswith("good")
+    assert all(f.vector.get(n).s2_evidence_count == 1 for n in ("0", "1"))
     f.close()
 
 
@@ -167,70 +142,27 @@ async def test_preference_inference_is_versioned_derived_memory(tmp_storage, fak
     f.close()
 
 
-def test_topic_order_keeps_every_fact_and_groups_neighbours():
-    from dual_mem.system2.system2_agent import topic_order
+async def test_duplicate_derived_memory_is_skipped(tmp_storage, fake_embed):
+    def response(system, user):
+        ids = [x["id"] for x in json.loads(user)["facts"]]
+        return {
+            "memories": [{"content": "same inference", "kind": "schema", "evidence_ids": ids}],
+            "processed_ids": ids,
+        }
 
-    def node(nid, vec, at):
-        return MemoryNode(
-            node_id=nid, content=nid, layer=Layer.L1_FACT, app_id="a", user_id="u",
-            embedding=vec, memory_at=at,
-        )
-
-    facts = [
-        node("travel1", [1.0, 0.0], 1),
-        node("food1", [0.0, 1.0], 2),
-        node("travel2", [0.99, 0.05], 3),
-        node("food2", [0.05, 0.99], 4),
-        node("noembed", None, 5),
-    ]
-    ordered = [f.node_id for f in topic_order(facts)]
-    assert sorted(ordered) == sorted(f.node_id for f in facts)
-    assert ordered == ["travel1", "travel2", "food2", "food1", "noembed"]
+    f = factory(tmp_storage, fake_embed, response, cap=1)
+    seed(f, 2)
+    stats = await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert stats["created_schemas"] == 1 and stats["duplicates_skipped"] == 1
+    assert len(f.vector.get_many({"layer": Layer.L3_DERIVED.value})) == 1
+    f.close()
 
 
-async def test_no_inference_still_requires_jev_coverage_verdict(
-    tmp_storage, fake_embed
-):
+async def test_no_inference_marks_facts_processed(tmp_storage, fake_embed):
     f = factory(tmp_storage, fake_embed, {"memories": [], "processed_ids": ["0"]})
     seed(f, 1)
     await System2Agent(factory=f).run(app_id="app", user_id="u")
-    assert len(f.jev.calls) == 1 and f.vector.get("0").s2_evidence_count == 1
-    assert f.vector.get_many({"layer": Layer.L3_DERIVED.value}) == []
-    f.close()
-
-
-async def test_oversized_fact_retained_pending(tmp_storage, fake_embed):
-    f = factory(tmp_storage, fake_embed)
-    f.settings.llm_context_window = 1200
-    f.settings.llm_completion_reserve = 100
-    n = seed(f, 1)[0]
-    n.content = "x" * 4000
-    # seed initial oversized source directly in a new scope
-    n.node_id = "long"
-    f.vector.upsert([n])
-    with pytest.raises(ValueError, match="context"):
-        await System2Agent(factory=f).run(app_id="app", user_id="u")
-    assert f.vector.get("long").s2_evidence_count == 0
-    f.close()
-
-
-async def test_changed_evidence_cannot_commit_inference(tmp_storage, fake_embed):
-    f = factory(tmp_storage, fake_embed)
-    seed(f, 1)
-
-    def response(system, user):
-        f.vector.update_payload("0", {"is_latest": False})
-        return {
-            "memories": [
-                {"content": "derived", "kind": "schema", "evidence_ids": ["0"]}
-            ],
-            "processed_ids": ["0"],
-        }
-
-    f.llm.responses = {"json": response}
-    with pytest.raises(DecisionContextError, match="evidence changed"):
-        await System2Agent(factory=f).run(app_id="app", user_id="u")
-    assert f.vector.get("0").s2_evidence_count == 0
+    assert f.jev.calls == [] and f.vector.get("0").s2_evidence_count == 1
     assert f.vector.get_many({"layer": Layer.L3_DERIVED.value}) == []
     f.close()
 
@@ -261,4 +193,110 @@ async def test_graph_failure_repaired_after_evidence_watermark_commit(
     derived = f.vector.get_many({"layer": Layer.L3_DERIVED.value})[0]
     assert f.graph.evidence_of(derived.node_id) == ["0"]
     assert f.vector.pending_projections(("app", "u", "")) == []
+    f.close()
+
+
+def test_topic_order_keeps_every_fact_and_groups_neighbours():
+    from dual_mem.system2.system2_agent import topic_order
+
+    def node(nid, vec, at):
+        return MemoryNode(
+            node_id=nid, content=nid, layer=Layer.L1_FACT, app_id="a", user_id="u",
+            embedding=vec, memory_at=at,
+        )
+
+    facts = [
+        node("travel1", [1.0, 0.0], 1),
+        node("food1", [0.0, 1.0], 2),
+        node("travel2", [0.99, 0.05], 3),
+        node("food2", [0.05, 0.99], 4),
+        node("noembed", None, 5),
+    ]
+    ordered = [f.node_id for f in topic_order(facts)]
+    assert sorted(ordered) == sorted(f.node_id for f in facts)
+    assert ordered == ["travel1", "travel2", "food2", "food1", "noembed"]
+
+
+async def test_compact_evidence_ids_are_mapped_back_and_time_is_not_generation_time(tmp_storage, fake_embed):
+    def response(system, user):
+        facts = json.loads(user)["facts"]
+        assert {f["id"] for f in facts} == {"f0", "f1"}
+        assert all(f["conversation_date"] for f in facts)
+        return {"memories": [{"content": "User completed two electronics projects", "kind": "summary",
+                               "evidence_ids": [f["id"] for f in facts]}]}
+    f = factory(tmp_storage, fake_embed, response, cap=2)
+    originals = [MemoryNode(node_id=f"long-original-id-{i}", content=f"project {i}",
+                            layer=Layer.L1_FACT, app_id="app", user_id="u", memory_at=100 + i * 100,
+                            embedding=fake_embed.embed_sync(f"project {i}")) for i in range(2)]
+    f.vector.upsert(originals)
+    await System2Agent(factory=f).run(app_id="app", user_id="u")
+    (derived,) = f.vector.get_many({"layer": Layer.L3_DERIVED.value})
+    assert set(derived.custom["source_ids"]) == {n.node_id for n in originals}
+    assert derived.memory_at == 200
+    assert derived.gmt_created > 200
+    assert all(len(call["state"]["facts"]) == 2 for call in f.jev.calls)
+    f.close()
+
+
+async def test_cognition_uses_superseded_reasons_without_promoting_old_values(tmp_storage, fake_embed):
+    def response(system, user):
+        body = json.loads(user)
+        (head,) = body["facts"]
+        assert "SUPERSEDED" in system
+        assert head["history"][0]["is_latest"] is False
+        assert "convenience" in head["history"][0]["content"]
+        assert "id" not in head["history"][0]
+        return {"memories": [{"content": "User moved from convenience to privacy-driven tool choices",
+                               "kind": "summary", "evidence_ids": [head["id"]]}]}
+    f = factory(tmp_storage, fake_embed, response)
+    old = MemoryNode(node_id="old", content="Used a cloud notebook for convenience",
+                     layer=Layer.L2_PROFILE, app_id="app", user_id="u", is_latest=False,
+                     memory_at=100, embedding=fake_embed.embed_sync("convenience"))
+    head = MemoryNode(node_id="head", content="Now uses local notes because of privacy requirements",
+                      layer=Layer.L2_PROFILE, app_id="app", user_id="u", supersedes=["old"],
+                      memory_at=200, embedding=fake_embed.embed_sync("privacy"))
+    f.vector.upsert([old, head])
+    await System2Agent(factory=f).run(app_id="app", user_id="u")
+    (derived,) = f.vector.get_many({"layer": Layer.L3_DERIVED.value})
+    assert set(derived.custom["source_ids"]) == {"head", "old"}
+    assert f.vector.get("head").s2_evidence_count == 1
+    assert f.vector.get("old").s2_evidence_count == 0
+    assert not f.vector.get("old").is_latest
+    assert f.jev.calls[0]["state"]["facts"][0]["history"]
+    assert derived.memory_at == 200
+    f.close()
+
+
+async def test_history_cannot_cross_scope(tmp_storage, fake_embed):
+    from dual_mem.errors import DecisionContextError
+    f = factory(tmp_storage, fake_embed)
+    nodes = [MemoryNode(node_id="head", content="current", layer=Layer.L1_FACT,
+                        app_id="app", user_id="u", supersedes=["foreign"],
+                        embedding=fake_embed.embed_sync("current")),
+             MemoryNode(node_id="foreign", content="private", layer=Layer.L1_FACT,
+                        app_id="app", user_id="other", is_latest=False,
+                        embedding=fake_embed.embed_sync("private"))]
+    f.vector.upsert(nodes)
+    with pytest.raises(DecisionContextError, match="crosses tenant"):
+        await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert f.llm.calls == []
+    f.close()
+
+
+async def test_return_to_old_derived_content_has_new_evidence_identity(tmp_storage, fake_embed):
+    import uuid
+    text = "User seems to prefer quiet venues"
+    def response(system, user):
+        ids = [f["id"] for f in json.loads(user)["facts"]]
+        return {"memories": [{"content": text, "kind": "preference", "evidence_ids": ids}]}
+    f = factory(tmp_storage, fake_embed, response)
+    seed(f, 1)
+    old_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"s2:app:u::{text}"))
+    f.vector.upsert([MemoryNode(node_id=old_id, content=text, layer=Layer.L3_DERIVED,
+                               kind="preference", app_id="app", user_id="u", is_latest=False,
+                               embedding=fake_embed.embed_sync(text))])
+    stats = await System2Agent(factory=f).run(app_id="app", user_id="u")
+    assert stats["created_preferences"] == 1 and stats["failed_batches"] == 0
+    derived = [n for n in f.vector.get_many({"layer": Layer.L3_DERIVED.value}) if n.is_latest]
+    assert len(derived) == 1 and derived[0].node_id != old_id
     f.close()

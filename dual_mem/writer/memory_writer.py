@@ -23,7 +23,6 @@ class WriterOutcome:
     is_ephemeral: bool = False
     deduplicated: bool = False
     decisions: list[MemoryDecision] = field(default_factory=list)
-    needs_review: list[str] = field(default_factory=list)
     status: str = ""
 
     def __post_init__(self) -> None:
@@ -32,7 +31,7 @@ class WriterOutcome:
             for item in self.decisions
         ]
         if not self.status:
-            self.status = write_status(self.decisions, pending=bool(self.needs_review))
+            self.status = write_status(self.decisions)
 
 
 def _outcome(raw_id: str, commit: CommitResult, ephemeral: bool, ids: list[str]) -> WriterOutcome:
@@ -42,7 +41,6 @@ def _outcome(raw_id: str, commit: CommitResult, ephemeral: bool, ids: list[str])
         commit.passed,
         ephemeral,
         decisions=commit.decisions,
-        needs_review=list(commit.needs_review),
     )
 
 
@@ -95,7 +93,7 @@ class MemoryWriter:
                     node_id=raw_id,
                 )
             # Failed model work leaves original evidence available for retry; a
-            # committed plan is recovered (with its review intents) by run_system1.
+            # committed plan is recovered from the plan journal by run_system1.
             ids, commit, ephemeral = await self.agent.run_system1(
                 content=content,
                 raw_node=raw,

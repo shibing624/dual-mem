@@ -44,7 +44,7 @@ def _format_item(
 
     mem_date = format_memory_timestamp(item.get("memory_at") or item.get("gmt_created"))
     date_suffix = f" (conversation date: {mem_date})" if mem_date else ""
-    lines = [f"- [{item['category']}] {content}{date_suffix}"]
+    lines = [f"- [{item['category']}] {_source_tag(item)}{content}{date_suffix}"]
     if item.get("valid_from") is not None or item.get("valid_until") is not None:
         start = format_memory_timestamp(item.get("valid_from")) or "?"
         end = format_memory_timestamp(item.get("valid_until")) or "?"
@@ -93,8 +93,6 @@ def relation_lines(item: dict, *, prefix: str = "  ") -> list[str]:
             f"{prefix}(conflicts, both unretracted{', ' + date if date else ''}: "
             f"{other.get('content', '')})"
         )
-    if item.get("needs_review"):
-        lines.append(f"{prefix}(relation to older memories not yet reviewed)")
     return lines
 
 
@@ -134,6 +132,12 @@ def _hit_text(hit: dict) -> str:
     return str(hit.get("content") or hit.get("memory") or "")
 
 
+def _source_tag(hit: dict) -> str:
+    if hit.get("layer") == "L3_DERIVED":
+        return "[derived] "
+    return {"user": "[user] ", "agent": "[assistant] ", "assistant": "[assistant] "}.get(hit.get("owner"), "")
+
+
 def _hit_timestamp(hit: dict) -> int | None:
     for key in ("memory_at", "gmt_created"):
         val = hit.get(key)
@@ -169,7 +173,7 @@ def format_search_hit_line(
         mem_date = format_memory_timestamp(_hit_timestamp(hit))
         if mem_date:
             date_suffix = f" (conversation date: {mem_date})"
-    line = f"{prefix}{cat_part}{text}{date_suffix}"
+    line = f"{prefix}{cat_part}{_source_tag(hit)}{text}{date_suffix}"
     if include_relations:
         extra = relation_lines(hit, prefix=f"{prefix}  ")
         if extra:
