@@ -432,9 +432,10 @@ class MemoryClient:
         agent_id: str = "",
         session_id: str = "",
         memory_at: int | None = None,
+        request_id: str | None = None,
     ) -> WriteResult:
         """Write L0_RAW only (embed + store). Does not run extract."""
-        request_id = str(uuid.uuid4())
+        request_id = request_id or str(uuid.uuid4())
         start = time.perf_counter()
         resolved_app_id = self._resolve_app_id(app_id)
         text, _normalized, _turns = _prepare_write_text(
@@ -461,6 +462,7 @@ class MemoryClient:
                 agent_id=agent_id,
                 session_id=session_id,
                 memory_at=memory_at,
+                request_id=request_id,
             )
         return WriteResult(
             success=True,

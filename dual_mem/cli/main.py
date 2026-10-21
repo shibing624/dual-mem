@@ -9,11 +9,13 @@ from pathlib import Path
 
 import typer
 
+from dual_mem.cli.hub import hub_app
 from dual_mem.client import MemoryClient
 from dual_mem.config import Settings
 from dual_mem.retrieval.formatter import format_memories
 
 app = typer.Typer(help="dual-mem 分层记忆 SDK 命令行")
+app.add_typer(hub_app, name="hub")
 
 
 def make_client(mode: str | None = None) -> MemoryClient:

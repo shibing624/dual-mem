@@ -54,6 +54,7 @@ class System2Writer:
         user_id: str,
         agent_id: str,
         session_id: str,
+        request_id: str,
         memory_at: int | None = None,
     ) -> WriterOutcome:
         return await self.inner.write_raw(
@@ -62,6 +63,7 @@ class System2Writer:
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
+            request_id=request_id,
             memory_at=memory_at,
         )
 

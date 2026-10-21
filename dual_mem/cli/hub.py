@@ -1,0 +1,370 @@
+# -*- coding: utf-8 -*-
+"""`dual-mem hub`: attach hosts to one loopback-first single-writer Core."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import subprocess
+import sys
+from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+import typer
+
+from dual_mem.memhub import hosts as hub_hosts
+from dual_mem.memhub.client import HubClient
+from dual_mem.memhub.config import (
+    CursorStore,
+    HubConfig,
+    clear_hub_config,
+    hub_root,
+    hub_settings,
+    load_or_create_runtime_token,
+    load_hub_config,
+    runtime_status,
+    save_hub_config,
+)
+from dual_mem.memhub.sources import SOURCES, locate_transcript, scan_file, scan_sources
+from dual_mem.retrieval.formatter import format_memories
+
+hub_app = typer.Typer(help="MemHub：本地单 Core、跨 CLI 共享个人记忆")
+HubDir = typer.Option(None, "--hub-dir", help="Hub 根目录（默认 ~/.dual-mem）")
+
+
+def make_client(hub_dir: str | None) -> HubClient:
+    """Indirection for tests."""
+    return HubClient.from_config(hub_dir)
+
+
+def _echo(data: Any) -> None:
+    typer.echo(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def _targets(host: str) -> list[str]:
+    if host == "all":
+        return list(hub_hosts.HOSTS)
+    if host not in hub_hosts.HOSTS:
+        raise typer.BadParameter(
+            f"unknown host {host!r}; choose from "
+            f"{', '.join(hub_hosts.HOSTS)} or all"
+        )
+    return [host]
+
+
+@contextmanager
+def _hook_errors_logged(hub_dir: str | None, name: str) -> Iterator[None]:
+    """Host hooks fail open; diagnostics stay under the local Hub home."""
+    try:
+        yield
+    except Exception:
+        log_dir = hub_root(hub_dir) / "logs"
+        log_dir.mkdir(exist_ok=True)
+        logger = logging.getLogger("dual_mem.memhub.hooks")
+        handler = logging.FileHandler(log_dir / "hooks.log", encoding="utf-8")
+        logger.addHandler(handler)
+        logger.exception("%s hook failed", name)
+        logger.removeHandler(handler)
+        handler.close()
+
+
+def _spawn_detached(argv: list[str], log_path: Path) -> None:
+    log_path.parent.mkdir(exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as log:
+        subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            start_new_session=True,
+        )
+
+
+def _validate_base_url(base_url: str) -> str:
+    value = base_url.rstrip("/")
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise typer.BadParameter("base_url must be an absolute http(s) URL")
+    loopback = parsed.hostname in ("127.0.0.1", "localhost", "::1")
+    if parsed.scheme != "https" and not loopback:
+        raise typer.BadParameter(
+            "non-loopback Hub connections require HTTPS; use an SSH/Tailscale "
+            "tunnel and a 127.0.0.1 URL for方案 A"
+        )
+    return value
+
+
+@hub_app.command("attach")
+def hub_attach(
+    base_url: str = typer.Option(..., "--base-url", help="Hub Core URL"),
+    api_key: str = typer.Option(..., "--api-key", help="Hub Core Bearer API key"),
+    hub_dir: str | None = HubDir,
+) -> None:
+    """显式连接隧道/远程 Core；本地 Core 无需执行此命令。"""
+    normalized = _validate_base_url(base_url)
+
+    async def attach() -> dict[str, Any]:
+        async with HubClient(base_url=normalized, api_key=api_key) as client:
+            return await client.identity()
+
+    identity = asyncio.run(attach())
+    cfg = HubConfig(base_url=normalized, api_key=api_key)
+    save_hub_config(cfg, hub_dir)
+    _echo(
+        {
+            "hub_dir": str(hub_root(hub_dir)),
+            "config": cfg.public_dict(),
+            "identity": identity,
+        }
+    )
+
+
+@hub_app.command("detach")
+def hub_detach(hub_dir: str | None = HubDir) -> None:
+    """移除远程连接，恢复 runtime.json 本地自动发现。"""
+    _echo(
+        {
+            "hub_dir": str(hub_root(hub_dir)),
+            "detached": clear_hub_config(hub_dir),
+        }
+    )
+
+
+@hub_app.command("serve")
+def hub_serve(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8765, "--port"),
+    api_key: str | None = typer.Option(
+        None,
+        "--api-key",
+        envvar="DUAL_MEM_HUB_SERVER_API_KEY",
+        help="可选固定 Bearer key；默认自动生成 runtime-token",
+    ),
+    mode: str | None = typer.Option(None, "--mode", help="system1 | dual"),
+    hub_dir: str | None = HubDir,
+) -> None:
+    """启动唯一 Hub Core；记忆、Evidence 与上传目录均留在本机 Hub 根目录。"""
+    import uvicorn
+
+    from dual_mem.memhub.server import create_hub_app
+
+    settings = hub_settings(hub_dir, mode=mode)
+    token = load_or_create_runtime_token(hub_dir, token=api_key)
+    published_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    url_host = f"[{published_host}]" if ":" in published_host else published_host
+    app = create_hub_app(
+        api_key=token,
+        hub_dir=hub_dir,
+        settings=settings,
+        published_base_url=f"http://{url_host}:{port}",
+    )
+    uvicorn.run(app, host=host, port=port)
+
+
+@hub_app.command("status")
+def hub_status(hub_dir: str | None = HubDir) -> None:
+    """Core 记忆/队列状态，以及本机扫描进度和宿主接入状态。"""
+
+    async def remote() -> dict[str, Any]:
+        async with make_client(hub_dir) as client:
+            return await client.status()
+
+    data = asyncio.run(remote())
+    with CursorStore(hub_dir) as cursors:
+        scanned = Counter()
+        for cursor in cursors.all():
+            scanned[cursor.source] += cursor.turns
+    attachment = load_hub_config(hub_dir)
+    data.update(
+        {
+            "connection": (
+                attachment.public_dict()
+                if attachment.base_url
+                else {"mode": "local", "runtime": runtime_status(hub_dir)}
+            ),
+            "turns_scanned": dict(scanned),
+            "hosts": hub_hosts.hosts_status(),
+        }
+    )
+    _echo(data)
+
+
+@hub_app.command("install-host")
+def hub_install_host(
+    host: str = typer.Argument("all", help=f"{' | '.join(hub_hosts.HOSTS)} | all"),
+    hub_dir: str | None = HubDir,
+) -> None:
+    """安装 Hub MCP 代理、recall skill 与采集 Hook。"""
+    _echo(
+        [
+            hub_hosts.install_host(item, hub_dir=hub_dir)
+            for item in _targets(host)
+        ]
+    )
+
+
+@hub_app.command("uninstall-host")
+def hub_uninstall_host(
+    host: str = typer.Argument("all", help=f"{' | '.join(hub_hosts.HOSTS)} | all"),
+) -> None:
+    """移除 Hub 写入的配置，其它宿主配置保持不动。"""
+    _echo([hub_hosts.uninstall_host(item) for item in _targets(host)])
+
+
+@hub_app.command("scan")
+def hub_scan(
+    source: str = typer.Option(
+        "all",
+        "--source",
+        "-s",
+        help=f"{' | '.join(SOURCES)} | all",
+    ),
+    file: Path | None = typer.Option(None, "--file", help="只扫一个会话文件"),
+    complete: bool = typer.Option(False, "--complete", help="最后一轮已经结束"),
+    raw_only: bool = typer.Option(False, "--raw-only", help="只保留原始 Evidence"),
+    limit: int = typer.Option(0, "--limit", help="最多写入轮数，0 = 不限"),
+    batch: int = typer.Option(5, "--batch", help="同会话每次提交的轮数"),
+    idle: int = typer.Option(300, "--idle", help="静默多少秒视为一轮结束"),
+    hub_dir: str | None = HubDir,
+) -> None:
+    """按本机游标增量读取会话，并提交给唯一 Hub Core。"""
+    selected = list(SOURCES) if source == "all" else [source]
+    if not set(selected) <= set(SOURCES):
+        raise typer.BadParameter(f"unknown source {source!r}")
+
+    async def run() -> Any:
+        async with make_client(hub_dir) as client:
+            options = {
+                "raw_only": raw_only,
+                "batch_turns": batch,
+                "idle_seconds": idle,
+            }
+            if file is None:
+                return await scan_sources(
+                    client,
+                    hub_dir=hub_dir,
+                    sources=selected,
+                    max_turns=limit,
+                    **options,
+                )
+            with CursorStore(hub_dir) as cursors:
+                return {
+                    selected[0]: await scan_file(
+                        client,
+                        source=selected[0],
+                        path=file,
+                        cursors=cursors,
+                        complete=complete,
+                        max_turns=limit,
+                        **options,
+                    )
+                }
+
+    _echo(asyncio.run(run()))
+
+
+@hub_app.command("capture")
+def hub_capture(
+    source: str = typer.Argument(..., help=f"{' | '.join(SOURCES)}"),
+    hub_dir: str | None = HubDir,
+) -> None:
+    """Hook 入口：定位 transcript 后后台扫描，立即返回宿主。"""
+    with _hook_errors_logged(hub_dir, f"capture {source}"):
+        payload = json.loads(sys.stdin.read() or "{}")
+        transcript = locate_transcript(source, payload)
+        if transcript is None:
+            return
+        argv = [
+            sys.executable,
+            "-m",
+            "dual_mem.cli.main",
+            "hub",
+            "scan",
+            "--source",
+            source,
+            "--file",
+            str(transcript),
+            "--complete",
+        ]
+        if hub_dir:
+            argv += ["--hub-dir", hub_dir]
+        _spawn_detached(argv, hub_root(hub_dir) / "logs" / "capture.log")
+
+
+@hub_app.command("hook-search")
+def hub_hook_search(
+    limit: int = typer.Option(8, "--limit"),
+    hub_dir: str | None = HubDir,
+) -> None:
+    """UserPromptSubmit：从 Core 召回并注入 additionalContext。"""
+    with _hook_errors_logged(hub_dir, "hook-search"):
+        prompt = json.loads(sys.stdin.read() or "{}").get("prompt", "").strip()
+        if not prompt:
+            return
+
+        async def search() -> dict[str, Any]:
+            async with make_client(hub_dir) as client:
+                return await client.recall(query=prompt, limit=limit, raw_limit=3)
+
+        result = asyncio.run(search())
+        context = format_memories(result["memories"]).strip()
+        if result["conversations"]:
+            raw = "\n".join(
+                f"- [{item['session_id']}] {item['content'].strip()}"
+                for item in result["conversations"]
+            )
+            context = f"{context}\n\n历史对话：\n{raw}".strip()
+        if context:
+            typer.echo(
+                json.dumps(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "UserPromptSubmit",
+                            "additionalContext": context,
+                        }
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+
+@hub_app.command("recall")
+def hub_recall(
+    query: str = typer.Argument(...),
+    limit: int = typer.Option(10, "--limit"),
+    raw_limit: int = typer.Option(5, "--raw-limit"),
+    json_out: bool = typer.Option(False, "--json"),
+    hub_dir: str | None = HubDir,
+) -> None:
+    """同时检索当前记忆和历史对话 Evidence。"""
+
+    async def search() -> dict[str, Any]:
+        async with make_client(hub_dir) as client:
+            return await client.recall(
+                query=query,
+                limit=limit,
+                raw_limit=raw_limit,
+            )
+
+    result = asyncio.run(search())
+    if json_out:
+        _echo(result)
+        return
+    sections = []
+    memories = format_memories(result["memories"]).strip()
+    if memories:
+        sections.append(f"## 记忆\n{memories}")
+    if result["conversations"]:
+        sections.append(
+            "## 历史对话\n"
+            + "\n".join(
+                f"- [{item['session_id']}] {item['content'].strip()}"
+                for item in result["conversations"]
+            )
+        )
+    typer.echo("\n\n".join(sections) or "没有相关记忆。")

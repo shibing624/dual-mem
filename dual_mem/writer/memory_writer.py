@@ -148,19 +148,57 @@ class MemoryWriter:
         user_id: str,
         agent_id: str,
         session_id: str,
+        request_id: str,
         memory_at: int | None = None,
     ) -> WriterOutcome:
-        raw = await self._raw(
-            content=content,
-            app_id=app_id,
-            user_id=user_id,
-            agent_id=agent_id,
-            session_id=session_id,
-            memory_at=memory_at,
-        )
-        return WriterOutcome(
-            raw.node_id, commit_passed=False, is_ephemeral=True, status="raw_only"
-        )
+        scope = (app_id, user_id, agent_id)
+        key = "request:" + json.dumps([scope, request_id])
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                ["raw_only", content, session_id, memory_at],
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        async with self._requests.get(key):
+            saved = self.factory.cache.get_request_outcome(key)
+            if saved:
+                if saved["fingerprint"] != fingerprint:
+                    raise IdempotencyConflictError(
+                        "request_id reused with different input"
+                    )
+                return WriterOutcome(**saved["outcome"])
+            raw_id = str(uuid.uuid5(uuid.NAMESPACE_URL, key + ":raw"))
+            raw = self.factory.vector.get(raw_id)
+            if raw is None:
+                raw = await self._raw(
+                    content=content,
+                    app_id=app_id,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    memory_at=memory_at,
+                    node_id=raw_id,
+                )
+            elif (
+                raw.content != content
+                or (raw.app_id, raw.user_id, raw.agent_id) != scope
+                or raw.session_id != session_id
+                or raw.memory_at != memory_at
+            ):
+                raise IdempotencyConflictError(
+                    "request_id reused with different input"
+                )
+            result = WriterOutcome(
+                raw.node_id,
+                commit_passed=False,
+                is_ephemeral=True,
+                status="raw_only",
+            )
+            self.factory.cache.set_request_outcome(
+                key,
+                {"fingerprint": fingerprint, "outcome": asdict(result)},
+            )
+            return result
 
     async def distill(
         self,

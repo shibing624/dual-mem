@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **MemHub（`dual-mem hub`）**：借鉴 Hy-Memory MemHub，改为本地单 Core 架构。`hub serve` 独占 `~/.dual-mem`，自动生成 `runtime-token` 并通过 `runtime.json` 供同机 CLI/MCP/Hook 零配置发现；持久 `hub_writes` Evidence 队列的唯一 worker 写 Chroma/Kuzu/SQLite。Agentica / Claude Code / Codex / Cursor / Hermes 共用固定个人 scope。云上仍是同一单实例配合 SSH/Tailscale 隧道，通过高级命令 `hub attach --base-url ... --api-key ...` 显式接入，不复制或同步记忆库。
+- **删除 MemHub 多主快照方案**：移除 `--user-id`、`--fs-*`、`--sync-secret`、`--keep-snapshots`、`--install-hosts` 以及 `hub export/import/push/pull/sync`，同时删除 `MulanFs`、客户端 Fernet 加密和 `VectorStore.export_nodes/merge_nodes`；宿主安装改为独立 `hub install-host`，API Key 不写入宿主配置。
+- `MemoryClient.add_raw` / `SyncMemoryClient.add_raw` 新增 `request_id`，raw-only Evidence 现在与普通 `add` 一样支持确定性幂等重放。
+
 ### 2026-10-20（晚）：System 2 v3（hy-memory 2.0.4 对齐）、PersonaMem-v2 驱动的 System 1 抽取修正（breaking）
 
 - **S2 v3 写入**（`system2/system2_agent.py` 重写）：
