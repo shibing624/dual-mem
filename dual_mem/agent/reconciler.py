@@ -29,7 +29,7 @@ _ACTIONS = {
     "ADD_OVERRIDE": "Replace a corresponding PERSISTENT STATE VALUE or explicitly correct a prior claim. Current residence replaces previous residence, even when returning to an ancestor value. NEVER replace a different completed event: two moves are two retained events.",
     "ADD_SUPPLEMENT": "Append a new dimension or a DISTINCT OCCURRENCE. A genuinely different completed move/purchase/visit is an independent event, even when it changes a state or repeats an earlier value. Repeating a report of the SAME occurrence is SKIP, not a new event. Keep all earlier events. Initial state without baseline also belongs here.",
     "ADD_TEMPORAL": "Explicit LIMITED exception (this week/temporarily/until a date) coexisting with a long-term baseline. 'Currently/目前/现在' alone is not a limited exception.",
-    "ADD_NEGATE": "Explicit termination or denial of an existing claim.",
+    "ADD_NEGATE": "Explicit termination or denial of an existing claim, including the user withdrawing a detail they asked the assistant to forget or stop using: the withdrawal replaces the detail.",
     "ADD_CONFLICT": "Competing SIMULTANEOUS incompatible claims with no explicit change, correction, ordering or authority. A user's explicit move/change/back is OVERRIDE, not CONFLICT. Different sequential events are SUPPLEMENT, not CONFLICT.",
     "ADD_HISTORICAL": "The incoming claim is an OLDER report of the target's state: its memory_at precedes the target's. Record it as a past version; the newer target stays current.",
     "RAW_ONLY": "No durable fact, event, profile or intention; retain source evidence only.",

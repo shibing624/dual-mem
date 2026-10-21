@@ -171,8 +171,36 @@ class Settings(BaseSettings):
     # Relations Jev chose below this confidence are written as an independent
     # SUPPLEMENT immediately, without later review. 0 disables this confidence route.
     reconcile_review_confidence: float = 0.0
-    # Maximum current facts per System2 generation batch (also context-budgeted).
-    system2_max_prompt_facts: int = 120
+    # System 2 (hy-memory 2.0.4 aligned). Fresh current facts are clustered by
+    # average-linkage cosine distance; clusters larger than system2_max_prompt_facts are
+    # re-split at system2_refine_distance; near-duplicates (>= system2_dedup_cosine) are
+    # collapsed; clusters smaller than system2_min_cluster_size are not induced.
+    system2_cluster_distance: float = 0.35
+    system2_refine_distance: float = 0.25
+    system2_min_cluster_size: int = 4
+    system2_dedup_cosine: float = 0.92
+    system2_max_prompt_facts: int = 12
+    # A schema must cite user-owned evidence spanning this many distinct raw sources.
+    system2_min_sources: int = 2
+    # Nearest existing schemas shown per cluster, so support is added instead of duplicated.
+    system2_existing_per_group: int = 8
+    system2_max_tokens: int = 4000
+    # A new schema this cosine-close to an existing one that shares evidence is
+    # converted to add_evidence.
+    system2_schema_dedup_cosine: float = 0.68
+    # Cross-domain sweeper: behaviour-space vs content-space collision.
+    system2_cross_domain_enabled: bool = True
+    system2_cross_domain_min_basics: int = 5
+    system2_collision_beh_threshold: float = 0.70
+    system2_collision_sem_threshold: float = 0.60
+    # Question-blind persona catalog: exact current facts selected per domain.
+    system2_catalog_enabled: bool = True
+    # Fewer current facts than this: no catalog (a profile needs material to balance).
+    system2_catalog_min_facts: int = 8
+    system2_catalog_max_facts: int = 120
+    system2_catalog_content_chars: int = 180
+    system2_catalog_per_domain: int = 4
+    system2_catalog_total: int = 32
     # Idempotent add(request_id=...) outcomes (chat and coding paths) are kept this
     # many seconds and purged by digest() (0 = forever).
     request_outcome_ttl_seconds: int = 7 * 24 * 3600
@@ -209,6 +237,21 @@ class Settings(BaseSettings):
     hybrid_w_sem: float = 0.6
     hybrid_w_bm25: float = 0.4
     normal_candidate_multiplier: float = 3.0
+    # Superseded memories near a query are followed to the version that replaced them,
+    # so a change is recalled even when the query only resembles the older wording.
+    # 0 disables the bridge.
+    version_bridge_limit: int = 20
+    # Schemas (basic + core) returned in their own group, after the evidence ``limit``
+    # (never in place of System 1 memories). 0 returns none. Default 0: on PersonaMem-v2
+    # (c20, 476 q, same stores) reading schemas cost -1.5pp (5W/12L) while the persona
+    # catalog gained +1.7pp (19W/11L); schemas are still written by digest.
+    derived_context_limit: int = 0
+    # Forward route: schemas whose content is at least this cosine-similar to the query.
+    schema_forward_min_score: float = 0.4
+    # Reverse route: schemas explained by at least this many retrieved memories.
+    schema_min_support: int = 1
+    # Return the persona catalog (question-blind, exact current facts) with every search.
+    catalog_context_enabled: bool = True
     hybrid_evidence_boost_max: float = 0.3
     hybrid_evidence_saturate: int = 5
     # Optional query/document cross-encoder. No generation or retry is involved.
@@ -233,6 +276,15 @@ class Settings(BaseSettings):
         "reconcile_candidate_limit",
         "reconcile_batch_size",
         "system2_max_prompt_facts",
+        "system2_min_sources",
+        "system2_cluster_distance",
+        "system2_refine_distance",
+        "system2_min_cluster_size",
+        "system2_dedup_cosine",
+        "system2_max_tokens",
+        "system2_catalog_max_facts",
+        "system2_catalog_per_domain",
+        "system2_catalog_total",
         "rerank_timeout",
         "rerank_candidate_limit",
     )

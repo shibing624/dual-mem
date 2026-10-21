@@ -188,6 +188,8 @@ class MemoryItem:
     is_latest: bool = True
     revision: int = 0
     source_ids: list[str] = field(default_factory=list)
+    # Schema only: the retrieved memories (in this result) that this pattern explains.
+    supporting_ids: list[str] = field(default_factory=list)
     supersedes: list[str] = field(default_factory=list)
     conflicts_with: list[str] = field(default_factory=list)
     valid_from: int | None = None
@@ -212,6 +214,7 @@ class MemoryItem:
             "is_latest": self.is_latest,
             "revision": self.revision,
             "source_ids": list(self.source_ids),
+            "supporting_ids": list(self.supporting_ids),
             "supersedes": list(self.supersedes),
             "conflicts_with": list(self.conflicts_with),
         }
@@ -264,7 +267,12 @@ class MemoryItem:
 
 @dataclass
 class SearchMemories:
-    """Recall groups from the reader (routing, not storage layers)."""
+    """Recall groups from the reader (routing, not storage layers).
+
+    System 2 schemas live in their own ``schema`` group. They are selected after
+    the System 1 groups are final, so they never take an evidence slot; each carries
+    ``supporting_ids`` — the retrieved memories it explains.
+    """
 
     # 画像路：L2/L3 等身份与 schema
     profile: list[MemoryItem] = field(default_factory=list)
@@ -274,6 +282,10 @@ class SearchMemories:
     normal: list[MemoryItem] = field(default_factory=list)
     # 原文路：L0_RAW 低权重兜底（raw_limit=0 时为空）
     raw: list[MemoryItem] = field(default_factory=list)
+    # 模式路：System 2 行为 schema（独立配额，不占证据名额）
+    schema: list[MemoryItem] = field(default_factory=list)
+    # 画像目录：System 2 按领域选出的当前事实原文（与问题无关）
+    catalog: list[MemoryItem] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Flatten each route's items into plain dicts."""
@@ -282,10 +294,16 @@ class SearchMemories:
             "proactive": [item.to_dict() for item in self.proactive],
             "normal": [item.to_dict() for item in self.normal],
             "raw": [item.to_dict() for item in self.raw],
+            "schema": [item.to_dict() for item in self.schema],
+            "catalog": [item.to_dict() for item in self.catalog],
         }
 
     def flatten(self, *, limit: int | None = None) -> list[MemoryItem]:
-        """Merge all routes and sort by score descending."""
+        """System 1 evidence ordered by score (``limit`` applies), then schemas, then catalog.
+
+        Schema scores rank schemas among themselves and are never compared with
+        evidence scores, so System 2 groups are appended after the bounded evidence.
+        """
         items = [*self.profile, *self.proactive, *self.normal, *self.raw]
         items.sort(key=lambda x: x.score, reverse=True)
         unique: list[MemoryItem] = []
@@ -296,8 +314,8 @@ class SearchMemories:
             seen.add(item.memory_id)
             unique.append(item)
         if limit is not None and limit >= 0:
-            return unique[:limit]
-        return unique
+            unique = unique[:limit]
+        return [*unique, *(s for s in [*self.schema, *self.catalog] if s.memory_id not in seen)]
 
     def to_search_results(self, *, limit: int | None = None) -> list[dict[str, Any]]:
         """Current-state search hits for QA pipelines (see ``MemoryItem.to_search_result``)."""

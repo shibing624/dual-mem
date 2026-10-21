@@ -9,8 +9,7 @@ from dual_mem.system2.system2_agent import System2Agent
 
 def make(tmp_storage, embed):
     def response(system, user):
-        ids = [f["id"] for f in json.loads(user)["facts"]]
-        return {"memories": [], "processed_ids": ids}
+        return {"operations": []}
 
     return MemoryClient(
         settings=Settings(
@@ -31,7 +30,8 @@ async def test_dual_only_cognizes_after_explicit_digest(tmp_storage, fake_embed)
     )
     assert (await c.digest()).processed == 1
     assert not c.factory.cache.list_pending_s2_scopes()
-    assert len(c.factory.llm.calls) == 2
+    # One memory from one source cannot form a schema: digest calls no model.
+    assert len(c.factory.llm.calls) == 1
     await c.aclose()
 
 

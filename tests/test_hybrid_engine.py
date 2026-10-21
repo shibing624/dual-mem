@@ -110,13 +110,75 @@ async def test_bm25_rerank_surfaces_exact_term_over_higher_semantic(
     assert normal_ids.index("kw") < normal_ids.index("distractor")
     assert embed.direct_calls == 1
     assert embed.queued_calls == 0
-    assert len(query_calls) == 1
-    assert (
-        query_calls[0][1]["top_k"] == 75
-    )  # v10: vdb_sem_limit = max(ceil(10*3*2.5),60) = 75
+    # One current-memory query plus one bounded query over superseded versions
+    # (bridges to their replacements); nothing else.
+    current = [c for c in query_calls if c[1]["where"].get("is_latest") is True]
+    superseded = [c for c in query_calls if c[1]["where"].get("is_latest") is False]
+    assert len(current) == 1 and len(superseded) == 1 and len(query_calls) == 2
+    assert current[0][1]["top_k"] == 75  # vdb_sem_limit = max(ceil(10*3*2.5),60)
+    assert superseded[0][1]["top_k"] == client.settings.version_bridge_limit
     assert get_calls == []
 
     await client.aclose()
+
+
+async def test_recall_follows_superseded_memory_to_its_current_version(tmp_storage):
+    """A replaced memory that matches the query brings in what replaced it.
+
+    The user's query resembles the *old* wording only; the current statement (which
+    records the change) is not semantically close to the query.  The write path
+    already recorded the replacement, so recall follows that edge instead of relying
+    on wording: an older version near the query pulls in its current head.
+    """
+    query = "other forms of literary discussions"
+    client = MemoryClient(
+        settings=Settings(mode="system1", storage_dir=tmp_storage),
+        embed=_ScriptedEmbed(query),
+        llm=FakeLLMClient(),
+    )
+    old = MemoryNode(
+        content="The user started exploring podcasts about author interviews while commuting.",
+        layer=Layer.L1_FACT, app_id="app", user_id="u", node_id="old-podcast",
+        status=MemoryStatus.ACTIVE, is_latest=False, superseded_by=["new-podcast"],
+    )
+    old.embedding = _unit(0.8)  # close to the query
+    new = MemoryNode(
+        content="The user stopped listening to book podcasts because they became repetitive.",
+        layer=Layer.L1_FACT, app_id="app", user_id="u", node_id="new-podcast",
+        status=MemoryStatus.ACTIVE, is_latest=True, supersedes=["old-podcast"],
+    )
+    new.embedding = _unit(0.05)  # not close to the query
+    # Enough current memories closer to the query than the new version to fill the
+    # result window, so only the replacement edge can bring the new version in.
+    distractors = []
+    for i in range(5):
+        node = MemoryNode(
+            content=f"The user enjoys topic number {i} in their reading life.",
+            layer=Layer.L1_FACT, app_id="app", user_id="u", node_id=f"distractor-{i}",
+            status=MemoryStatus.ACTIVE,
+        )
+        node.embedding = _unit(0.7 - 0.01 * i)
+        distractors.append(node)
+    client.factory.vector.upsert([old, new, *distractors])
+
+    result = await client.search(
+        query=query, app_ids=["app"], user_id="u", min_score=0.0, limit=3
+    )
+    normal_ids = [m.memory_id for m in result.memories.normal]
+    assert "new-podcast" in normal_ids, "current version must be recalled via its superseded predecessor"
+    assert "old-podcast" not in normal_ids, "superseded versions are bridges, never results"
+
+    bridge_off = MemoryClient(
+        settings=Settings(mode="system1", storage_dir=tmp_storage, version_bridge_limit=0),
+        embed=_ScriptedEmbed(query),
+        llm=FakeLLMClient(),
+    )
+    without = await bridge_off.search(
+        query=query, app_ids=["app"], user_id="u", min_score=0.0, limit=3
+    )
+    assert "new-podcast" not in [m.memory_id for m in without.memories.normal]
+    await client.aclose()
+    await bridge_off.aclose()
 
 
 async def test_lexical_recall_outside_semantic_pool_uses_calibrated_scores(tmp_storage):
@@ -229,9 +291,9 @@ async def test_ubiquitous_term_does_not_force_weak_hits_through_gate(tmp_storage
     await client.aclose()
 
 
-async def test_dual_l3_derived_recalled_into_profile(tmp_storage, fake_embed):
-    """Dual mode: an L3 derived node with evidence surfaces in the profile route."""
-    settings = Settings(mode="dual", storage_dir=tmp_storage)
+async def test_dual_schema_reached_from_its_evidence(tmp_storage, fake_embed):
+    """A schema is selected through the retrieved fact it explains, into its own group."""
+    settings = Settings(mode="dual", storage_dir=tmp_storage, derived_context_limit=5, schema_min_support=1)
     client = MemoryClient(settings=settings, embed=fake_embed, llm=FakeLLMClient())
 
     fact = MemoryNode(
@@ -274,9 +336,10 @@ async def test_dual_l3_derived_recalled_into_profile(tmp_storage, fake_embed):
     result = await client.search(
         query="人工智能研究", app_ids=["app"], user_id="u", min_score=0.0
     )
-    profile_ids = [m.memory_id for m in result.memories.profile]
     normal_ids = [m.memory_id for m in result.memories.normal]
-    assert "s1" in profile_ids
+    (selected,) = result.memories.schema
+    assert selected.memory_id == "s1" and selected.supporting_ids == ["f1"]
+    assert "s1" not in [m.memory_id for m in result.memories.profile]
     assert "f1" in normal_ids
 
     await client.aclose()
@@ -301,15 +364,15 @@ async def test_profile_route_does_not_overwrite_hybrid_score(tmp_storage):
     await client.aclose()
 
 
-async def test_derived_relevance_survives_flatten_without_a_quota(tmp_storage):
+async def test_schema_never_displaces_evidence(tmp_storage):
     query = "technical hobbies"
     client = MemoryClient(
-        settings=Settings(mode="dual", storage_dir=tmp_storage),
+        settings=Settings(mode="dual", storage_dir=tmp_storage, derived_context_limit=5, schema_min_support=1),
         embed=_ScriptedEmbed(query), llm=FakeLLMClient(),
     )
     _seed_fact(client, node_id="evidence", content="builds robots on weekends", cosine=0.6)
     derived = MemoryNode(node_id="derived", content="prefers engineering projects",
-                         layer=Layer.L3_DERIVED, kind="preference", app_id="app", user_id="u",
+                         layer=Layer.L3_DERIVED, kind="schema", app_id="app", user_id="u",
                          embedding=_unit(0.9), custom={"source_ids": ["evidence"]})
     client.factory.vector.upsert([derived])
     client.factory.graph.add_node(GraphNode(node_id=derived.node_id, content=derived.content,
@@ -318,8 +381,7 @@ async def test_derived_relevance_survives_flatten_without_a_quota(tmp_storage):
     client.factory.graph.add_evidence(schema_id="derived", fact_id="evidence")
     result = await client.search(query=query, app_ids=["app"], user_id="u", min_score=0,
                                  limit=1, include_derived=True)
-    assert result.memories.flatten(limit=1)[0].memory_id == "derived"
-    assert result.memories.flatten(limit=1)[0].score > 0.85
+    assert [m.memory_id for m in result.memories.flatten(limit=1)] == ["evidence", "derived"]
     off = await client.search(query=query, app_ids=["app"], user_id="u", min_score=0,
                              limit=1, include_derived=False)
     assert "derived" not in [m.memory_id for m in off.memories.flatten()]
@@ -357,4 +419,42 @@ async def test_raw_source_link_recovers_paraphrased_evidence_without_changing_st
                                  raw_limit=2)
     assert "source" in {m.memory_id for m in result.memories.raw}
     assert client.factory.vector.get("source").content == source.content
+    await client.aclose()
+
+
+async def test_schemas_are_not_read_when_disabled(tmp_storage):
+    query = "technical hobbies"
+    client = MemoryClient(settings=Settings(mode="dual", storage_dir=tmp_storage, derived_context_limit=0),
+                          embed=_ScriptedEmbed(query), llm=FakeLLMClient())
+    _seed_fact(client, node_id="evidence", content="builds robots on weekends", cosine=0.6)
+    schema = MemoryNode(node_id="schema", content="When free, the user builds things.",
+                        layer=Layer.L3_DERIVED, kind="schema", app_id="app", user_id="u",
+                        embedding=_unit(0.9), custom={"source_ids": ["evidence"]})
+    client.factory.vector.upsert([schema])
+    client.factory.graph.add_node(GraphNode(node_id="schema", content=schema.content,
+                                           layer=schema.layer.value, app_id="app", user_id="u",
+                                           embedding=schema.embedding))
+    client.factory.graph.add_evidence(schema_id="schema", fact_id="evidence")
+    result = await client.search(query=query, app_ids=["app"], user_id="u", min_score=0)
+    assert result.memories.schema == []
+    await client.aclose()
+
+
+async def test_schema_needs_min_support_retrieved_memories(tmp_storage):
+    query = "technical hobbies"
+    client = MemoryClient(
+        settings=Settings(mode="dual", storage_dir=tmp_storage, derived_context_limit=5,
+                          schema_min_support=2, schema_forward_min_score=1.1),
+        embed=_ScriptedEmbed(query), llm=FakeLLMClient())
+    _seed_fact(client, node_id="evidence", content="builds robots on weekends", cosine=0.6)
+    schema = MemoryNode(node_id="schema", content="When free, the user builds things.",
+                        layer=Layer.L3_DERIVED, kind="schema", app_id="app", user_id="u",
+                        embedding=_unit(0.9), custom={"source_ids": ["evidence"]})
+    client.factory.vector.upsert([schema])
+    client.factory.graph.add_node(GraphNode(node_id="schema", content=schema.content,
+                                           layer=schema.layer.value, app_id="app", user_id="u",
+                                           embedding=schema.embedding))
+    client.factory.graph.add_evidence(schema_id="schema", fact_id="evidence")
+    result = await client.search(query=query, app_ids=["app"], user_id="u", min_score=0)
+    assert result.memories.schema == []
     await client.aclose()

@@ -22,9 +22,9 @@ from dual_mem.retrieval.bm25 import (
     tokenize,
 )
 from dual_mem.retrieval.evolution import expand_evolution_chains
-from dual_mem.retrieval.hybrid_scoring import compute_evidence_boost, score_vdb_node
+from dual_mem.retrieval.hybrid_scoring import score_vdb_node
 from dual_mem.retrieval.intention_recall import recall_intentions
-from dual_mem.retrieval.profile_evidence import reverse_lookup_derived
+from dual_mem.retrieval.schema_selection import select_schemas
 from dual_mem.retrieval import rrf
 from dual_mem.sdk_models import EvolutionItem, MemoryItem, SearchMemories
 from dual_mem.types import Layer, MemoryNode, MemoryStatus
@@ -32,8 +32,8 @@ from dual_mem.types import Layer, MemoryNode, MemoryStatus
 logger = logging.getLogger("dual_mem.retrieval.hybrid")
 
 # Hybrid layer routing
-_PROFILE_LAYERS = [Layer.L2_PROFILE, Layer.L3_DERIVED]
-_VDB_PROFILE_LAYERS = [Layer.L2_PROFILE, Layer.L3_DERIVED]
+_PROFILE_LAYERS = [Layer.L2_PROFILE]
+_VDB_PROFILE_LAYERS = [Layer.L2_PROFILE]
 _VDB_RECALL_LAYERS = [Layer.L1_FACT, Layer.L2_PROFILE]
 # Note: L0_RAW excluded from VDB semantic recall (align hy_memory: raw fragments
 #   are noisy and dilute top-k ranking; only extracted/curated layers are recalled).
@@ -140,6 +140,52 @@ def _cosine_score(query: list[float], embedding: list[float] | None) -> float:
     return sum(a * b for a, b in zip(query, embedding)) / norm if norm else 0.0
 
 
+def _current_versions(
+    *,
+    vector,
+    hits: list[dict],
+    where: dict,
+    as_of: int | None,
+    limit: int,
+) -> list[dict]:
+    """For superseded memories found in recall, add the versions that replaced them.
+
+    Memory replacement is recorded structurally (``superseded_by`` / ``is_latest``),
+    so a query that describes a topic very differently from the user's current
+    wording (asking about "literary discussions" when the stored change reads
+    "stopped listening to book podcasts") can still reach the *current* statement:
+    recall the superseded version on its own wording, then follow the recorded
+    replacement edge to the node that is current now.  No lexical rule is involved:
+    the edge is what the write path decided, in any language.
+    """
+    # Relevance a replacement inherits: the best score among the versions it replaced.
+    inherited: dict[str, float] = {}
+    for hit in hits:
+        node = hit.get("node")
+        if node is None or node.is_latest or not node.superseded_by:
+            continue
+        for nid in node.superseded_by:
+            inherited[nid] = max(inherited.get(nid, 0.0), float(hit["score"]))
+    if not inherited:
+        return []
+    nodes = vector.get_by_ids(sorted(inherited))
+    out: list[dict] = []
+    for nid in sorted(inherited, key=lambda n: -inherited[n]):
+        node = nodes.get(nid)
+        if (
+            node is None
+            or not node.is_latest
+            or node.app_id not in where.get("app_id", {}).get("$in", [])
+            or node.user_id != where.get("user_id")
+            or not _valid_at(node, as_of)
+        ):
+            continue
+        out.append({"node_id": node.node_id, "node": node, "inherited": inherited[nid]})
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _source_excerpt(content: str, query: str, anchors: list[str], max_chars: int = 3200) -> str:
     """Select verbatim, role-labelled passages instead of head-truncating a source."""
     if len(content) <= max_chars:
@@ -231,6 +277,7 @@ def _item_to_memory(item: dict) -> MemoryItem:
         revision=node.revision,
         supersedes=list(node.supersedes),
         source_ids=list((node.custom or {}).get("source_ids", [])),
+        supporting_ids=list((node.custom or {}).get("supporting_result_ids", [])),
         conflicts_with=list((node.custom or {}).get("conflicts_with", [])),
         valid_from=node.valid_from,
         valid_until=node.valid_until,
@@ -247,6 +294,17 @@ def _item_to_memory(item: dict) -> MemoryItem:
         update_type=update_type,
         source_node_id=source_node_id,
     )
+
+
+def _persona_catalog(vector, *, app_ids, user_id, agent_ids, as_of) -> list[dict]:
+    """The current question-blind persona catalog of the scope (at most one)."""
+    where = build_filter(
+        app_ids=app_ids, user_id=user_id, agent_ids=agent_ids or None,
+        layers=[Layer.L3_DERIVED], statuses=[MemoryStatus.ACTIVE], latest_only=True,
+    )
+    nodes = [n for n in vector.get_many(where, limit=50) if n.kind == "persona_catalog" and _valid_at(n, as_of)]
+    nodes.sort(key=lambda n: n.gmt_created, reverse=True)
+    return [{"node_id": n.node_id, "node": n, "score": 1.0, "source": "catalog"} for n in nodes[:1]]
 
 
 async def search_hybrid(
@@ -282,8 +340,6 @@ async def search_hybrid(
 
     w_sem = settings.hybrid_w_sem
     w_bm25 = settings.hybrid_w_bm25
-    ev_boost_max = settings.hybrid_evidence_boost_max
-    ev_saturate = settings.hybrid_evidence_saturate
     # min_score=0 means no gate (benchmark default); only enforce a floor when > 0.
     min_score_gate = min_score if min_score > 0 else 0.0
 
@@ -295,6 +351,8 @@ async def search_hybrid(
     # Extra candidates admitted from a lexical pass over the scope (pure keyword recall).
     lexical_limit = max(final_limit // 2, 10)
     graph_limit = max(final_limit * 2, 20)
+    # How many superseded versions are examined as bridges to their current replacement.
+    version_bridge_limit = settings.version_bridge_limit
 
     use_derived = include_derived
     # Current facts/profiles serve normal recall; derived evidence uses profile fusion.
@@ -305,7 +363,7 @@ async def search_hybrid(
         user_id=user_id,
         agent_ids=agent_ids,
         session_ids=session_ids,
-        layers=_VDB_RECALL_LAYERS + ([Layer.L3_DERIVED] if use_derived else []),
+        layers=_VDB_RECALL_LAYERS,
         statuses=recall_statuses,
         latest_only=True,
         created_after=created_after,
@@ -315,11 +373,21 @@ async def search_hybrid(
         user_id=user_id,
         agent_ids=agent_ids,
         session_ids=session_ids,
-        layers=_VDB_PROFILE_LAYERS if include_derived else [Layer.L2_PROFILE],
+        layers=_VDB_PROFILE_LAYERS,
         statuses=[MemoryStatus.ACTIVE],
         latest_only=True,
         created_after=created_after,
     )
+    # Superseded memories are recall bridges: matching one reveals what replaced it.
+    superseded_where = build_filter(
+        app_ids=app_ids,
+        user_id=user_id,
+        agent_ids=agent_ids,
+        session_ids=session_ids,
+        layers=_VDB_RECALL_LAYERS,
+        statuses=recall_statuses,
+        created_after=created_after,
+    ) | {"is_latest": False}
 
     async def _vdb_semantic() -> list[dict]:
         nodes = await asyncio.to_thread(
@@ -333,6 +401,18 @@ async def search_hybrid(
             for n in nodes
             if _valid_at(n, as_of)
         ]
+
+    async def _superseded_semantic() -> list[dict]:
+        """Superseded versions near the query: bridges to their current replacements."""
+        if version_bridge_limit <= 0:
+            return []
+        nodes = await asyncio.to_thread(
+            vector.query,
+            embedding=query_embedding,
+            where=superseded_where,
+            top_k=version_bridge_limit,
+        )
+        return [{"node_id": n.node_id, "score": n.score, "node": n} for n in nodes]
 
     async def _profile_vdb() -> list[dict]:
         if profile_limit == 0:
@@ -437,6 +517,7 @@ async def search_hybrid(
         _profile_vdb(),
         _graph_schema(),
         _raw_route(),
+        _superseded_semantic(),
         return_exceptions=True,
     )
 
@@ -444,6 +525,7 @@ async def search_hybrid(
     profile_hits = results[1] if not isinstance(results[1], Exception) else []
     graph_schema_hits = results[2] if not isinstance(results[2], Exception) else []
     raw_hits: list[dict] = results[3] if isinstance(results[3], list) else []
+    superseded_hits: list[dict] = results[4] if isinstance(results[4], list) else []
 
     if isinstance(results[0], Exception):
         logger.warning("[hybrid] vdb semantic failed: %s", results[0])
@@ -453,6 +535,8 @@ async def search_hybrid(
         logger.warning("[hybrid] graph schema failed: %s", results[2])
     if isinstance(results[3], Exception):
         logger.warning("[hybrid] raw route failed: %s", results[3])
+    if isinstance(results[4], Exception):
+        logger.warning("[hybrid] superseded route failed: %s", results[4])
 
     intention_hits: list[dict] = []
     if use_derived and intention_limit > 0:
@@ -511,10 +595,38 @@ async def search_hybrid(
     # Every route uses the same candidate calibration. A second profile lookup must
     # not overwrite a fused fact/profile score with its larger raw cosine score.
     seen_candidates = {h["node_id"] for h in vdb_semantic_hits}
-    for hit in profile_hits + graph_schema_hits:
+    for hit in profile_hits:
         if hit["node_id"] not in seen_candidates:
             vdb_semantic_hits.append(hit)
             seen_candidates.add(hit["node_id"])
+
+    # A replaced memory matched the query: its current version joins the candidate pool.
+    # It is as relevant as the topic it continues, so it inherits the best semantic
+    # score of the versions it replaced when that exceeds its own.
+    bridged = await asyncio.to_thread(
+        _current_versions,
+        vector=vector,
+        hits=superseded_hits,
+        where=normal_where,
+        as_of=as_of,
+        limit=version_bridge_limit,
+    )
+    if bridged:
+        pooled = {hit["node_id"]: hit for hit in vdb_semantic_hits}
+        new_ids = [b["node_id"] for b in bridged if b["node_id"] not in pooled]
+        embedded = await asyncio.to_thread(vector.get_by_ids, new_ids) if new_ids else {}
+        for hit in bridged:
+            if hit["node_id"] in pooled:
+                row = pooled[hit["node_id"]]
+                row["score"] = max(row["score"], hit["inherited"])
+                continue
+            node = embedded.get(hit["node_id"], hit["node"])
+            vdb_semantic_hits.append({
+                "node_id": node.node_id,
+                "score": max(_cosine_score(query_embedding, node.embedding), hit["inherited"]),
+                "node": node,
+            })
+            seen_candidates.add(node.node_id)
 
     # Admit lexical matches before calibration so both routes have identical BM25
     # statistics. Raw BM25 scores cannot be fused with cosine similarities.
@@ -632,94 +744,9 @@ async def search_hybrid(
             for row in merged[:raw_limit]
         ]
 
-    # Forward derived: batch the evidence-count lookup into a single graph round-trip instead of
-    # one evidence_of() call per schema (the previous serial loop dominated read latency).
-    forward_derived: list[dict] = []
-    if (
-        use_derived
-        and include_derived_fusion
-        and graph is not None
-        and graph_schema_hits
-    ):
-        schema_ids = [row["node_id"] for row in graph_schema_hits]
-        try:
-            ev_counts = await asyncio.to_thread(graph.evidence_counts, schema_ids)
-        except Exception as exc:
-            logger.warning("[hybrid] evidence_counts failed, skipping boost: %s", exc)
-            ev_counts = {}
-        for row in graph_schema_hits:
-            ev_count = ev_counts.get(row["node_id"], 0)
-            ev_boost = compute_evidence_boost(ev_count, ev_saturate, ev_boost_max)
-            internal_score = row["score"] * (1.0 + ev_boost)
-            forward_derived.append(
-                {
-                    "node_id": row["node_id"],
-                    "node": None,
-                    "content": row.get("content", ""),
-                    "score": row["score"],
-                    "source": "profile_forward",
-                    "layer": row.get("layer", Layer.L3_DERIVED.value),
-                    "confidence": row.get("confidence", row["score"]),
-                    "_internal": internal_score,
-                    "_evidence_count": ev_count,
-                }
-            )
-        forward_derived.sort(key=lambda x: x["_internal"], reverse=True)
-
-    reverse_derived: list[dict] = []
-    if use_derived and include_derived_fusion and graph is not None and vdb_scored:
-        reverse_derived = await reverse_lookup_derived(
-            graph,
-            [v["node_id"] for v in vdb_scored],
-            limit=graph_limit,
-        )
-
-    fused_derived: list[dict] = []
-    if forward_derived or reverse_derived:
-        by_id: dict[str, dict] = {}
-        for item in forward_derived + reverse_derived:
-            head = vector.get(item["node_id"])
-            if (
-                head is None
-                or not head.is_latest
-                or head.app_id not in app_ids
-                or head.user_id != user_id
-                or (agent_ids and head.agent_id not in agent_ids)
-                or not _valid_at(head, as_of)
-            ):
-                continue
-            item["node"] = head
-            by_id.setdefault(item["node_id"], item)
-        fused = rrf.rrf_fuse(
-            {
-                "forward": [i for i in forward_derived if i["node_id"] in by_id],
-                "reverse": [i for i in reverse_derived if i["node_id"] in by_id],
-            }
-        )
-        for f_item in fused:
-            src = by_id.get(f_item["node_id"], {})
-            scored = scored_by_id.get(f_item["node_id"])
-            # RRF orders graph routes internally; its ~0.01 values cannot compete
-            # with cosine/BM25 scores when the public routes are flattened.
-            relevance = scored["score"] if scored else (
-                _cosine_score(query_embedding, src["node"].embedding) * w_sem
-                if has_bm25 else _cosine_score(query_embedding, src["node"].embedding)
-            )
-            fused_derived.append(
-                {
-                    "node_id": f_item["node_id"],
-                    "node": src.get("node"),
-                    "content": src.get("content", ""),
-                    "layer": src.get("layer", Layer.L3_DERIVED.value),
-                    "score": relevance,
-                    "source": "profile_derived",
-                    "confidence": src.get("confidence"),
-                }
-            )
-
     reranker = factory.reranker
     if reranker is not None:
-        pool = {row["node_id"]: row for row in vdb_scored + fused_derived}
+        pool = {row["node_id"]: row for row in vdb_scored}
         curated = sorted(pool.values(), key=lambda row: -row["score"])[
             :max(final_limit, settings.rerank_candidate_limit)
         ]
@@ -731,8 +758,7 @@ async def search_hybrid(
         # Only cross-encoder scores compete after reranking, never a mix with
         # uncalibrated cosine scores from candidates outside the rerank budget.
         vdb_scored = [row for row in vdb_scored if row["node_id"] in score_by_id]
-        fused_derived = [row for row in fused_derived if row["node_id"] in score_by_id]
-        for row in vdb_scored + fused_derived + raw_hits:
+        for row in vdb_scored + raw_hits:
             row["score"] = score_by_id[row["node_id"]]
 
     expandable = vdb_scored
@@ -786,28 +812,46 @@ async def search_hybrid(
 
     profile_results = [it for it in expanded if _layer_of(it) in _PROFILE_LAYER_VALS]
     profile_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    profile_results = list(
-        {
-            it["node"].node_id: it
-            for it in profile_results + (fused_derived if use_derived else [])
-            if it.get("node")
-        }.values()
-    )
-    profile_results.sort(key=lambda x: x.get("score", 0), reverse=True)
     if profile_limit == 0:
         profile_results = []
     elif profile_limit > 0:
         profile_results = profile_results[:profile_limit]
 
+    schema_results: list[dict] = []
+    if use_derived and include_derived_fusion and settings.derived_context_limit > 0:
+        schema_results = await asyncio.to_thread(
+            select_schemas,
+            vector=vector,
+            graph=graph,
+            evidence=[it["node"] for it in [*normal_results, *profile_results] if it.get("node")],
+            schema_hits=graph_schema_hits,
+            scope_filter=lambda n: (
+                n.is_latest and n.status == MemoryStatus.ACTIVE
+                and n.app_id in app_ids and n.user_id == user_id
+                and (not agent_ids or n.agent_id in agent_ids)
+                and _valid_at(n, as_of)
+            ),
+            limit=settings.derived_context_limit,
+            forward_min_score=settings.schema_forward_min_score,
+            min_support=settings.schema_min_support,
+        )
+
+    catalog_results: list[dict] = []
+    if use_derived and include_derived_fusion and settings.catalog_context_enabled:
+        catalog_results = await asyncio.to_thread(
+            _persona_catalog, vector, app_ids=app_ids, user_id=user_id,
+            agent_ids=agent_ids, as_of=as_of,
+        )
+
     logger.info(
-        "read_hybrid user=%s vdb_sem=%d bm25_hits=%d profile_l0=%d fwd_l6=%d rev_l6=%d "
+        "read_hybrid user=%s vdb_sem=%d bm25_hits=%d profile_l0=%d fwd_l6=%d schemas=%d "
         "normal=%d profile=%d intention=%d",
         user_id,
         len(vdb_semantic_hits),
         len(bm25_by_nid),
         len(profile_hits),
-        len(forward_derived),
-        len(reverse_derived),
+        len(graph_schema_hits),
+        len(schema_results),
         len(normal_results),
         len(profile_results),
         len(intention_hits),
@@ -818,6 +862,8 @@ async def search_hybrid(
         proactive=[_item_to_memory(it) for it in intention_hits],
         normal=[_item_to_memory(it) for it in normal_results],
         raw=[_item_to_memory(it) for it in raw_hits],
+        schema=[_item_to_memory(it) for it in schema_results],
+        catalog=[_item_to_memory(it) for it in catalog_results],
     )
     if include_relations:
         attach_relations(

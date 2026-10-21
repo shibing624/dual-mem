@@ -251,3 +251,39 @@ def chain_node_ids(hit: dict) -> set[str]:
     if mid:
         ids.add(str(mid))
     return ids
+
+
+def is_schema_hit(hit: dict) -> bool:
+    """A System 2 derived hit (schema, core schema or persona catalog)."""
+    return hit.get("layer") == "L3_DERIVED"
+
+
+def split_schema_hits(hits: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Separate System 1 evidence from System 2 derived hits, keeping order."""
+    evidence = [h for h in hits if not is_schema_hit(h)]
+    derived = [h for h in hits if is_schema_hit(h)]
+    return evidence, derived
+
+
+def _derived_kind(hit: dict) -> str:
+    return str(hit.get("kind") or hit.get("category") or "")
+
+
+def format_schema_block(derived: list[dict], *, prefix: str = "- ") -> str:
+    """Render System 2 output after the System 1 evidence, as hy-memory does.
+
+    Schemas (basic and core) are plain memory lines with no System 2 label, no
+    confidence and no attached evidence: the reader weighs them like any other
+    memory. The persona catalog (exact current facts, question-blind) is rendered
+    as the user's profile.
+    """
+    if not derived:
+        return ""
+    catalog = [h for h in derived if _derived_kind(h) == "persona_catalog"]
+    schemas = [h for h in derived if _derived_kind(h) != "persona_catalog"]
+    parts: list[str] = []
+    if catalog:
+        parts.append("User profile (current recorded facts by area):\n" + _hit_text(catalog[0]))
+    if schemas:
+        parts.append("\n".join(f"{prefix}{_hit_text(h)}" for h in schemas))
+    return "\n\n".join(parts)

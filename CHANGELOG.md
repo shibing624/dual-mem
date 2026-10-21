@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+### 2026-10-20（晚）：System 2 v3（hy-memory 2.0.4 对齐）、PersonaMem-v2 驱动的 System 1 抽取修正（breaking）
+
+- **S2 v3 写入**（`system2/system2_agent.py` 重写）：
+  - 基础 schema：只用 ACTIVE/latest 的 L1/L2（不再携带旧版本历史）；**average-linkage cosine 聚类**（`system2_cluster_distance=0.35`，超大簇按 `system2_refine_distance=0.25` 再切，簇内 ≥`system2_dedup_cosine=0.92` 去重，<`system2_min_cluster_size=4` 不调用模型，每簇 ≤`system2_max_prompt_facts=12`）。hy-memory 的 DBSCAN（eps 0.45/0.35）在一个用户的记忆上会链成单簇（PM-v2 实测 134 条→1 簇），故改为平均链接。簇**顺序**处理，一簇一次调用，prompt 按 hy 的 “When [情境], the user [模式] — reflecting [洞察]” 原子/领域内/不可变规则；操作 `create_schema` / `add_evidence`；≥2 个独立原文来源；与已有 schema cosine ≥`system2_schema_dedup_cosine=0.68` 且共享证据时改为 add_evidence。删除逐 draft Jev 校验与 retrieval_text 双文本。
+  - **跨域 core schema**（`system2_cross_domain_*`）：≥5 条基础 schema 时，LLM 生成去领域的行为抽象（存于 schema `custom.behavior_text`），行为空间 cosine >0.70 且内容空间 <0.60 的对用并查集成组，每组生成一条 core schema（可返回 null），证据继承成员。
+  - **persona catalog**（`system2_catalog_*`）：与问题无关的画像目录——LLM 只从当前事实中**按编号选择原文**（8 个固定领域，每域 ≤4，总 ≤32，不改写），作为 `kind=persona_catalog` 的 L3，事实库变化（fingerprint）才重建，新版本 supersede 旧版本。
+  - sweeper / catalog 失败只丢弃该产物（记日志），不影响同一次 digest 的其它产物。
+- **读侧**：`SearchMemories` 新增 `catalog` 分组（每次检索附带当前 catalog）；`schema` 组只含 schema/core_schema（`schema_selection` 按 kind 过滤），forward 阈值 0.4、support ≥1。`flatten(limit)` = 有界证据 + schema + catalog。formatter `format_schema_block(derived)`：catalog 渲染为 “User profile (current recorded facts by area)”，schema 为无标签纯文本行（不再附证据，不再加 System 2 标题）。
+- **默认值**：`derived_context_limit=0`（schema 只写不读）、`catalog_context_enabled=True`。依据 PersonaMem-v2 同库读侧消融（c20，476 题）：无派生 48.32%、+schema 46.85%（5W/12L）、+catalog **50.00%**（19W/11L）、两者 49.16%。
+- **System 1 抽取（`extract_system1` prompt）**，均为通用规则、无关键词/正则：
+  - 用户带来做任务的文本（润色的邮件、待翻译段落、帖子）中用户自述的活动/习惯/健康/物品/关系是一手证据；他人写的文本归他人。
+  - “请忘记/不要记住”是**撤回**：不抽取被撤回的细节，只写一条“用户撤回了…，不得据此个性化”；Jev 的 `ADD_NEGATE` 描述包含撤回。
+  - 具体、带个人色彩的提问本身记为一条事实（“用户问了 X”），不推断兴趣；泛泛/琐碎提问仍跳过。
+  - 删除 “Do not infer preferences or traits from behavior”，改为 “记录用户陈述或所做之事，不泛化为更宽的偏好/特质”。
+- **PersonaMem-v2（text 32k，Qwen3.8-27B，统一 QA prompt）**：调参集 c20（476 题）S1 46.01%（旧抽取）→ 48.32%（任务文本）→ 49.37%（撤回）→ **51.47%**（提问记录）；dual 52.10%；mem0 50.00%；长上下文 51.89%。**Holdout h20（另 20 persona / 488 题，未参与调参）：dual 52.66%、S1 50.61%、mem0 49.80%、长上下文 52.05%**（dual vs S1 26W/16L）。论文 DCPM（不同模型、协议未公开，绝对值不可比）：lite 46.85/54.10、full 49.36/59.30、mem0 42.53/41.25、长上下文 50.82/58.46。
+- **验证**：452 passed / 1 skipped；S2 测试按 v3 契约重写（聚类、最小簇、≥2 原文、助手排除、非法操作丢弃、生成失败不重试、补证据不改写、旧版本不参与、跨域 core、catalog 选择/复用/重建）。
+
+### 2026-10-20（下午）：System 2 v2 重构——行为 schema、证据门槛与独立读路（breaking）
+
+参照 hy-memory 2.0.4 chat 路径（`system2_agent` / `schema_selection`）与 DCPM（arXiv 2606.09483）的高层记忆设计，S2 整体重写，不兼容旧数据格式与旧接口：
+
+- **只产出一种派生记忆：行为 schema。**“When <情境>, the user <行为> — reflecting <驱动>”，一条一个规律。删除 S2 的 preference / summary / intention 产出：明确偏好、状态、计划已由 System1 存储，再上升到 S2 只会与原事实竞争。
+- **写入：先做不调 LLM 的结构化准备，再按簇生成。**当前 L1/L2 记忆按 embedding 做平均链接聚类（cosine 距离 `system2_cluster_distance=0.35`，簇上限 `system2_max_prompt_facts`）；只有覆盖 ≥`system2_min_sources`（默认 2）个不同原文来源（`source_node_id`，即独立对话片段）、且归属用户的簇才调用模型。每簇一次生成，返回结构化操作：`create`（content + retrieval_text + evidence_ids）、`add_evidence`（给已存在的近邻 schema 补证据，内容不改写），或空列表。
+- **校验：结构 + 语义，均无正则/关键词。**引用 id 必须在簇内、跨 ≥2 个原文来源；每条 draft 一次 Jev 判断“引用证据是否共同支持、情境是否明确且不超出证据、是否只是复述或泛化标签”。同 retrieval_text embedding 近重复（`s2_dedup_threshold`）丢弃。失败不修复、不重试；簇未提交时其记忆不标记已处理，下次 digest 再看。
+- **存储：**schema 的 `custom` 记录 `source_ids`（证据记忆）、`raw_source_ids`（独立原文来源）与 `retrieval_text`；embedding 用 retrieval_text（情境+行为），content 给读者。图投影保留 DERIVED_FROM 边。
+- **读取：schema 是 `SearchMemories.schema` 独立分组，永不占 System1 证据名额。**在 System1 结果定稿之后选择：反向（命中记忆沿证据边到达的 schema，按解释的命中记忆数排序，需 ≥`schema_min_support`）与正向（retrieval_text 与 query cosine ≥`schema_forward_min_score`）按 RRF 融合，上限 `derived_context_limit`。每个 schema 带 `supporting_ids`（它解释的已命中记忆）。`flatten(limit)` = 有界证据 + 其后追加 schema；删除 `derived_limit`、`_DERIVED_LAYER` 合并逻辑与旧 forward/reverse L3 融合进 profile 路。
+- **formatter：**新增 `split_schema_hits` / `format_schema_block`：schema 作为证据之后的单独块，每条附至多 2 条它所解释的已命中记忆原文。
+- **默认关闭读取（`derived_context_limit=0`，`schema_min_support=3`）。**理由是实测（见下）：在完全相同的 S2 v2 存储上，打开 schema 与关闭 schema 的配对对比为 PM −3（min_support=3）/ −4（=1），LME 0 / −1。schema 由 digest 照常写入，调用方显式设置 `derived_context_limit>0` 才读取。
+- **验证：**450 passed / 1 skipped；S2 测试全部按新契约重写（聚类、来源门槛、助手归属排除、结构/Jev 拒绝、生成失败不重试、补证据不改写、历史仅作上下文、跨租户历史拒绝、默认不读、min_support）。
+
+### 2026-10-20：版本桥召回、S2 独立配额与 24h 验收结论
+
+- **版本桥召回（`version_bridge_limit`，默认 20）**：检索时同时查询已被取代（`is_latest=False`）的旧版本；命中旧版本后沿写入时记录的 `superseded_by` 边找到当前版本，当前版本继承旧版本的语义分 `max(own, inherited)`，旧版本本身不进结果。解决“用户提问只像旧措辞、与当前状态措辞无共享词”时召回不到最新事实的问题。纯结构关系，不使用任何正则、关键词或词表，语言无关。`0` 关闭。
+- **S2 派生记忆独立配额（`derived_context_limit`，默认 8）**：`SearchMemories.flatten(limit)` 先让 System1 证据（facts / profile / raw）占满 `limit`，L3_DERIVED 在其之上最多追加 `derived_limit` 条，不再与事实争抢名额。`derived_limit=-1`（未设置）与旧的合并排序完全一致；`0` 不返回派生记忆。
+- **验证**：450 passed / 1 skipped（新增版本桥召回、flatten 配额测试）。
+- **24h 验收结论**（Qwen3.8-27B FP8 统一做抽取 / S2 / QA；mem0 同模型；PM 84+28 题、LME 72+24 题；详见 benchmark `CHAGNELOG.md` 2026-10-20）：
+  - System1 vs mem0：PM 验收 **+3.6pp**、验证 +7.1pp；LME 验收 **+30.6pp**、验证 +8.3pp。PM **未达 +10pp**，LME 达标。
+  - dual vs mem0：PM 验收 −1.2pp（独立配额后 +2.4pp）；LME 验收 +27.8pp。**dual 在两个 benchmark 上都不优于 System1**：同一 dual 存储关闭/打开派生记忆对照，PM 70 vs 64，LME 64 vs 63。派生记忆多为跨事实的泛化偏好或总结，既占召回名额，又把 QA 引向与之措辞相近的错误选项；独立配额只挽回一半。
+  - dual ≥ mem0+20pp 仅在 LME 验收集达成（+27.8pp，仍低于 System1 的 +30.6pp）；PM 未达成。当前 S2 生成策略需重新设计（见 benchmark 变更日志的下一步）。
+
 ### 2026-10-18：单次写入、来源证据与有界资源
 
 - **Jev 材料局部化**：每个候选只比较自身相似的当前 head/较早候选；无相关目标或 `NONE` 直接追加。默认 `reconcile_batch_size=1`。不再发送原文、representation/coverage 问题，也不把 revision、source/session 标识等控制面字段送进语义判断；正文、日期、类型、归属与历史值保留。CAS 与 provenance 仍在存储层。
