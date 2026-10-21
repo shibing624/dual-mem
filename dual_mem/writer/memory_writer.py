@@ -151,16 +151,20 @@ class MemoryWriter:
         request_id: str,
         memory_at: int | None = None,
     ) -> WriterOutcome:
+        """Store L0 evidence under ``request_id`` without extraction.
+
+        The receipt is kept apart from ``write``'s, while the L0 node id is the same:
+        a later ``write`` with this ``request_id`` reuses the evidence and extracts
+        from it (raw-first cold start, extraction later).
+        """
         scope = (app_id, user_id, agent_id)
         key = "request:" + json.dumps([scope, request_id])
+        receipt = "raw-" + key
         fingerprint = hashlib.sha256(
-            json.dumps(
-                ["raw_only", content, session_id, memory_at],
-                ensure_ascii=False,
-            ).encode()
+            json.dumps([content, session_id, memory_at], ensure_ascii=False).encode()
         ).hexdigest()
         async with self._requests.get(key):
-            saved = self.factory.cache.get_request_outcome(key)
+            saved = self.factory.cache.get_request_outcome(receipt)
             if saved:
                 if saved["fingerprint"] != fingerprint:
                     raise IdempotencyConflictError(
@@ -195,7 +199,7 @@ class MemoryWriter:
                 status="raw_only",
             )
             self.factory.cache.set_request_outcome(
-                key,
+                receipt,
                 {"fingerprint": fingerprint, "outcome": asdict(result)},
             )
             return result

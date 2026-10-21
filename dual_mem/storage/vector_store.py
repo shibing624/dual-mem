@@ -78,7 +78,7 @@ class VectorStore(ABC):
     def get_by_ids(self, node_ids: list[str]) -> dict[str, MemoryNode]: ...
 
     @abstractmethod
-    def get_many(self, where: dict, limit: int = 1000) -> list[MemoryNode]: ...
+    def get_many(self, where: dict, limit: int | None = 1000) -> list[MemoryNode]: ...
 
     @abstractmethod
     def update_payload(self, node_id: str, patch: dict) -> None: ...
@@ -350,8 +350,8 @@ class ChromaVectorStore(VectorStore):
             out[nid] = node
         return out
 
-    def get_many(self, where: dict, limit: int = 1000) -> list[MemoryNode]:
-        """Fetch all nodes matching a metadata filter (no embeddings), up to limit."""
+    def get_many(self, where: dict, limit: int | None = 1000) -> list[MemoryNode]:
+        """Fetch nodes matching a metadata filter (no embeddings); ``limit=None`` = all."""
         with self._guard():
             result = self.collection.get(
                 where=_normalize_where(where),

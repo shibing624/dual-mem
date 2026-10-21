@@ -8,16 +8,19 @@ CLI transcript / MCP / Hook
         ↓ loopback HTTP
 dual-mem hub serve（唯一写者）
         ↓
-~/.dual-mem/{hub.db,store,uploads}
+~/.dual-mem/{hub.db,store}
 ```
 
 ## 本机使用
 
-先启动唯一 Core：
+先启动唯一 Core（前台调试用 `serve`，日常用 `install-service` 登录自启）：
 
 ```bash
-dual-mem hub serve
+dual-mem hub serve              # 或
+dual-mem hub install-service    # macOS LaunchAgent / Linux systemd --user
 ```
+
+自启服务不继承 shell 环境变量，模型 API key 请写在 `~/.dual_mem/config.yaml`。
 
 Core 只监听 `127.0.0.1:8765`，自动生成 `runtime-token` 并发布
 `runtime.json`。同机 CLI、MCP 和 Hook 会自动发现，不需要配置 URL 或密钥。
@@ -33,9 +36,13 @@ dual-mem hub recall "我之前做过哪些技术选择"
 `install-host` 安装 MCP、Skill 和可用的 capture/recall Hook。Bearer Token
 只保存在权限为 `0600` 的 `~/.dual-mem/runtime-token`，不会复制到各宿主配置。
 
-Core 把收到的原始 Evidence 先写入 `hub.db`，再由唯一 worker 串行调用
-`MemoryClient`。会话扫描游标位于发起扫描机器的 `cursors.db`；网络失败时不会
-越过尚未提交的 transcript。
+Core 把收到的原始 Evidence 先写入 `hub.db` 就返回回执，再由唯一 worker 按事件
+时间（`memory_at`）串行调用 `MemoryClient`，所以扫描和 Hook 不等 LLM。模型调用失败
+按退避自动重试，重试用尽的写入可用 `dual-mem hub retry` 重新排队。会话扫描游标位于
+发起扫描机器的 `cursors.db`，只越过 Core 已接收的批次；Core 不可达时游标不动。
+
+冷启动可先 `scan --raw-only` 只存原文（不调抽取模型），之后 `dual-mem hub extract`
+在后台对这些 Evidence 补跑抽取，复用已存的 L0。
 
 ## 云上单实例
 
@@ -66,7 +73,10 @@ dual-mem hub install-host cursor
 dual-mem hub uninstall-host cursor
 dual-mem hub hook-search
 dual-mem hub capture claude-code
+dual-mem hub extract
+dual-mem hub retry
+dual-mem hub uninstall-service
 ```
 
-`--raw-only` 只保存 L0 Evidence，不调用抽取模型。普通扫描按会话分批写入，并以
+`--raw-only` 只保存 L0 Evidence，不调用抽取模型，之后可 `hub extract`。普通扫描按会话分批写入，并以
 来源 CLI 前缀保存 `session_id`，例如 `codex:<session-id>`。

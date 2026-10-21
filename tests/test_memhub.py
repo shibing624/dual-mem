@@ -34,6 +34,7 @@ from dual_mem.memhub import (
     scan_sources,
     uninstall_host,
 )
+from dual_mem.memhub.queue import HubWriteQueue
 from dual_mem.memhub.server import HUB_USER_ID, create_hub_app
 from dual_mem.memhub.sources import SOURCE_SPECS
 from dual_mem.memhub.config import resolve_hub_config
@@ -55,6 +56,14 @@ def _memory_client(
         llm=fake_llm,
         jev=fake_jev,
     )
+
+
+async def _drain(app) -> None:
+    """Wait for the Core's writer to finish the jobs already accepted."""
+    while app.state.queue.counts().get("pending", 0) or app.state.queue.counts().get(
+        "running", 0
+    ):
+        await asyncio.sleep(0.01)
 
 
 @asynccontextmanager
@@ -247,6 +256,7 @@ async def test_core_auth_durable_queue_and_single_scope(
             ],
             session_id="codex:s1",
             request_id="memhub:one",
+            wait=True,
         )
         assert job["status"] == "done"
         same = await remote.write(
@@ -256,10 +266,10 @@ async def test_core_auth_durable_queue_and_single_scope(
             ],
             session_id="codex:s1",
             request_id="memhub:one",
+            wait=True,
         )
         assert same["result"]["memory_id"] == job["result"]["memory_id"]
         assert (tmp_path / "hub.db").is_file()
-        assert (tmp_path / "uploads").is_dir()
 
         direct = httpx.AsyncClient(
             base_url="http://hub",
@@ -324,7 +334,7 @@ async def test_core_serializes_concurrent_writes(tmp_path: Path) -> None:
         ) as remote:
             await asyncio.gather(
                 *[
-                    remote.write(content=f"memory {i}", request_id=f"r{i}")
+                    remote.write(content=f"memory {i}", request_id=f"r{i}", wait=True)
                     for i in range(4)
                 ]
             )
@@ -358,6 +368,7 @@ async def test_scan_all_hosts_through_core(
             idle_seconds=0,
         )
         assert all(value["turns"] == 0 for value in again.values())
+        await _drain(_app)
         nodes = await core.list(
             user_id=HUB_USER_ID,
             agent_id="",
@@ -565,7 +576,9 @@ def test_cli_attach_capture_hook_and_status(tmp_path: Path, monkeypatch) -> None
         ["hub", "hook-search", "--hub-dir", str(hub)],
         input=json.dumps({"prompt": "我的框架偏好"}, ensure_ascii=False),
     )
-    assert hook.exit_code == 0 and "PyTorch" in hook.output
+    assert hook.exit_code == 0
+    context = json.loads(hook.output)["hookSpecificOutput"]["additionalContext"]
+    assert context.startswith("<relevant-memories>") and "PyTorch" in context
     status = runner.invoke(
         cli_main.app,
         ["hub", "status", "--hub-dir", str(hub)],
@@ -625,3 +638,309 @@ def test_cli_attach_rejects_plaintext_non_loopback(tmp_path: Path) -> None:
     )
     assert result.exit_code != 0
     assert "require HTTPS" in result.output
+
+
+async def test_failed_write_is_retried_and_cursor_never_skips_it(
+    tmp_path: Path, fake_embed, fake_llm, fake_jev
+) -> None:
+    class FlakyWrite:
+        """Model unavailable at first, then healthy."""
+
+        def __init__(self, core: MemoryClient) -> None:
+            self.core = core
+            self.settings = core.settings
+            self.factory = core.factory
+            self.down = True
+            self.calls = 0
+
+        async def add(self, **kwargs):
+            self.calls += 1
+            if self.down:
+                raise RuntimeError("429 rate limited")
+            return await self.core.add(**kwargs)
+
+        async def add_raw(self, **kwargs):
+            return await self.core.add_raw(**kwargs)
+
+    core = _memory_client(tmp_path / "hub", fake_embed, fake_llm, fake_jev)
+    flaky = FlakyWrite(core)
+    hub = tmp_path / "hub"
+    app = create_hub_app(
+        api_key="secret",
+        hub_dir=hub,
+        client=flaky,  # type: ignore[arg-type]
+        settings=core.settings,
+        queue_retry_seconds=0.01,
+    )
+    path = tmp_path / "ag.jsonl"
+    _jsonl(
+        path,
+        [
+            {"type": "user", "session_id": "s", "content": "我喜欢 Rust"},
+            {"type": "assistant", "session_id": "s", "content": "好"},
+        ],
+    )
+    async with app.router.lifespan_context(app):
+        async with HubClient(
+            base_url="http://hub",
+            api_key="secret",
+            transport=httpx.ASGITransport(app=app),
+        ) as remote:
+            with CursorStore(hub) as cursors:
+                kwargs = {
+                    "client": remote,
+                    "source": "agentica",
+                    "path": path,
+                    "cursors": cursors,
+                    "complete": True,
+                }
+                assert await scan_file(**kwargs) == 1
+                # The evidence is durable and queued while the model is down.
+                assert app.state.queue.counts()["pending"] == 1
+                while flaky.calls == 0:
+                    await asyncio.sleep(0.01)
+                assert app.state.queue.counts().get("done", 0) == 0
+                flaky.down = False
+                for _ in range(500):
+                    if app.state.queue.counts().get("done"):
+                        break
+                    await asyncio.sleep(0.01)
+                assert app.state.queue.counts().get("done") == 1
+                assert app.state.queue.counts().get("failed", 0) == 0
+                assert flaky.calls >= 2
+                assert await scan_file(**kwargs) == 0
+            # The retry reused the same L0 node instead of storing a second copy.
+            raws = [
+                n
+                for n in await core.list(user_id=HUB_USER_ID, limit=50, include_history=True)
+                if n.layer == Layer.L0_RAW.value
+            ]
+            assert len(raws) == 1
+
+
+async def test_write_gives_up_after_max_attempts_then_retry_requeues(
+    tmp_path: Path, fake_embed, fake_llm, fake_jev
+) -> None:
+    calls = []
+
+    async def broken(_payload):
+        calls.append(1)
+        raise RuntimeError("400 bad model response")
+
+    queue = HubWriteQueue(
+        tmp_path / "hub.db", broken, max_attempts=2, retry_base_seconds=0.01
+    )
+    queue.start()
+    queue.submit({"content": "x", "messages": None, "session_id": "", "memory_at": None,
+                  "request_id": "r1", "raw_only": False})
+    for _ in range(500):
+        if queue.get("r1")["status"] == "failed":
+            break
+        await asyncio.sleep(0.01)
+    job = queue.get("r1")
+    assert (job["status"], job["attempts"]) == ("failed", 2)
+    assert "400 bad model response" in job["error"]
+    assert len(calls) == 2
+
+    # Resubmitting the same request puts it back in the queue instead of returning the failure.
+    queue.submit({"content": "x", "messages": None, "session_id": "", "memory_at": None,
+                  "request_id": "r1", "raw_only": False})
+    assert queue.get("r1")["status"] in ("pending", "running")
+    await queue.close()
+
+
+async def test_raw_only_scan_can_be_extracted_later(
+    tmp_path: Path, fake_embed, fake_llm, fake_jev
+) -> None:
+    hub = tmp_path / "hub"
+    core = _memory_client(hub, fake_embed, fake_llm, fake_jev)
+    async with _attached_core(hub, core) as (app, remote):
+        path = tmp_path / "ag.jsonl"
+        _jsonl(
+            path,
+            [
+                {"type": "user", "session_id": "s", "content": "我常用 PyTorch 训练"},
+                {"type": "assistant", "session_id": "s", "content": "记下了"},
+            ],
+        )
+        with CursorStore(hub) as cursors:
+            assert await scan_file(
+                remote,
+                source="agentica",
+                path=path,
+                cursors=cursors,
+                complete=True,
+                raw_only=True,
+            ) == 1
+        await _drain(app)
+        assert app.state.queue.counts()["raw_only_done"] == 1
+        assert await core.list(user_id=HUB_USER_ID, limit=50) != []
+        raw_ids = {
+            node.memory_id
+            for node in await core.list(user_id=HUB_USER_ID, limit=50, include_history=True)
+            if node.layer == Layer.L0_RAW.value
+        }
+        assert app.state.queue.counts()["done"] == 1
+
+        assert (await remote.extract_raw())["queued"] == 1
+        await _drain(app)
+        assert app.state.queue.counts()["raw_only_done"] == 0
+        extracted = [
+            node
+            for node in await core.list(user_id=HUB_USER_ID, limit=50, include_history=True)
+            if node.layer != Layer.L0_RAW.value
+        ]
+        assert extracted, "extraction created facts from the raw evidence"
+        # Extraction reused the stored L0 rather than writing a second copy.
+        assert {
+            node.memory_id
+            for node in await core.list(user_id=HUB_USER_ID, limit=50, include_history=True)
+            if node.layer == Layer.L0_RAW.value
+        } == raw_ids
+
+
+async def test_core_processes_oldest_event_time_first(tmp_path: Path) -> None:
+    order = []
+
+    async def record(payload):
+        order.append(payload["content"])
+        return {}
+
+    queue = HubWriteQueue(tmp_path / "hub.db", record)
+
+    def submit(content: str, at: int) -> None:
+        queue.submit(
+            {"content": content, "messages": None, "session_id": "", "memory_at": at,
+             "request_id": content, "raw_only": False}
+        )
+
+    # Backlog accepted before the writer runs: a live turn, then older transcripts.
+    submit("live", 1791000200)
+    submit("old", 1791000000)
+    submit("older", 1790900000)
+    queue.start()
+    while queue.counts().get("done", 0) < 3:
+        await asyncio.sleep(0.01)
+    await queue.close()
+    assert order == ["older", "old", "live"]
+
+
+async def test_recall_skips_the_group_the_caller_disabled(
+    tmp_path: Path, fake_embed, fake_llm, fake_jev
+) -> None:
+    calls = []
+    core = _memory_client(tmp_path / "hub", fake_embed, fake_llm, fake_jev)
+
+    class Counted:
+        settings = core.settings
+        factory = core.factory
+
+        async def search(self, **kwargs):
+            calls.append("memories")
+            return await core.search(**kwargs)
+
+        async def search_conversation(self, **kwargs):
+            calls.append("conversations")
+            return await core.search_conversation(**kwargs)
+
+    app = create_hub_app(
+        api_key="secret", hub_dir=tmp_path / "hub", client=Counted(), settings=core.settings
+    )
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with HubClient(base_url="http://hub", api_key="secret", transport=transport) as remote:
+            await remote.recall(query="q", limit=0, raw_limit=3)
+            assert calls == ["conversations"]
+            calls.clear()
+            await remote.recall(query="q", limit=3, raw_limit=0)
+            assert calls == ["memories"]
+
+
+async def test_serve_refuses_non_loopback_and_a_second_core_cannot_steal_the_token(
+    tmp_path: Path, monkeypatch, fake_embed, fake_llm, fake_jev
+) -> None:
+    import uvicorn
+
+    monkeypatch.setattr(uvicorn, "run", lambda *_a, **_kw: None)
+    refused = runner.invoke(
+        cli_main.app,
+        ["hub", "serve", "--host", "0.0.0.0", "--hub-dir", str(tmp_path)],
+    )
+    assert refused.exit_code != 0 and "loopback only" in refused.output
+
+    core = _memory_client(tmp_path, fake_embed, fake_llm, fake_jev)
+    running = create_hub_app(api_key="owner-token", hub_dir=tmp_path, client=core)
+    async with running.router.lifespan_context(running):
+        assert (tmp_path / "runtime-token").read_text().strip() == "owner-token"
+        # A second Core (different --api-key) cannot take the lock, and must leave
+        # the running Core's token usable.
+        second = create_hub_app(api_key="attacker", hub_dir=tmp_path)
+        with pytest.raises(RuntimeError, match="already owns"):
+            await _start_lifespan(second)
+        assert (tmp_path / "runtime-token").read_text().strip() == "owner-token"
+        assert resolve_hub_config(tmp_path).api_key == "owner-token"
+
+
+async def _start_lifespan(app) -> None:
+    async with app.router.lifespan_context(app):
+        pass
+
+
+def test_install_service_writes_launchd_plist_or_systemd_unit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from dual_mem.memhub import service
+
+    hub = tmp_path / "hub"
+    monkeypatch.setattr(service, "launchd_plist_path", lambda: tmp_path / "agent.plist")
+    monkeypatch.setattr(service, "systemd_unit_path", lambda: tmp_path / "hub.service")
+    commands = []
+
+    def runner(argv):
+        commands.append(argv)
+        return {"command": argv, "returncode": 0, "stderr": ""}
+
+    info = service.install_service(hub_dir=hub, port=9999, runner=runner)
+    text = Path(info["service_file"]).read_text(errors="replace") if sys.platform != "darwin" else Path(
+        info["service_file"]
+    ).read_bytes().decode()
+    assert "hub" in text and "serve" in text and "9999" in text and str(hub.resolve()) in text
+    if sys.platform == "darwin":
+        assert commands[0][:1] == ["launchctl"] and commands[-1][1] == "load"
+    else:
+        assert commands[-1][:3] == ["systemctl", "--user", "enable"]
+
+    removed = service.uninstall_service(runner=runner)
+    assert removed["removed"] is True and not Path(removed["service_file"]).exists()
+
+
+def test_mcp_builds_without_a_running_core(tmp_path: Path) -> None:
+    """A host that starts the MCP server before `hub serve` must not crash at import time."""
+    pytest.importorskip("mcp.server.fastmcp")
+    from dual_mem.memhub.mcp import build_hub_mcp
+
+    server = build_hub_mcp(hub_dir=tmp_path)  # no runtime.json yet: no connection attempted
+    assert server is not None
+
+
+async def test_unreachable_core_leaves_cursor_in_place(tmp_path: Path) -> None:
+    def refuse(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("Core is down")
+
+    path = tmp_path / "ag.jsonl"
+    _jsonl(
+        path,
+        [
+            {"type": "user", "session_id": "s", "content": "q"},
+            {"type": "assistant", "session_id": "s", "content": "a"},
+        ],
+    )
+    async with HubClient(
+        base_url="http://hub", api_key="k", transport=httpx.MockTransport(refuse)
+    ) as remote:
+        with CursorStore(tmp_path) as cursors:
+            with pytest.raises(httpx.ConnectError):
+                await scan_file(
+                    remote, source="agentica", path=path, cursors=cursors, complete=True
+                )
+            assert cursors.get("agentica", str(path.resolve())) is None

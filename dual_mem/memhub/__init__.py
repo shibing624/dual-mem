@@ -8,6 +8,7 @@
 - ``sources``: read Agentica / Claude Code / Codex / Cursor / Hermes transcripts
   into turns and submit them incrementally.
 - ``hosts``: install the MCP server, recall skill and capture hooks into each CLI.
+- ``service``: run the Core as a login service (launchd / systemd --user).
 """
 from dual_mem.memhub.client import HubClient
 from dual_mem.memhub.config import (
@@ -15,7 +16,6 @@ from dual_mem.memhub.config import (
     HubConfig,
     hub_root,
     hub_store_dir,
-    hub_upload_dir,
     load_hub_config,
     save_hub_config,
 )
@@ -40,7 +40,6 @@ __all__ = [
     "hosts_status",
     "hub_root",
     "hub_store_dir",
-    "hub_upload_dir",
     "install_host",
     "load_hub_config",
     "locate_transcript",

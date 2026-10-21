@@ -4,7 +4,9 @@
 
 - **MemHub（`dual-mem hub`）**：借鉴 Hy-Memory MemHub，改为本地单 Core 架构。`hub serve` 独占 `~/.dual-mem`，自动生成 `runtime-token` 并通过 `runtime.json` 供同机 CLI/MCP/Hook 零配置发现；持久 `hub_writes` Evidence 队列的唯一 worker 写 Chroma/Kuzu/SQLite。Agentica / Claude Code / Codex / Cursor / Hermes 共用固定个人 scope。云上仍是同一单实例配合 SSH/Tailscale 隧道，通过高级命令 `hub attach --base-url ... --api-key ...` 显式接入，不复制或同步记忆库。
 - **删除 MemHub 多主快照方案**：移除 `--user-id`、`--fs-*`、`--sync-secret`、`--keep-snapshots`、`--install-hosts` 以及 `hub export/import/push/pull/sync`，同时删除 `MulanFs`、客户端 Fernet 加密和 `VectorStore.export_nodes/merge_nodes`；宿主安装改为独立 `hub install-host`，API Key 不写入宿主配置。
-- `MemoryClient.add_raw` / `SyncMemoryClient.add_raw` 新增 `request_id`，raw-only Evidence 现在与普通 `add` 一样支持确定性幂等重放。
+- `MemoryClient.add_raw` / `SyncMemoryClient.add_raw` 新增 `request_id`，raw-only Evidence 现在与普通 `add` 一样支持确定性幂等重放。raw-only 回执与 `add` 分开存，L0 节点相同：同一 `request_id` 先 `add_raw` 再 `add` 会复用已存 L0 继续抽取，不再报 `IdempotencyConflictError`。
+- **MemHub 写入不再丢**：`hub_writes` 入库即回执，扫描 / MCP 不再等 LLM（原先 120s 超时、失败后游标照样前进导致该轮永久丢失）。worker 失败按指数退避重试（默认 5 次，30s 起），用尽才 `failed`；同一请求重新提交或 `hub retry` 会重新排队。队列按事件时间（`memory_at`）而非到达顺序处理，冷启动多 CLI 导入最旧的先进 reconciler。新增 `hub extract` 为 `--raw-only` 导入的 Evidence 补跑抽取。
+- **MemHub 运维**：`hub install-service` / `uninstall-service` 安装登录自启（macOS LaunchAgent / Linux systemd --user）；MCP 代理每次调用工具时才连接 Core，宿主先于 Core 启动也能用；`hub serve` 只接受 loopback 地址，token 在拿到进程锁后才写入（第二个 `serve` 不会再覆盖运行中 Core 的 token）；`hook-search` 注入包 `<relevant-memories>`；`/recall` 跳过 `limit=0` 的那一路；`status` 不再截断在 10 万条；删除未使用的 `uploads` 目录。`VectorStore.get_many(limit=None)` 表示不限条数。
 
 ### 2026-10-20（晚）：System 2 v3（hy-memory 2.0.4 对齐）、PersonaMem-v2 驱动的 System 1 抽取修正（breaking）
 

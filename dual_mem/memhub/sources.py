@@ -355,8 +355,9 @@ async def scan_file(
     The open last turn is held back (cursor stays before it) unless the caller
     knows it ended (``complete``: a Stop / run.completed hook) or the transcript
     has been idle for ``idle_seconds``. Each batch of up to ``batch_turns`` turns of
-    one session is one ``add`` with a content-derived request id, and the cursor
-    moves after every batch, so a killed scan resumes without duplicates.
+    one session is one write with a content-derived request id. The cursor moves
+    only past batches the Core holds durably; an unreachable Core raises and the
+    next scan resends from there (same ids, so nothing is stored twice).
     """
     spec = SOURCE_SPECS[source]
     key = str(path.resolve())
@@ -387,6 +388,8 @@ async def scan_file(
                     ensure_ascii=False,
                 ).encode()
             ).hexdigest()[:32]
+            # Returns once the Core holds the evidence (it retries model work
+            # itself); an unreachable Core raises here and the cursor stays.
             await client.write(
                 messages=messages_in,
                 session_id=session_id,

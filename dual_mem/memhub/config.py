@@ -58,12 +58,6 @@ def hub_store_dir(hub_dir: str | Path | None = None) -> Path:
     return hub_root(hub_dir) / "store"
 
 
-def hub_upload_dir(hub_dir: str | Path | None = None) -> Path:
-    path = hub_root(hub_dir) / "uploads"
-    path.mkdir(exist_ok=True)
-    return path
-
-
 def _config_path(hub_dir: str | Path | None) -> Path:
     return hub_root(hub_dir) / "hub.json"
 
@@ -126,6 +120,7 @@ def publish_runtime(
     *,
     base_url: str,
     instance_id: str,
+    pid: int,
     hub_dir: str | Path | None = None,
 ) -> None:
     """Publish the running local Core for CLI/MCP auto-discovery."""
@@ -134,7 +129,7 @@ def publish_runtime(
     payload = {
         "base_url": base_url.rstrip("/"),
         "instance_id": instance_id,
-        "pid": os.getpid(),
+        "pid": pid,
         "started_at": int(time.time()),
     }
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -146,14 +141,15 @@ def publish_runtime(
 
 def unpublish_runtime(
     instance_id: str,
+    pid: int,
     hub_dir: str | Path | None = None,
 ) -> None:
-    """Remove only this Core's receipt, never a replacement process's receipt."""
+    """Remove this Core's receipt, leaving one published by a later process."""
     path = _runtime_path(hub_dir)
     if not path.is_file():
         return
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload["instance_id"] == instance_id:
+    if payload["instance_id"] == instance_id and payload["pid"] == pid:
         path.unlink()
 
 

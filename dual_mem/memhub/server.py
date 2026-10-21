@@ -23,13 +23,14 @@ from dual_mem.errors import IdempotencyConflictError
 from dual_mem.memhub.config import (
     hub_root,
     hub_settings,
-    hub_upload_dir,
     load_or_create_runtime_token,
     publish_runtime,
     unpublish_runtime,
 )
 from dual_mem.memhub.queue import HubWriteQueue
-from dual_mem.types import Layer
+from dual_mem.sdk_models import SearchMemories
+from dual_mem.types import Layer, MemoryStatus
+from dual_mem.isolation import build_filter
 
 HUB_USER_ID = "default"
 
@@ -41,7 +42,8 @@ class HubWriteRequest(BaseModel):
     memory_at: int | None = None
     request_id: str
     raw_only: bool = False
-    wait: bool = True
+    # ``False`` returns as soon as the evidence is durable; the job runs later.
+    wait: bool = False
 
 
 class HubRecallRequest(BaseModel):
@@ -90,15 +92,19 @@ def _instance_id(root: Path) -> str:
 
 def create_hub_app(
     *,
-    api_key: str,
+    api_key: str | None = None,
     hub_dir: str | Path | None = None,
     client: MemoryClient | None = None,
     settings: Settings | None = None,
     published_base_url: str = "http://127.0.0.1:8765",
+    queue_retry_seconds: float = 30.0,
 ) -> FastAPI:
-    """Create the personal Hub Core; one process owns one local store."""
-    if not api_key:
-        raise ValueError("MemHub Core requires a non-empty API key")
+    """Create the personal Hub Core; one process owns one local store.
+
+    ``api_key`` (else the persisted runtime token, created on first start) is
+    written to the token file inside the lifespan, after the exclusive lock, so a
+    second ``hub serve`` cannot replace the running Core's token on its way out.
+    """
     root = hub_root(hub_dir)
     lock = HubProcessLock(root / "hub.lock")
     owns_client = client is None
@@ -109,13 +115,14 @@ def create_hub_app(
         core_client: MemoryClient | None = None
         queue: HubWriteQueue | None = None
         try:
-            load_or_create_runtime_token(root, token=api_key)
+            resolved_key = load_or_create_runtime_token(root, token=api_key)
+            app.state.api_key = resolved_key
             publish_runtime(
                 base_url=published_base_url,
                 instance_id=app.state.instance_id,
+                pid=os.getpid(),
                 hub_dir=root,
             )
-            hub_upload_dir(root)
             core_client = client or MemoryClient(
                 settings=settings or hub_settings(root)
             )
@@ -137,7 +144,9 @@ def create_hub_app(
                     result = await core_client.add(**kwargs)
                 return result.to_dict()
 
-            queue = HubWriteQueue(root / "hub.db", process)
+            queue = HubWriteQueue(
+                root / "hub.db", process, retry_base_seconds=queue_retry_seconds
+            )
             app.state.queue = queue
             queue.start()
             yield
@@ -146,7 +155,7 @@ def create_hub_app(
                 await queue.close()
             if owns_client and core_client is not None:
                 await core_client.aclose()
-            unpublish_runtime(app.state.instance_id, root)
+            unpublish_runtime(app.state.instance_id, os.getpid(), root)
             lock.release()
 
     app = FastAPI(
@@ -155,15 +164,19 @@ def create_hub_app(
         lifespan=lifespan,
     )
     app.state.instance_id = _instance_id(root)
+    app.state.api_key = api_key or ""
 
     def verify(
         authorization: str | None = Header(default=None),
     ) -> None:
+        expected = app.state.api_key
+        if not expected:
+            raise HTTPException(status_code=503, detail="Hub Core is starting")
         prefix = "Bearer "
         if not authorization or not authorization.startswith(prefix):
             raise HTTPException(status_code=401, detail="missing Hub bearer token")
         supplied = authorization[len(prefix) :].strip()
-        if not secrets.compare_digest(supplied, api_key):
+        if not secrets.compare_digest(supplied, expected):
             raise HTTPException(status_code=403, detail="invalid Hub bearer token")
 
     @app.exception_handler(IdempotencyConflictError)
@@ -179,11 +192,12 @@ def create_hub_app(
 
     @app.get("/v1/hub/identity", dependencies=[Depends(verify)])
     async def identity():
+        resolved = settings or (client.settings if client else hub_settings(root))
         return {
             "instance_id": app.state.instance_id,
             "sdk_version": __version__,
             "scope": {
-                "app_id": (settings or (client.settings if client else hub_settings(root))).default_app_id,
+                "app_id": resolved.default_app_id,
                 "user_id": HUB_USER_ID,
                 "agent_id": "",
             },
@@ -208,36 +222,54 @@ def create_hub_app(
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Hub write not found") from exc
 
+    @app.post("/v1/hub/extract", dependencies=[Depends(verify)])
+    async def extract_raw():
+        """Queue extraction for evidence stored with ``raw_only``."""
+        return {"queued": app.state.queue.extract_raw()}
+
+    @app.post("/v1/hub/retry", dependencies=[Depends(verify)])
+    async def retry_failed():
+        return {"queued": app.state.queue.retry_failed()}
+
     @app.post("/v1/hub/recall", dependencies=[Depends(verify)])
     async def recall(body: HubRecallRequest):
         core_client: MemoryClient = app.state.client
-        memories = await core_client.search(
-            query=body.query,
-            user_id=HUB_USER_ID,
-            agent_ids=[""],
-            limit=body.limit,
-        )
-        conversations = await core_client.search_conversation(
-            query=body.query,
-            user_id=HUB_USER_ID,
-            agent_ids=[""],
-            limit=body.raw_limit,
-        )
+        memories = SearchMemories()
+        conversations = SearchMemories()
+        if body.limit > 0:
+            memories = (
+                await core_client.search(
+                    query=body.query,
+                    user_id=HUB_USER_ID,
+                    agent_ids=[""],
+                    limit=body.limit,
+                )
+            ).memories
+        if body.raw_limit > 0:
+            conversations = (
+                await core_client.search_conversation(
+                    query=body.query,
+                    user_id=HUB_USER_ID,
+                    agent_ids=[""],
+                    limit=body.raw_limit,
+                )
+            ).memories
         return {
-            "memories": memories.memories.to_dict(),
-            "conversations": [
-                item.to_dict() for item in conversations.memories.normal
-            ],
+            "memories": memories.to_dict(),
+            "conversations": [item.to_dict() for item in conversations.normal],
         }
 
     @app.get("/v1/hub/status", dependencies=[Depends(verify)])
     async def status():
         core_client: MemoryClient = app.state.client
-        nodes = await core_client.list(
-            user_id=HUB_USER_ID,
-            agent_id="",
-            limit=100_000,
-            include_history=True,
+        nodes = core_client.factory.vector.get_many(
+            build_filter(
+                app_ids=[core_client.settings.default_app_id],
+                user_id=HUB_USER_ID,
+                agent_ids=[""],
+                statuses=[MemoryStatus.ACTIVE],
+            ),
+            limit=None,
         )
         latest = [node for node in nodes if node.is_latest]
         return {
@@ -246,12 +278,12 @@ def create_hub_app(
             "memories": {
                 "versions": len(nodes),
                 "current": len(latest),
-                "by_layer": dict(Counter(node.layer for node in latest)),
+                "by_layer": dict(Counter(node.layer.value for node in latest)),
                 "raw_by_source": dict(
                     Counter(
                         node.session_id.partition(":")[0]
                         for node in latest
-                        if node.layer == Layer.L0_RAW.value
+                        if node.layer == Layer.L0_RAW
                     )
                 ),
             },

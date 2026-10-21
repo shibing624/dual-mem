@@ -72,7 +72,10 @@ class HubClient:
         memory_at: int | None = None,
         request_id: str,
         raw_only: bool = False,
+        wait: bool = False,
     ) -> dict[str, Any]:
+        """Submit evidence. Returns once it is durable in the Core (a receipt with
+        status ``pending``); ``wait=True`` instead blocks until it is processed."""
         return await self._request(
             "POST",
             "/v1/hub/writes",
@@ -83,11 +86,19 @@ class HubClient:
                 "memory_at": memory_at,
                 "request_id": request_id,
                 "raw_only": raw_only,
+                "wait": wait,
             },
         )
 
     async def write_status(self, request_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/v1/hub/writes/{request_id}")
+
+    async def extract_raw(self) -> dict[str, Any]:
+        """Queue extraction for every write that was stored raw-only."""
+        return await self._request("POST", "/v1/hub/extract")
+
+    async def retry_failed(self) -> dict[str, Any]:
+        return await self._request("POST", "/v1/hub/retry")
 
     async def recall(
         self,

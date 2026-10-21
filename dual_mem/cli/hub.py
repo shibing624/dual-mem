@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 import typer
 
 from dual_mem.memhub import hosts as hub_hosts
+from dual_mem.memhub import service as hub_service
 from dual_mem.memhub.client import HubClient
 from dual_mem.memhub.config import (
     CursorStore,
@@ -25,7 +26,6 @@ from dual_mem.memhub.config import (
     clear_hub_config,
     hub_root,
     hub_settings,
-    load_or_create_runtime_token,
     load_hub_config,
     runtime_status,
     save_hub_config,
@@ -35,6 +35,7 @@ from dual_mem.retrieval.formatter import format_memories
 
 hub_app = typer.Typer(help="MemHub：本地单 Core、跨 CLI 共享个人记忆")
 HubDir = typer.Option(None, "--hub-dir", help="Hub 根目录（默认 ~/.dual-mem）")
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
 def make_client(hub_dir: str | None) -> HubClient:
@@ -90,11 +91,11 @@ def _validate_base_url(base_url: str) -> str:
     parsed = urlparse(value)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise typer.BadParameter("base_url must be an absolute http(s) URL")
-    loopback = parsed.hostname in ("127.0.0.1", "localhost", "::1")
+    loopback = parsed.hostname in LOOPBACK_HOSTS
     if parsed.scheme != "https" and not loopback:
         raise typer.BadParameter(
             "non-loopback Hub connections require HTTPS; use an SSH/Tailscale "
-            "tunnel and a 127.0.0.1 URL for方案 A"
+            "tunnel and a 127.0.0.1 URL"
         )
     return value
 
@@ -137,7 +138,7 @@ def hub_detach(hub_dir: str | None = HubDir) -> None:
 
 @hub_app.command("serve")
 def hub_serve(
-    host: str = typer.Option("127.0.0.1", "--host"),
+    host: str = typer.Option("127.0.0.1", "--host", help="只允许 loopback 地址"),
     port: int = typer.Option(8765, "--port"),
     api_key: str | None = typer.Option(
         None,
@@ -148,22 +149,64 @@ def hub_serve(
     mode: str | None = typer.Option(None, "--mode", help="system1 | dual"),
     hub_dir: str | None = HubDir,
 ) -> None:
-    """启动唯一 Hub Core；记忆、Evidence 与上传目录均留在本机 Hub 根目录。"""
+    """启动唯一 Hub Core；记忆与 Evidence 均留在本机 Hub 根目录。"""
     import uvicorn
 
     from dual_mem.memhub.server import create_hub_app
 
-    settings = hub_settings(hub_dir, mode=mode)
-    token = load_or_create_runtime_token(hub_dir, token=api_key)
-    published_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
-    url_host = f"[{published_host}]" if ":" in published_host else published_host
+    if host not in LOOPBACK_HOSTS:
+        # The bearer token travels in plain HTTP; remote clients use a tunnel.
+        raise typer.BadParameter(
+            "Hub Core listens on loopback only; reach it from other machines "
+            "through an SSH/Tailscale tunnel"
+        )
+    url_host = f"[{host}]" if ":" in host else host
     app = create_hub_app(
-        api_key=token,
+        api_key=api_key,
         hub_dir=hub_dir,
-        settings=settings,
+        settings=hub_settings(hub_dir, mode=mode),
         published_base_url=f"http://{url_host}:{port}",
     )
     uvicorn.run(app, host=host, port=port)
+
+
+@hub_app.command("install-service")
+def hub_install_service(
+    port: int = typer.Option(8765, "--port"),
+    hub_dir: str | None = HubDir,
+) -> None:
+    """开机/登录自动启动 Hub Core（macOS LaunchAgent / Linux systemd --user）。
+
+    服务不继承 shell 环境变量，模型 API key 请写在 ~/.dual_mem/config.yaml。"""
+    _echo(hub_service.install_service(hub_dir=hub_dir, port=port))
+
+
+@hub_app.command("uninstall-service")
+def hub_uninstall_service() -> None:
+    """停止并移除 Hub Core 自启动服务（不删除记忆数据）。"""
+    _echo(hub_service.uninstall_service())
+
+
+@hub_app.command("extract")
+def hub_extract(hub_dir: str | None = HubDir) -> None:
+    """对 --raw-only 导入的 Evidence 补跑抽取（后台排队，复用已存的 L0）。"""
+
+    async def run() -> dict[str, Any]:
+        async with make_client(hub_dir) as client:
+            return await client.extract_raw()
+
+    _echo(asyncio.run(run()))
+
+
+@hub_app.command("retry")
+def hub_retry(hub_dir: str | None = HubDir) -> None:
+    """把重试耗尽而失败的写入重新排队。"""
+
+    async def run() -> dict[str, Any]:
+        async with make_client(hub_dir) as client:
+            return await client.retry_failed()
+
+    _echo(asyncio.run(run()))
 
 
 @hub_app.command("status")
@@ -226,7 +269,7 @@ def hub_scan(
     ),
     file: Path | None = typer.Option(None, "--file", help="只扫一个会话文件"),
     complete: bool = typer.Option(False, "--complete", help="最后一轮已经结束"),
-    raw_only: bool = typer.Option(False, "--raw-only", help="只保留原始 Evidence"),
+    raw_only: bool = typer.Option(False, "--raw-only", help="只保留原始 Evidence，之后可用 hub extract 补抽取"),
     limit: int = typer.Option(0, "--limit", help="最多写入轮数，0 = 不限"),
     batch: int = typer.Option(5, "--batch", help="同会话每次提交的轮数"),
     idle: int = typer.Option(300, "--idle", help="静默多少秒视为一轮结束"),
@@ -320,6 +363,8 @@ def hub_hook_search(
             )
             context = f"{context}\n\n历史对话：\n{raw}".strip()
         if context:
+            # Tagged so strip_memory_injection drops it if a host echoes it back.
+            context = f"<relevant-memories>\n{context}\n</relevant-memories>"
             typer.echo(
                 json.dumps(
                     {
