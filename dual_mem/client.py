@@ -882,7 +882,7 @@ class MemoryClient:
         provider = self.factory._jev
         if provider is not None and hasattr(provider, "aclose"):
             await provider.aclose()
-        for provider in (self.factory._embed, self.factory._llm, self.factory._reranker):
+        for provider in (self.factory._embed, self.factory._llm):
             if (
                 provider is not _UNSET
                 and provider is not None

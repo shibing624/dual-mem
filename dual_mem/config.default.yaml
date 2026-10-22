@@ -38,11 +38,5 @@ system2_max_prompt_facts: 120
 write_serialize_per_user: false
 persist_history: false
 purge_done_queues: true
-# An L3 derived memory at least this cosine-similar to an existing one is skipped.
-s2_dedup_threshold: 0.97
-# Optional Cohere/Jina-compatible cross-encoder endpoint; empty = embedding/BM25 only.
-rerank_endpoint: ""
-rerank_model: ""
-rerank_candidate_limit: 128
 # 版本日志 versions.db 始终持久化，persist_history 仅控制附加 history.db 审计。
 # high_recall 只扩大材料预算；不改变关系语义。

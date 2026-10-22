@@ -62,16 +62,19 @@ SKIP 是“当前事实已覆盖”，RAW_ONLY 是“没有持久增量”。原
 
 `add()` 先完成同一 System1 决策和版本写入，再登记 cognition scope。
 `digest()` 捕获队列 task IDs，同 scope 顺序处理，不同 scope 默认并行 4。
-事实按照 `system2_max_prompt_facts` 和生成模型字符预算分批，孤立点也处理，
-不使用 DBSCAN/cluster 去重作为证据覆盖。分批前按 embedding 最近邻链排序，让同主题证据进同一批
-（只排序，不丢弃），便于跨 session 汇总（总额、次数、时间线）。超预算材料保留 pending 并报错。
 
-生成的 `kind` 可以是 `schema` / `summary` / `intention` / `preference`。`preference` 是由多条事实
-模式推出、但原文没直说的偏好，System1 不做这类推断，由 digest 产出并带 evidence_ids。
+System2（v3，对齐 hy-memory 2.0.4）产出三类 L3：
 
-每批一次生成，JEV 逐条校验 draft 只看其引用的证据；不通过的 draft 丢弃，通过的直接作为独立 L3
-节点追加（不走关系决策），与已有推导 cosine ≥ `s2_dedup_threshold` 的跳过。批次失败只记日志并丢弃，
-不二分、不计数、不隔离；这些事实保持未处理，之后该 scope 再次 digest 时重新参与。
+- **schema**：当前 L1/L2 按 average-linkage cosine 聚类（`system2_cluster_distance`，超大簇按
+  `system2_refine_distance` 再切，小于 `system2_min_cluster_size` 的簇不调用模型）。每簇一次生成，
+  操作为 `create_schema` / `add_evidence`，证据须跨 ≥ `system2_min_sources` 个独立原文来源。
+  DBSCAN 在单个用户的记忆上会链成一个簇，因此不用。
+- **core schema**：基础 schema ≥ `system2_cross_domain_min_basics` 时，按去领域的行为抽象成组，
+  每组至多一条跨领域 schema，证据继承成员。
+- **persona catalog**：按 8 个领域从当前事实中选择原文（不改写），事实集合变化时才重建。
+
+读取默认 `derived_context_limit=0`（schema 只写不读）、`catalog_context_enabled=True`。
+生成失败只丢弃该产物，不重试；未提交的事实保持未处理。
 来源更新后，引用该来源的旧推导变成非 latest，其余证据恢复 fresh；下次 digest 重建。
 图投影待处理记录与版本同一提交；投影失败时，下次 digest 先恢复，已处理证据不会导致漏补图。
 新到达的 task IDs 不会被旧水位确认。失败 scope 保留 pending，成功 scope 可独立确认。

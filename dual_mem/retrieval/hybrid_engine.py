@@ -744,23 +744,6 @@ async def search_hybrid(
             for row in merged[:raw_limit]
         ]
 
-    reranker = factory.reranker
-    if reranker is not None:
-        pool = {row["node_id"]: row for row in vdb_scored}
-        curated = sorted(pool.values(), key=lambda row: -row["score"])[
-            :max(final_limit, settings.rerank_candidate_limit)
-        ]
-        candidates = curated + raw_hits
-        scores = await reranker.rerank(
-            query=query, documents=[row["node"].content for row in candidates]
-        )
-        score_by_id = {row["node_id"]: score for row, score in zip(candidates, scores, strict=True)}
-        # Only cross-encoder scores compete after reranking, never a mix with
-        # uncalibrated cosine scores from candidates outside the rerank budget.
-        vdb_scored = [row for row in vdb_scored if row["node_id"] in score_by_id]
-        for row in vdb_scored + raw_hits:
-            row["score"] = score_by_id[row["node_id"]]
-
     expandable = vdb_scored
     meta_by_nid: dict[str, dict] = {
         it["node_id"]: it for it in expandable if it.get("node_id")

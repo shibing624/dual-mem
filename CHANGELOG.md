@@ -8,6 +8,35 @@
 - **MemHub 写入不再丢**：`hub_writes` 入库即回执，扫描 / MCP 不再等 LLM（原先 120s 超时、失败后游标照样前进导致该轮永久丢失）。worker 失败按指数退避重试（默认 5 次，30s 起），用尽才 `failed`；同一请求重新提交或 `hub retry` 会重新排队。队列按事件时间（`memory_at`）而非到达顺序处理，冷启动多 CLI 导入最旧的先进 reconciler。新增 `hub extract` 为 `--raw-only` 导入的 Evidence 补跑抽取。
 - **MemHub 运维**：`hub install-service` / `uninstall-service` 安装登录自启（macOS LaunchAgent / Linux systemd --user）；MCP 代理每次调用工具时才连接 Core，宿主先于 Core 启动也能用；`hub serve` 只接受 loopback 地址，token 在拿到进程锁后才写入（第二个 `serve` 不会再覆盖运行中 Core 的 token）；`hook-search` 注入包 `<relevant-memories>`；`/recall` 跳过 `limit=0` 的那一路；`status` 不再截断在 10 万条；删除未使用的 `uploads` 目录。`VectorStore.get_many(limit=None)` 表示不限条数。
 
+### 2026-10-22：精简——删除无收益的开关（breaking）
+
+本轮在 PersonaMem-v2 c20（476 题）与 LongMemEval val24 上用独立评测（benchmark `results/rsi/`）试过以下 Jev/LLM 扩展，**全部没有显著正收益**，代码已删除，不保留开关：
+
+| 试验（已删除） | 结果（同 Qwen3.8-27B / 同 QA） |
+|---|---|
+| 写入裁决改为“全部追加” / 27B 裁决 | PM 50.63 / 51.26 vs Jev 50.00（不显著）；27B 写入慢 2.1× |
+| 写入 Jev `score` 重要度 + 读侧先验 | 先验 ×0.2 显著变差（−8.2pp），×0.05 −1.7pp |
+| 抽取时归一绝对事件日期（`event_at`） | PM +2.9pp 不显著；LME 稳定 −2 题（knowledge-update） |
+| 读侧 Jev score / 27B 列表式重排到 top-10 | PM +0.2 / −1.1；LME −2 题 |
+| S2 按需（Jev `noul` 判 S1 证据是否充分） | 与不读 schema 持平（8W/8L），常开 −1.3 |
+
+同时删除此前已验证无收益的读侧 cross-encoder（`rerank_endpoint/model/api_key/timeout/candidate_limit`、`providers/rerank.py`、`ComponentFactory.reranker`），以及无任何代码读取的死字段 `s2_dedup_threshold`、`hybrid_evidence_boost_max`、`hybrid_evidence_saturate`。旧配置里这些键会被 `extra="forbid"` 拒绝，需要从 YAML/env 中去掉。
+
+**推荐设置 = 当前默认值**：Jev 只用于写入关系裁决（target/action choice），候选只与 cosine ≥ `reconcile_relation_threshold` 的当前记忆比较，低于阈值直接追加、不调用 Jev；`derived_context_limit=0`（schema 只写不读）、`catalog_context_enabled=True`、`version_bridge_limit=20`。
+
+**Jev 调用量 vs 阈值（精简后 SDK 重新写入，PM c20 + LME val24）**：
+
+| `reconcile_relation_threshold` | 需 Jev 的候选 | PM c20 | LME val24 |
+|---|---:|---:|---:|
+| 0.60（默认） | 94.4%（原 pm-jev）/ 94.7%（重跑） | 50.00 / 53.36 | 22 / 19 |
+| 0.65 | 85.3% | 50.21 | 20 |
+| 0.70 | 68.6% | 51.05 | 19 |
+
+- 存储分析（pm-jev，20 persona）：Jev 真正选中目标的候选 cosine p10=0.72、p50=0.84；SKIP 目标 p5=0.78；判 NONE 的候选与最近旧记忆 p50=0.70。阈值 0.70 可省掉约 1/3 Jev 调用，只丢约 7% 的关系判断。
+- **同一默认阈值 0.60 两次重写 PM 相差 3.4pp、LME 相差 3 题**（Bamboo 偶发 502/429 丢写约 1% + 抽取/QA 非确定性）。阈值 0.65/0.70 的差异都在这个范围内，**无法区分**，因此默认保持 0.60；对 Jev 调用成本敏感的部署可设 0.70（PM 无损、Jev 调用 −27%，LME 上未测出差异）。写入耗时主要在 LLM 抽取，阈值对 wall time 影响约 −10%（680→600 s/persona）。
+
+验证：445 passed / 1 skipped（删除 7 项 cross-encoder 测试，`tests/test_rerank.py` 只剩 BM25/RRF，改名 `test_bm25_rrf.py`）。
+
 ### 2026-10-20（晚）：System 2 v3（hy-memory 2.0.4 对齐）、PersonaMem-v2 驱动的 System 1 抽取修正（breaking）
 
 - **S2 v3 写入**（`system2/system2_agent.py` 重写）：

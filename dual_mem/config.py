@@ -229,11 +229,8 @@ class Settings(BaseSettings):
     persist_history: bool = False
     # Drop reconcile/s2 queue rows after digest drains them (keeps cache.db small).
     purge_done_queues: bool = True
-    # An L3 derived memory at least this cosine-similar to an existing one is skipped.
-    s2_dedup_threshold: float = 0.97
 
-    # Hybrid read fusion tunables (semantic vs in-pool BM25 rerank weight; graph derived evidence
-    # boost). Sum of the two weights need not be 1; evidence boost saturates at the given count.
+    # Hybrid read fusion: semantic vs in-pool BM25 weight (the sum need not be 1).
     hybrid_w_sem: float = 0.6
     hybrid_w_bm25: float = 0.4
     normal_candidate_multiplier: float = 3.0
@@ -252,14 +249,6 @@ class Settings(BaseSettings):
     schema_min_support: int = 1
     # Return the persona catalog (question-blind, exact current facts) with every search.
     catalog_context_enabled: bool = True
-    hybrid_evidence_boost_max: float = 0.3
-    hybrid_evidence_saturate: int = 5
-    # Optional query/document cross-encoder. No generation or retry is involved.
-    rerank_endpoint: str = ""
-    rerank_model: str = ""
-    rerank_api_key: str = ""
-    rerank_timeout: float = 30.0
-    rerank_candidate_limit: int = 128
     # Coding/tool-use memory subsystem — separate write/store path for engineering
     # conversations containing tool calls. When enabled, add() first checks for tool
     # messages; if found, Jev decides coding vs chat, and coding memories
@@ -285,8 +274,6 @@ class Settings(BaseSettings):
         "system2_catalog_max_facts",
         "system2_catalog_per_domain",
         "system2_catalog_total",
-        "rerank_timeout",
-        "rerank_candidate_limit",
     )
     @classmethod
     def _positive_decision_limit(cls, value: int | float) -> int | float:
