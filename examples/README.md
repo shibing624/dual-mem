@@ -39,11 +39,12 @@ export DUAL_MEM_EMBED_API_KEY=sk-...
 ## 运行
 
 ```bash
-python examples/01_system1.py    # add(content/messages) + search + list
-python examples/02_dual.py       # 同样的写入；digest() 只尝试生成 L3
-python examples/03_rest_api.py   # REST。update 返回新 id，delete 归档当前版本
-python examples/04_cli.py        # CLI 的 add / search / search-conversation / list
-python examples/05_lifecycle.py  # add_raw、distill、原文检索、update/delete 演化链
+python examples/01_system1.py        # add(content/messages) + search + list
+python examples/02_dual.py           # 同样的写入；digest() 只尝试生成 L3
+python examples/03_rest_api.py       # REST。update 返回新 id，delete 归档当前版本
+python examples/04_cli.py            # CLI 的 add / search / search-conversation / list
+python examples/05_lifecycle.py      # add_raw、distill、原文检索、update/delete 演化链
+python examples/06_coding_memory.py  # coding_enabled=True：工程排障 Tool 对话写入与 search_coding
 ```
 
 ## 当前写入
@@ -60,4 +61,5 @@ python examples/05_lifecycle.py  # add_raw、distill、原文检索、update/del
   `05_lifecycle.py` 用这两步演示演化链，不依赖 JEV 把自然语言更新判成 OVERRIDE。
 - `add_raw` 只写 L0。`distill` 对已有原文抽取，不再写第二条原文。
   默认 `search` 不返回 L0；`search_conversation` 只查 L0。
-- MCP 和实验性 coding 记忆没有单独 demo。MCP 工具就是上面这些 client 方法。
+- `06_coding_memory.py` 演示 `coding_enabled=True` 下的工程记忆：当 `messages` 含 `role="tool"` 时自动抽取 `task / solution / files`，并通过 `search_coding` 检索。
+- MCP 工具直接对应上面这些 client 方法。

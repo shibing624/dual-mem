@@ -12,10 +12,7 @@ dual-mem 可以接进你已经在用的 Agent 框架和 AI 工具。所有集成
 
 ---
 
-## 开发者可选阅读
-
-<details>
-<summary>各集成的接入代码</summary>
+## 各集成的接入代码
 
 ### Agentica
 
@@ -53,5 +50,3 @@ agent = Agent(workspace=mem.as_workspace(workspace_dir=".agentica"), enable_long
 ### 统一的记忆注入格式
 
 所有集成注入的记忆块都由同一个格式化器生成，包在 `<relevant-memories>` 标签里，所以不同宿主看到的上下文结构一致。
-
-</details>

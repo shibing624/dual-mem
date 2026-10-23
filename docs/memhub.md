@@ -1,4 +1,4 @@
-# MemHub：All your agents. One Memory.
+# MemHub：跨 AI 工具共享你的个人记忆
 
 在 Cursor 里交代过的偏好，Codex 并不知道；在 Claude Code 里定下的规范，到了 Hermes 又要重新说明。
 
@@ -71,10 +71,7 @@ dual-mem hub attach --base-url http://127.0.0.1:8765 --api-key 'your-secret'
 
 ---
 
-## 开发者可选阅读
-
-<details>
-<summary>架构、安全模型与写入流程</summary>
+## 架构、安全模型与写入流程
 
 ### 单 Core 架构
 
@@ -118,5 +115,3 @@ dual-mem hub serve（唯一写者）
 dual-mem hub hook-search            # 供宿主 Hook 调用：搜索并输出注入块
 dual-mem hub capture claude-code    # 供宿主 Hook 调用：上报当前会话
 ```
-
-</details>

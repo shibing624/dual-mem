@@ -1,6 +1,6 @@
 # dual-mem
 
-**All your agents. One Memory.** 让 AI 真正记住你：偏好变了它知道，换个工具它也知道。
+**Memory That Evolves With You — Across Every AI Tool.** 让 AI 真正记住你：偏好变了它知道，换个工具它也知道。
 
 - 🧠 **记得准**：像人一样整理记忆。事实、画像、习惯分开存；你改了主意，它会更新，不会混淆。
 - 🔗 **记得通**：[MemHub](memhub.md) 让 Claude Code、Codex、Cursor、Hermes、Agentica 共享同一份个人记忆。
@@ -32,7 +32,7 @@ with SyncMemoryClient() as memory:
 
 ---
 
-## 开发者可选阅读
+## 开发者文档
 
 想了解原理和实现细节，可以按这个顺序读：
 

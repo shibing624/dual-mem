@@ -859,7 +859,7 @@ class MemoryClient:
         *,
         query: str,
         user_id: str,
-        agent_id: str = "default_agent",
+        agent_id: str = "",
         app_id: str | None = None,
         top_k: int = 10,
     ) -> list[dict]:

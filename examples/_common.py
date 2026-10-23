@@ -32,13 +32,14 @@ def _user_config() -> dict:
     return loaded
 
 
-def example_settings(mode: str, name: str) -> Settings:
+def example_settings(mode: str, name: str, **overrides: object) -> Settings:
     """构造 demo 用的 Settings：丢掉未知键，使用干净 storage_dir。"""
     raw = _user_config()
     allowed = set(Settings.model_fields)
     cfg = {key: value for key, value in raw.items() if key in allowed}
     cfg["mode"] = mode
     cfg["storage_dir"] = fresh_storage(name)
+    cfg.update(overrides)
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
     tmp_cfg = DATA_ROOT / f"{name}_config.yaml"
     tmp_cfg.write_text(

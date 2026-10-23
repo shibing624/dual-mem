@@ -33,7 +33,7 @@ nav:
       - Frameworks & tools: integrations.md
       - MCP / REST: mcp_integration.md
   - Benchmarks: benchmarks.md
-  - Developer guide (optional):
+  - Developer guide:
       - Architecture: architecture.md
       - Memory layers: memory_layers.md
       - Write decisions: jev-memory-design.md

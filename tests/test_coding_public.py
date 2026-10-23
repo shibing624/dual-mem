@@ -54,6 +54,9 @@ async def test_public_coding_returns_raw_and_decisions(tmp_storage, fake_embed):
     assert r.decisions[0].source_ids == [r.memory_id]
     raw = await c.get(r.memory_id)
     assert "BEGIN IMMEDIATE" in raw.content and "Host secret" not in raw.content
+    hits = await c.search_coding(query="publish transactions", user_id="u")
+    assert len(hits) == 1 and hits[0]["memory_id"] == r.extra_node_ids[0]
+    assert hits[0]["solution"] == "Use BEGIN IMMEDIATE to validate before commit"
     assert original[0]["content"] == "Host secret instructions"
     assert len(jev.calls) == 2 and len(llm.calls) == 1
     await c.aclose()
