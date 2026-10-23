@@ -30,18 +30,13 @@ The coding conventions you explained in Cursor are unknown to Codex; the stack y
 
 The same model (Qwen3.8-27B) does extraction, answering and grading; same embeddings, same questions — **only the memory system changes**:
 
-| Memory system | LoCoMo<br>(308 q) | LongMemEval<br>(24 q) | PersonaMem-v2<br>(476 q) |
-|---|:---:|:---:|:---:|
-| **dual-mem** | **74.7** | **91.7** | **50.0** |
-| hy-memory 2.0.4 | 66.6 | 70.8 | 43.5 |
-| mem0 | 65.6 | 83.3 | 47.9 |
+| Memory system | LoCoMo<br>(308 q) | LongMemEval<br>(24 q) | PersonaMem-v2<br>(476 q) | Write time<br>(s / conversation) |
+|---|:---:|:---:|:---:|:---:|
+| **dual-mem** | **74.7** | **91.7** | **50.0** | **503** |
+| hy-memory 2.0.4 | 66.6 | 70.8 | 43.5 | 2485 |
+| mem0 | 65.6 | 83.3 | 47.9 | 808 |
 
-- **LoCoMo** (long conversations): **+8.1** over hy-memory and **+9.1** over mem0 (both significant in paired tests, p < 0.02). The biggest lead is on time-related questions (78 vs 61 vs 22).
-- **LongMemEval** (cross-session memory): 22 of 24 correct, vs 17 for hy-memory and 20 for mem0.
-- **PersonaMem-v2** (personalization): significantly better than hy-memory (p = 0.007), 2.1 points above mem0.
-- **Faster**: writing one long conversation takes about **1/5** of hy-memory's time (503 s vs 2485 s).
-
-> Protocol (same LoCoMo setup as the public Mem0 / EverMemOS evaluations), reproduction commands and per-category results: [Benchmarks](docs/benchmarks.md).
+> Write time is the median per LoCoMo long conversation. Protocol, significance tests, per-category results and reproduction commands: [Benchmarks](docs/benchmarks.md).
 
 ## Get started in 3 minutes
 
@@ -125,19 +120,14 @@ Curious how it works? See the [developer docs](#developer-docs).
 
 ## Roadmap
 
-**Done**
 - [x] Layered, versioned memory: preference changes are traceable
 - [x] Dedicated decision model guarding writes
 - [x] MemHub: 5 AI tools share memory, history import, background organizing
 - [x] Single-instance server mode: several computers share one memory
 - [x] Leads head-to-head on LoCoMo / LongMemEval / PersonaMem-v2
-
-**In progress**
 - [ ] MemHub for more tools: OpenCode, WorkBuddy, Gemini CLI, Windsurf, Trae and others — 10+ in total
 - [ ] Cloud HTTP MCP: remote agents connect to hosted memory directly
 - [ ] Better retrieval for multi-hop questions (LoCoMo multi-hop still has headroom)
-
-**Planned**
 - [ ] Multi-device sync: works offline, merges automatically when online
 - [ ] Visual memory management: view, edit and delete your memories
 - [ ] Privacy tiers: sensitive memories stay on this machine
