@@ -19,12 +19,16 @@ constraint, decision, changed solution and distinct event. Do not filter trivial
 or already documented information: JEV will decide its value and coverage.
 Preserve complete commands, paths, numbers, reasons, tool arguments/results,
 environment boundaries and qualifications. Do not invent missing details.
+Write every text field in the language of the source conversation.
 
-Output a JSON array, each object with:
-task (self-contained retrieval question), search_keys (array of alternative
-phrasings), solution (complete content), boundary_envs (environment constraints),
-boundary_scope (strict|project|user|global), confidence (number in [0,1]).
-An empty array is permitted but will be checked by JEV for missed information.
+Output a JSON object {"candidates": [...]}, each candidate an object with:
+- task: string, a self-contained retrieval question
+- search_keys: array of strings, alternative phrasings of the task
+- solution: string, the complete content
+- boundary_envs: string, environment constraints in one sentence ("" if none)
+- boundary_scope: one of "strict" | "project" | "user" | "global"
+- confidence: number in [0, 1]
+Return an empty candidates array only when the source has no engineering content.
 """
 
 
@@ -37,22 +41,27 @@ class CodingMemoryExtractor:
         messages: list[dict],
         *,
         user_id: str,
-        agent_id: str = "default_agent",
+        agent_id: str = "",
         app_id: str = "default",
         workspace_id: str | None = None,
         branch: str | None = None,
         session_id: str | None = None,
     ) -> list[CodingMemoryDraft]:
+        # An object envelope, not a bare array: JSON mode (llm_json_mode, on by
+        # default) only admits objects, and the parser drops anything else.
         data = await self.llm.chat_json(
             system=_EXTRACT_PROMPT,
-            user=self._format_conversation(messages),
+            user=json.dumps(messages, ensure_ascii=False),
             temperature=0.1,
         )
-        if not isinstance(data, list):
-            raise CodingDecisionError("coding extraction requires a JSON array")
+        items = data.get("candidates") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise CodingDecisionError(
+                'coding extraction requires a {"candidates": [...]} object'
+            )
         files = extract_files(messages)
         drafts: list[CodingMemoryDraft] = []
-        for item in data:
+        for item in items:
             if not isinstance(item, dict):
                 raise CodingDecisionError("invalid coding candidate object")
             task = self._text(item, "task", required=True)
@@ -98,8 +107,3 @@ class CodingMemoryExtractor:
         if not isinstance(text, str) or (required and not text.strip()):
             raise CodingDecisionError(f"invalid coding candidate {name}")
         return text
-
-    @staticmethod
-    def _format_conversation(messages: list[dict]) -> str:
-        """Lossless source, including nested tool calls and structured content."""
-        return json.dumps(messages, ensure_ascii=False)

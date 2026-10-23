@@ -38,7 +38,7 @@ _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS coding_memory_meta (
     memory_id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
-    agent_id TEXT NOT NULL DEFAULT 'default_agent',
+    agent_id TEXT NOT NULL DEFAULT '',
     app_id TEXT NOT NULL DEFAULT 'default',
     task TEXT NOT NULL,
     search_keys TEXT NOT NULL DEFAULT '[]',
@@ -183,7 +183,7 @@ class CodingMemoryStore:
         messages: list[dict],
         *,
         user_id: str,
-        agent_id: str = "default_agent",
+        agent_id: str = "",
         app_id: str = "default",
         session_id: str | None = None,
         workspace_id: str | None = None,
@@ -301,7 +301,7 @@ class CodingMemoryStore:
         raw_id: str,
         *,
         user_id: str,
-        agent_id: str = "default_agent",
+        agent_id: str = "",
         app_id: str = "default",
     ) -> dict[str, Any] | None:
         with self._lock:
@@ -323,7 +323,7 @@ class CodingMemoryStore:
         self,
         *,
         user_id: str,
-        agent_id: str = "default_agent",
+        agent_id: str = "",
         app_id: str = "default",
         limit: int | None = None,
     ) -> list[CodingMemory]:
@@ -333,7 +333,7 @@ class CodingMemoryStore:
         return current if limit is None else current[:limit]
 
     def snapshot(
-        self, *, user_id: str, agent_id: str = "default_agent", app_id: str = "default"
+        self, *, user_id: str, agent_id: str = "", app_id: str = "default"
     ) -> tuple[int, list[CodingMemory], dict[str, list[dict[str, Any]]]]:
         """One SQLite read transaction: complete scope, heads, ancestors and epoch."""
         scope = (app_id, user_id, agent_id)
@@ -487,7 +487,6 @@ class CodingMemoryStore:
         ids = [m.memory_id for m in memories]
         if len(set(ids)) != len(ids):
             raise ValueError("duplicate coding memory IDs")
-        retired = set()
         for mem in memories:
             if coding_scope(mem) != scope or mem.boundary_scope not in BOUNDARY_SCOPES:
                 raise ValueError("coding memory crosses scope")
@@ -530,13 +529,13 @@ class CodingMemoryStore:
                 old = self.get(old_id)
                 if old is None or coding_scope(old) != scope:
                     raise ValueError("coding version target missing or crosses scope")
-                if not old.is_latest or old_id in retired:
+                # Several versions of one batch may share a head; it retires once.
+                if not old.is_latest:
                     raise CodingConcurrentWriteError(
                         "coding version target is no longer current"
                     )
                 if version_boundary(mem) != version_boundary(old):
                     raise ValueError("coding retirement crosses version boundary")
-                retired.add(old_id)
 
     def _publish(
         self,
@@ -588,31 +587,34 @@ class CodingMemoryStore:
                         "UPDATE coding_memory_meta SET is_latest=0 WHERE memory_id=? AND published=1 AND is_latest=1",
                         (old_id,),
                     )
+                successors: dict[str, list[str]] = {}
                 for mem in memories:
                     for old_id in mem.supersedes:
-                        old = self.get(old_id)
-                        links = [*old.superseded_by, mem.memory_id]
-                        for i in range(1 + len(old.search_keys)):
-                            nid = f"{old_id}_key{i}"
-                            vector = self.vector.get(nid)
-                            if vector is None or (
-                                vector.app_id,
-                                vector.user_id,
-                                vector.agent_id,
-                            ) != (self._vdb_app_id(scope[0]), scope[1], scope[2]):
-                                raise CodingDecisionError(
-                                    "missing or foreign coding history vector"
-                                )
-                            patches[nid] = {
-                                "is_latest": False,
-                                "superseded_by": "\x1f".join(
-                                    f"{link}_key0" for link in links
-                                ),
-                            }
-                        self._conn.execute(
-                            "UPDATE coding_memory_meta SET is_latest=0,superseded_by=? WHERE memory_id=? AND published=1 AND is_latest=1",
-                            (json.dumps(links), old_id),
-                        )
+                        successors.setdefault(old_id, []).append(mem.memory_id)
+                for old_id, new_ids in successors.items():
+                    old = self.get(old_id)
+                    links = [*old.superseded_by, *new_ids]
+                    for i in range(1 + len(old.search_keys)):
+                        nid = f"{old_id}_key{i}"
+                        vector = self.vector.get(nid)
+                        if vector is None or (
+                            vector.app_id,
+                            vector.user_id,
+                            vector.agent_id,
+                        ) != (self._vdb_app_id(scope[0]), scope[1], scope[2]):
+                            raise CodingDecisionError(
+                                "missing or foreign coding history vector"
+                            )
+                        patches[nid] = {
+                            "is_latest": False,
+                            "superseded_by": "\x1f".join(
+                                f"{link}_key0" for link in links
+                            ),
+                        }
+                    self._conn.execute(
+                        "UPDATE coding_memory_meta SET is_latest=0,superseded_by=? WHERE memory_id=? AND published=1 AND is_latest=1",
+                        (json.dumps(links), old_id),
+                    )
                 if patches:
                     self.vector.update_payload_many(patches)
                     checked = self.vector.get_by_ids(list(patches))
@@ -715,7 +717,7 @@ class CodingMemoryStore:
         *,
         query: str,
         user_id: str,
-        agent_id: str = "default_agent",
+        agent_id: str = "",
         app_id: str = "default",
         top_k: int = 10,
     ) -> list[dict[str, Any]]:

@@ -85,6 +85,60 @@ await client.add(
 )
 ```
 
+## Coding 记忆（工程排障经验）
+
+实验功能，默认关闭。开启后，`add(messages=...)` 里只要出现 tool 调用（assistant 的
+`tool_calls` 或 `role="tool"` 结果），就先由 JEV 判断是否工程场景：是则沉淀为结构化工程
+经验，否则去掉 tool 消息后按普通对话写入。没有 tool 消息的写入完全不受影响。
+
+```python
+import json
+from dual_mem import MemoryClient
+from dual_mem.config import Settings
+
+client = MemoryClient(settings=Settings(coding_enabled=True))
+
+result = await client.add(
+    messages=[
+        {"role": "user", "content": "app/db.py 高并发写入偶发 database is locked"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": json.dumps({"path": "app/db.py"})},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "conn = sqlite3.connect(db_path, timeout=5.0)"},
+        {"role": "assistant", "content": "写事务改为 BEGIN IMMEDIATE，timeout 调到 30s。"},
+    ],
+    user_id="alice",
+)
+print(result.status, [f"{d.action}/{d.update_type}" for d in result.decisions])
+
+hits = await client.search_coding(query="SQLite database is locked 怎么解决", user_id="alice")
+for h in hits:
+    print(h["task"], "->", h["solution"], h["files"], h["supersedes"])
+```
+
+- **消息格式**：OpenAI 风格。`tool_calls` 支持嵌套 `function.name / function.arguments`
+  （字符串或对象）和扁平 `name / arguments` 两种写法；`files` 从 `path`、`file_path` 等路径
+  参数结构化提取。content 可以是字符串或结构化 parts，L0 原样保存。
+- **一条经验**包含 `task`（检索问题）、`solution`、`search_keys`、`boundary_envs`、
+  `boundary_scope`（`strict` / `project` / `user` / `global`）、`files`。
+- **版本演化**：同一问题出现新方案时，JEV 判 OVERRIDE / MERGE 追加新版本并退役旧版本；
+  `search_coding` 只返回当前版本，结果的 `supersedes` 指向被替换的旧版本。只有同一版本边界
+  （workspace / branch / boundary_scope，`strict` 还要求同一 session）内的经验之间才会建立关系。
+- **返回值**：`memory_id` 是保存完整工具会话的 L0 id，`extra_node_ids` 是新写入的经验 id；
+  `commit_passed` 表示追加了版本或归档了旧经验，`status` 为 committed / known / raw_only。
+- **代价**：每次写入 = 一次 scene 判断 + 一次候选生成 + 裁决（无相关旧经验时一次，有则两次）。
+  建议会话结束时整段写入，不要每轮调用。
+- **存储**：`{storage_dir}/coding_memory.db`（`coding_db_path` 可改），与对话记忆分开；
+  `search` 不返回 coding 经验，需用 `search_coding`。
+
+完整可运行示例（含方案演化）：[`examples/06_coding_memory.py`](https://github.com/shibing624/dual-mem/blob/main/examples/06_coding_memory.py)。
+
 ## `aclose()` 要不要调？
 
 | 场景 | 是否需要 |

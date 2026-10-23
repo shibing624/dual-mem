@@ -39,7 +39,7 @@ class CodingMemoryDraft:
     boundary_scope: BoundaryScope = "project"
     confidence: float = 0.7
     user_id: str = ""
-    agent_id: str = "default_agent"
+    agent_id: str = ""
     app_id: str = "default"
     workspace_id: str | None = None
     branch: str | None = None
@@ -72,7 +72,7 @@ class CodingMemory:
 
     memory_id: str
     user_id: str
-    agent_id: str = "default_agent"
+    agent_id: str = ""
     app_id: str = "default"
     task: str = ""
     search_keys: list[str] = field(default_factory=list)

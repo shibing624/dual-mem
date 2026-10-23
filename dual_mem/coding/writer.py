@@ -3,7 +3,6 @@
 import hashlib
 import json
 import uuid
-from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,8 +13,10 @@ from dual_mem.coding.reconciler import CodingMemoryReconciler
 from dual_mem.coding.store import CodingMemoryStore
 from dual_mem.coding.types import CodingDecisionError, CodingMemory
 from dual_mem.errors import IdempotencyConflictError
+from dual_mem.locks import LockRegistry
 from dual_mem.providers.jev import DecisionProvider
-from dual_mem.providers.llm import LLMClient
+
+_RETIRES = {"OVERRIDE", "MERGE", "NEGATE"}
 
 
 class CodingWriter:
@@ -25,21 +26,20 @@ class CodingWriter:
         store: CodingMemoryStore,
         extractor: CodingMemoryExtractor,
         reconciler: CodingMemoryReconciler,
-        llm: LLMClient,
         jev: DecisionProvider,
     ) -> None:
         self.store = store
         self.extractor = extractor
         self.reconciler = reconciler
-        self.llm = llm
         self.jev = jev
+        self._scope_locks = LockRegistry()
 
     async def write(
         self,
         messages: list[dict],
         *,
         user_id: str,
-        agent_id: str = "default_agent",
+        agent_id: str = "",
         app_id: str = "default",
         session_id: str | None = None,
         workspace_id: str | None = None,
@@ -58,18 +58,17 @@ class CodingWriter:
         """
         if not has_any_tool_message(messages):
             return None
+        scope = (app_id, user_id, agent_id)
         request_key = None
         raw_id = None
-        record = None
         fingerprint = ""
         if request_id is not None:
-            scope_key = json.dumps([app_id, user_id, agent_id, request_id])
             fingerprint = hashlib.sha256(
                 json.dumps(
                     [messages, session_id, workspace_id, branch], ensure_ascii=False
                 ).encode()
             ).hexdigest()
-            request_key = f"coding:{scope_key}"
+            request_key = f"coding:{json.dumps([*scope, request_id])}"
             saved = self.store.request_result(request_key)
             if saved is not None:
                 if saved["fingerprint"] != fingerprint:
@@ -101,108 +100,99 @@ class CodingWriter:
             branch=branch,
             session_id=session_id,
         )
-        epoch, existing, histories = self.store.snapshot(
-            user_id=user_id,
-            agent_id=agent_id,
-            app_id=app_id,
-        )
-        ops = await self.reconciler.reconcile(
-            drafts,
-            existing,
-            source_messages=messages,
-            history_versions=histories,
-        )
-        if len(ops) != len(drafts) or {op.draft_idx for op in ops} != set(
-            range(len(drafts))
-        ):
-            raise CodingDecisionError(
-                "coding operations must cover every draft exactly"
+        # Extraction overlaps freely; snapshot → decide → publish is serialized per
+        # scope so a concurrent write sees the previous one's heads instead of
+        # failing the epoch check.
+        async with self._scope_locks.get(json.dumps(scope)):
+            epoch, existing, histories = self.store.snapshot(
+                user_id=user_id, agent_id=agent_id, app_id=app_id
             )
-        memories = []
-        archives: list[str] = []
-        decisions = []
-        retires = {"OVERRIDE", "MERGE", "NEGATE"}
-        for op in ops:
-            if op.action not in ("ADD", "SKIP", "DELETE", "RAW_ONLY"):
-                raise CodingDecisionError("unsupported coding write action")
-            draft = drafts[op.draft_idx]
-            if (draft.app_id, draft.user_id, draft.agent_id) != (
-                app_id,
-                user_id,
-                agent_id,
-            ):
-                raise CodingDecisionError("coding candidate crosses request scope")
-            if op.action == "ADD":
-                needs_target = op.update_type in {"OVERRIDE", "MERGE", "NEGATE", "CONFLICT"}
-                if needs_target != bool(op.target_memory_id):
-                    raise CodingDecisionError("coding write action/target mismatch")
-                now = datetime.now(timezone.utc)
-                mem = CodingMemory(
-                    memory_id=(
-                        str(uuid.uuid5(uuid.NAMESPACE_URL, f"{request_key}:{op.draft_idx}"))
-                        if request_key
-                        else str(uuid.uuid4())
-                    ),
-                    **draft.to_dict(),
-                    created_at=now,
-                    updated_at=now,
-                    supersedes=(
-                        [op.target_memory_id] if op.update_type in retires else []
-                    ),
-                    source_ids=[raw_id],
+            ops = await self.reconciler.reconcile(
+                drafts,
+                existing,
+                source_messages=messages,
+                history_versions=histories,
+            )
+            now = datetime.now(timezone.utc)
+            memories: list[CodingMemory] = []
+            archives: list[str] = []
+            decisions: list[dict[str, Any]] = []
+            for op in ops:
+                draft = drafts[op.draft_idx]
+                if op.action == "ADD":
+                    memories.append(
+                        CodingMemory(
+                            memory_id=(
+                                str(
+                                    uuid.uuid5(
+                                        uuid.NAMESPACE_URL,
+                                        f"{request_key}:{op.draft_idx}",
+                                    )
+                                )
+                                if request_key
+                                else str(uuid.uuid4())
+                            ),
+                            **draft.to_dict(),
+                            created_at=now,
+                            updated_at=now,
+                            supersedes=(
+                                [op.target_memory_id]
+                                if op.update_type in _RETIRES
+                                else []
+                            ),
+                            source_ids=[raw_id],
+                        )
+                    )
+                elif op.action == "DELETE":
+                    archives.append(op.target_memory_id)
+                decisions.append(
+                    {
+                        "action": op.action,
+                        "update_type": op.update_type or None,
+                        "targets": [op.target_memory_id] if op.target_memory_id else [],
+                        "proposal_ids": [f"p{op.draft_idx}"],
+                        "source_ids": [raw_id],
+                        "reason": op.reason,
+                    }
                 )
-                memories.append(mem)
-            elif op.action == "DELETE":
-                if not op.target_memory_id:
-                    raise CodingDecisionError("coding DELETE requires a current target")
-                archives.append(op.target_memory_id)
-            elif op.action == "SKIP":
-                if not op.target_memory_id:
-                    raise CodingDecisionError("coding SKIP requires a current target")
-            decisions.append(
-                {
-                    "action": op.action,
-                    "update_type": op.update_type or None,
-                    "targets": [op.target_memory_id] if op.target_memory_id else [],
-                    "proposal_ids": [f"p{op.draft_idx}"],
-                    "source_ids": [raw_id],
-                    "reason": op.reason,
-                }
+            if not drafts:
+                decisions.append(
+                    {
+                        "action": "RAW_ONLY",
+                        "source_ids": [raw_id],
+                        "reason": "RAW_ONLY: no explicit candidates",
+                    }
+                )
+            memory_ids = [m.memory_id for m in memories]
+            replaced = {old for m in memories for old in m.supersedes}
+            if replaced.intersection(archives):
+                # Contradictory decisions: fail before reserving any row or vector.
+                raise CodingDecisionError(
+                    "coding head is both replaced and archived in one batch"
+                )
+            result = {
+                "success": True,
+                "raw_id": raw_id,
+                "source_ids": [raw_id],
+                "memory_ids": memory_ids,
+                # Same contract as the chat path: a version was appended or archived.
+                "commit_passed": bool(memories or archives),
+                "decisions": decisions,
+            }
+            if not memories and not archives:
+                # Another process sharing the database may have moved the heads.
+                self.store.assert_epoch(scope, epoch)
+            record = None
+            if request_key is not None:
+                # A crashed earlier attempt may have reserved these IDs unpublished.
+                self.store.discard_unpublished(memory_ids)
+                record = (request_key, {"fingerprint": fingerprint, "result": result})
+            await self.store.add_many(
+                memories,
+                expected_epoch=epoch,
+                archive_ids=archives,
+                request=record,
             )
-        if not drafts:
-            decisions.append(
-                {
-                    "action": "RAW_ONLY",
-                    "source_ids": [raw_id],
-                    "reason": "JEV confirmed no durable information",
-                }
-            )
-        memory_ids = [m.memory_id for m in memories]
-        result = {
-            "success": True,
-            "scene": "coding",
-            "raw_id": raw_id,
-            "source_ids": [raw_id],
-            "memory_ids": memory_ids,
-            "extra_node_ids": [f"{mid}_key0" for mid in memory_ids],
-            "commit_passed": any(
-                op.action in ("ADD", "SKIP", "DELETE") for op in ops
-            ),
-            "decisions": decisions,
-            "ops": [asdict(op) for op in ops],
-        }
-        if not memories and not archives:
-            self.store.assert_epoch((app_id, user_id, agent_id), epoch)
-        if request_key is not None:
-            # A crashed earlier attempt may have reserved these IDs without publishing.
-            self.store.discard_unpublished(memory_ids)
-            record = (request_key, {"fingerprint": fingerprint, "result": result})
-        await self.store.add_many(
-            memories,
-            expected_epoch=epoch,
-            archive_ids=archives,
-            request=record,
-        )
         return result
 
     async def search(
@@ -210,7 +200,7 @@ class CodingWriter:
         *,
         query: str,
         user_id: str,
-        agent_id: str = "default_agent",
+        agent_id: str = "",
         app_id: str = "default",
         top_k: int = 10,
     ) -> list[dict[str, Any]]:

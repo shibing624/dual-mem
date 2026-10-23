@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Coding 记忆修复（真实模型下此前无法写入）**：
+  - 抽取输出改为 `{"candidates": [...]}` 对象。原先要求顶层 JSON 数组，但默认 `llm_json_mode=True` 只允许对象，`chat_json` 会把数组丢成 `{}`，导致任何真实 LLM 下抽取都报 `coding extraction requires a JSON array`。prompt 同时写明各字段类型（模型曾把 `boundary_envs` 输出成数组）。
+  - 删除 coverage 硬门槛，与 chat 路径一致：JEV 判 `MISSED` 不再作废整次写入；空抽取直接 RAW_ONLY，不调 JEV。
+  - 同一批多个候选可以 OVERRIDE / MERGE 同一个 head（head 退役一次并链接全部后继），原先报 `coding version target is no longer current`；同一 head 既替换又归档改为写入前报 `CodingDecisionError`。
+  - JEV 只会看到 draft 所在版本边界（workspace / branch / boundary_scope / strict session）内的 head，不再因为选中跨边界 head 让整次写入失败。
+  - snapshot → 裁决 → 发布按 scope 串行（与 chat 路径的 `commit_locks` 一致），同用户并发写不再报 `CodingConcurrentWriteError`；LLM 抽取仍并行。
+  - `WriteResult.commit_passed` 与 chat 路径口径一致（追加了版本或归档了 head）；DELETE 不再报 False，SKIP 不再报 True。
+  - 结构化 `content`（如多段 parts）原样保存在 L0，不再被 `str()` 成 Python repr。
+  - 清理：`CodingWriter` 删除未使用的 `llm` 参数；删除未使用的 `truncate_messages` / `extract_tool_summary`；coding 模块的 `agent_id` 默认值统一为 `""`。
+- **`examples/06_coding_memory.py`**：统一标准 OpenAI tool_calls 格式（修复 `tool_call_id` 与调用 id 不匹配），新增第 3 轮方案演化，演示旧方案被覆盖后检索只返回当前版本。
+- **Coding 记忆文档**：`docs/getting-started/quickstart.md` 新增「Coding 记忆」用法章节（消息格式、经验字段、版本演化、返回值、调用代价、存储位置）；`docs/jev-memory-design.md` 的 coding 设计说明按当前实现重写；README / README_EN / `examples/README.md` 同步，README 示例改为虚构的 `app/db.py` 并修正 SQLITE_BUSY 根因描述。
+
 ## [0.1.4] — 2026-10-23
 
 ### 2026-10-23：README、文档与示例升级（v0.1.4）

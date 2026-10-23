@@ -173,21 +173,22 @@ def coding_client(tmp_storage, embed, jev=None):
         embed=embed,
         llm=FakeLLMClient(
             {
-                "json": [
-                    {
-                        "task": "How to publish transactions",
-                        "solution": "Use BEGIN IMMEDIATE to validate before commit",
-                        "search_keys": [],
-                    }
-                ]
+                "json": {
+                    "candidates": [
+                        {
+                            "task": "How to publish transactions",
+                            "solution": "Use BEGIN IMMEDIATE to validate before commit",
+                            "search_keys": [],
+                        }
+                    ]
+                }
             }
         ),
         jev=jev
         or FakeJev(
             {
                 "scene": "CODING",
-                "coverage": "VALID",
-                "0:action": "ADD_SUPPLEMENT",
+                    "0:action": "ADD_SUPPLEMENT",
                 "0:target": "NONE",
             }
         ),

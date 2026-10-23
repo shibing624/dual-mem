@@ -65,7 +65,7 @@ with SyncMemoryClient() as memory:
 
 ### 2. Coding 记忆：沉淀工程排障经验
 
-开启 `coding_enabled=True` 后，当传入的 `messages` 含有 `role="tool"` 的工具调用记录时，dual-mem 会自动识别工程研发场景，将排障根因、修复方案和涉及文件沉淀为结构化 Coding 记忆，并通过 `search_coding` 精准召回：
+开启 `coding_enabled=True` 后，当传入的 `messages` 含有工具调用（assistant `tool_calls` 或 `role="tool"` 结果）时，dual-mem 会自动识别工程研发场景，将排障根因、修复方案和涉及文件沉淀为结构化 Coding 记忆；方案更新时追加新版本并退役旧版本，`search_coding` 只召回当前有效的方案（用法详见 [快速开始 · Coding 记忆](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md#coding)）：
 
 ```python
 from dual_mem import SyncMemoryClient
@@ -78,7 +78,7 @@ with SyncMemoryClient(settings=Settings(coding_enabled=True)) as memory:
             {
                 "role": "assistant",
                 "content": "我先读取存储层代码查看事务开启方式。",
-                "tool_calls": [{"name": "read_file", "arguments": {"path": "dual_mem/storage/vector_store.py"}}],
+                "tool_calls": [{"id": "t1", "name": "read_file", "arguments": {"path": "app/db.py"}}],
             },
             {
                 "role": "tool",
@@ -87,7 +87,7 @@ with SyncMemoryClient(settings=Settings(coding_enabled=True)) as memory:
             },
             {
                 "role": "assistant",
-                "content": "原因是默认 DEFERRED 事务在读后升级写锁导致死锁。改为 BEGIN IMMEDIATE 提前获取写锁，并将 timeout 调至 30s。",
+                "content": "原因：DEFERRED 事务先读后写，升级写锁时若另一连接已持有写锁，SQLite 直接返回 SQLITE_BUSY 而不等待 timeout。改为 BEGIN IMMEDIATE 提前获取写锁，并将 timeout 调至 30s。",
             },
         ],
         user_id="alice",

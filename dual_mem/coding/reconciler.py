@@ -1,4 +1,4 @@
-"""JEV owns coverage, source support, value, action and current target."""
+"""JEV owns source support, value, action and current target."""
 
 from typing import Any
 
@@ -139,8 +139,12 @@ class CodingMemoryReconciler:
             )
             by_id[mem.memory_id] = mem
 
+        if not drafts:
+            # Same as the chat path: no candidates keeps the source RAW_ONLY without
+            # spending a model call on whether the extractor missed something.
+            return []
         proposals = [dict(d.to_dict(), id=i) for i, d in enumerate(drafts)]
-        if drafts and len(current) > self.candidate_limit:
+        if len(current) > self.candidate_limit:
             selected = []
             for start in range(0, len(current), self.candidate_limit):
                 page = current[start : start + self.candidate_limit]
@@ -176,43 +180,34 @@ class CodingMemoryReconciler:
                 )
             current = selected
 
-        questions = {
-            "coverage": {
-                "type": "choice",
-                "instructions": (
-                    "Check extraction against FULL source including tool arguments "
-                    "and results. Every potentially durable fact, constraint, number, "
-                    "changed solution and distinct event must be represented without "
-                    "losing qualifications. Empty extraction is RAW_ONLY only when "
-                    "there is no durable information. Existing knowledge and history "
-                    "are not reasons to omit source facts from candidates."
-                ),
-                "criteria": (
-                    {"VALID": "Complete candidates", "MISSED": "Facts omitted"}
-                    if drafts
-                    else {
-                        "RAW_ONLY": "No durable information",
-                        "MISSED": "Facts omitted",
-                    }
-                ),
+        # No coverage gate (as in the chat path): a rejected extraction would discard
+        # every candidate of the write; extraction runs once and the source is kept.
+        questions: dict[str, dict[str, Any]] = {}
+        # A relation can only link heads in the draft's own version boundary
+        # (structured metadata), so other boundaries are never offered as targets.
+        heads = {
+            i: {
+                m["memory_id"]: m["task"]
+                for m in current
+                if version_boundary(by_id[m["memory_id"]]) == version_boundary(draft)
             }
+            for i, draft in enumerate(drafts)
         }
-        heads = {m["memory_id"]: m["task"] for m in current}
         for i in range(len(drafts)):
-            if heads:
+            if heads[i]:
                 questions[f"{i}:target"] = {
                     "type": "choice",
                     "instructions": (
                         f"Select the one CURRENT head for a relation to draft {i}, "
                         "or NONE when the draft is an independent solution, a limited "
-                        "exception, has no durable value, or belongs to a different "
-                        "workspace/branch/session boundary or independent environment "
-                        "constraints. Never select an ancestor or another incoming draft. "
+                        "exception, has no durable value, or has independent "
+                        "environment constraints. Never select an ancestor or another "
+                        "incoming draft. "
                         "Choose MULTIPLE only when the candidates need per-head "
                         "adjudication; expansion must resolve to exactly one head."
                     ),
                     "criteria": {
-                        **heads,
+                        **heads[i],
                         "NONE": "No current head",
                         "MULTIPLE": "Needs per-head adjudication",
                     },
@@ -225,11 +220,9 @@ class CodingMemoryReconciler:
             "current": current,
         }
         answers = await evaluate_decisions(self.jev, state=state, questions=questions)
-        if answers["coverage"].choice == "MISSED":
-            raise CodingDecisionError("coding extraction missed source coverage")
         chosen: dict[int, str | None] = {}
         for i in range(len(drafts)):
-            if not heads:
+            if not heads[i]:
                 chosen[i] = None
                 continue
             target = answers[f"{i}:target"].choice
@@ -246,7 +239,7 @@ class CodingMemoryReconciler:
                             "UNSURE": "Insufficient evidence",
                         },
                     }
-                    for nid in heads
+                    for nid in heads[i]
                 }
                 picked = await evaluate_decisions(
                     self.jev, state=state, questions=include
@@ -255,7 +248,7 @@ class CodingMemoryReconciler:
                     raise CodingDecisionError("uncertain coding targets")
                 matched = [
                     nid
-                    for nid in heads
+                    for nid in heads[i]
                     if picked[f"{i}:{nid}"].choice == "INCLUDE"
                 ]
                 if len(matched) != 1:
@@ -263,8 +256,6 @@ class CodingMemoryReconciler:
                         "coding relation requires exactly one current head"
                     )
                 target = matched[0]
-            if target not in heads and target != "NONE":
-                raise CodingDecisionError("unknown coding target")
             chosen[i] = None if target == "NONE" else target
         action_questions = {
             f"{i}:action": _action_question(i, has_target=chosen[i] is not None)
@@ -280,23 +271,13 @@ class CodingMemoryReconciler:
                 )
             )
         ops = []
-        for i, draft in enumerate(drafts):
+        for i in range(len(drafts)):
+            # evaluate_decisions already restricts the choice to the offered criteria.
             action = answers[f"{i}:action"].choice
             target = chosen[i]
-            legal = _WITH_TARGET if target else _WITHOUT_TARGET
-            if action not in legal or action in ("INVALID", "NEED_CONTEXT"):
+            if action in ("INVALID", "NEED_CONTEXT"):
                 raise CodingDecisionError(
                     f"coding JEV decision {action} for draft {i}"
-                )
-            if (action in _NEEDS_TARGET) != (target is not None):
-                raise CodingDecisionError(
-                    "coding action does not match the selected target"
-                )
-            if action in _NEEDS_TARGET and version_boundary(
-                draft
-            ) != version_boundary(by_id[target]):
-                raise CodingDecisionError(
-                    "coding relation crosses version boundary"
                 )
             ops.append(
                 CodingReconcileOp(

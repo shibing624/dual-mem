@@ -65,7 +65,7 @@ It remembers that alice no longer eats spicy food and is about to move to Beijin
 
 ### 2. Coding memory: reusable debugging & engineering lessons
 
-With `coding_enabled=True`, when `messages` include `role="tool"` turns, dual-mem automatically detects engineering sessions, extracts structured `task` / `solution` / `files` memories, and retrieves them via `search_coding`:
+With `coding_enabled=True`, when `messages` include tool calls (assistant `tool_calls` or `role="tool"` results), dual-mem automatically detects engineering sessions and extracts structured `task` / `solution` / `files` memories. A changed solution is appended as a new version that retires the old one, so `search_coding` returns only what currently applies (details: [Quickstart · Coding memory](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md#coding)):
 
 ```python
 from dual_mem import SyncMemoryClient
@@ -78,7 +78,7 @@ with SyncMemoryClient(settings=Settings(coding_enabled=True)) as memory:
             {
                 "role": "assistant",
                 "content": "Let me inspect how transactions are opened in the vector store.",
-                "tool_calls": [{"name": "read_file", "arguments": {"path": "dual_mem/storage/vector_store.py"}}],
+                "tool_calls": [{"id": "t1", "name": "read_file", "arguments": {"path": "app/db.py"}}],
             },
             {
                 "role": "tool",
@@ -87,7 +87,7 @@ with SyncMemoryClient(settings=Settings(coding_enabled=True)) as memory:
             },
             {
                 "role": "assistant",
-                "content": "Default DEFERRED transactions deadlock when upgrading read locks to write locks. Use BEGIN IMMEDIATE and increase timeout to 30s.",
+                "content": "A DEFERRED transaction that reads first gets SQLITE_BUSY immediately (no timeout wait) when upgrading to a write lock another connection holds. Use BEGIN IMMEDIATE and increase timeout to 30s.",
             },
         ],
         user_id="alice",

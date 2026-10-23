@@ -129,14 +129,15 @@ def writer(store, *, candidates=None, answers=None, llm=None):
             **(answers or {}),
         }
     )
+    if candidates is None:
+        candidates = [candidate().to_dict()]
     llm = llm or FakeLLMClient(
-        {"json": candidates if candidates is not None else [candidate().to_dict()]}
+        {"json": {"candidates": candidates} if isinstance(candidates, list) else candidates}
     )
     return CodingWriter(
         store=store,
         extractor=CodingMemoryExtractor(llm=llm),
         reconciler=CodingMemoryReconciler(jev=jev),
-        llm=llm,
         jev=jev,
     )
 
@@ -164,15 +165,10 @@ async def test_write_preserves_full_source_and_batches_all_decisions(store):
     result = await w.write(messages, user_id="u")
     assert result["success"] and result["commit_passed"]
     assert len(result["memory_ids"]) == 2
-    assert result["extra_node_ids"] == [f"{mid}_key0" for mid in result["memory_ids"]]
-    assert len(w.jev.calls) == 2 and len(w.llm.calls) == 1
-    assert set(w.jev.calls[-1]["questions"]) == {
-        "coverage",
-        "0:action",
-        "1:action",
-    }
+    assert len(w.jev.calls) == 2 and len(w.extractor.llm.calls) == 1
+    assert set(w.jev.calls[-1]["questions"]) == {"0:action", "1:action"}
     assert w.jev.calls[-1]["state"]["source"] == messages
-    assert json.loads(w.llm.calls[0]["user"]) == messages
+    assert json.loads(w.extractor.llm.calls[0]["user"]) == messages
     raw = store.get_source(result["raw_id"], user_id="u")
     assert raw["messages"] == messages and raw["indexed"] == 1
     assert store.vector.get(result["raw_id"]).layer == Layer.L0_RAW
@@ -182,22 +178,12 @@ async def test_write_preserves_full_source_and_batches_all_decisions(store):
     assert store.get_source(result["raw_id"], user_id="other") is None
 
 
-@pytest.mark.parametrize("coverage,raises", [("RAW_ONLY", False), ("MISSED", True)])
-async def test_empty_extraction_requires_jev_coverage_and_retains_l0(
-    store, coverage, raises
-):
-    w = writer(store, candidates=[], answers={"coverage": coverage})
-    if raises:
-        with pytest.raises(CodingDecisionError, match="coverage"):
-            await w.write(source(), user_id="u")
-    else:
-        result = await w.write(source(), user_id="u")
-        assert result["success"] and not result["commit_passed"]
-        assert (
-            result["memory_ids"] == []
-            and result["decisions"][0]["action"] == "RAW_ONLY"
-        )
-    assert len(w.jev.calls) == 2
+async def test_empty_extraction_is_raw_only_without_a_decision_call(store):
+    w = writer(store, candidates=[])
+    result = await w.write(source(), user_id="u")
+    assert result["memory_ids"] == [] and not result["commit_passed"]
+    assert [d["action"] for d in result["decisions"]] == ["RAW_ONLY"]
+    assert len(w.jev.calls) == 1  # scene only
     assert store.list_by_user(user_id="u") == []
     assert store._conn.execute("SELECT count(*) FROM coding_sources").fetchone()[0] == 1
 
@@ -280,18 +266,39 @@ async def test_selected_target_skip_has_no_repair_question(store):
     )
 
 
-@pytest.mark.parametrize("action", ["SKIP", "DELETE", "ADD_CONFLICT"])
-async def test_relation_cannot_cross_version_boundary(store, action):
-    await store.add(memory(workspace_id="old-workspace"))
-    w = writer(
-        store,
-        candidates=[candidate(workspace_id="new-workspace").to_dict()],
-        answers={"0:action": action, "0:target": "old"},
+@pytest.mark.parametrize(
+    "head,draft",
+    [
+        ({"workspace_id": "old-workspace"}, {"workspace_id": "new-workspace"}),
+        ({"boundary_scope": "project"}, {"boundary_scope": "user"}),
+        (
+            {"boundary_scope": "strict", "session_id": "a"},
+            {"boundary_scope": "strict", "session_id": "b"},
+        ),
+    ],
+)
+async def test_heads_outside_version_boundary_are_never_offered(store, head, draft):
+    """A cross-boundary head is not a target choice, so the draft appends instead of
+    failing the whole write after JEV picked an illegal relation."""
+    await store.add(memory(**head))
+    other = memory("same", search_keys=["k"])
+    await store.add(replace(other, **{**draft, "memory_id": "same"}))
+    w = writer(store, candidates=[candidate(**draft).to_dict()])
+    # workspace/session come from the request; boundary_scope from the candidate.
+    result = await w.write(
+        source(),
+        user_id="u",
+        workspace_id=draft.get("workspace_id"),
+        session_id=draft.get("session_id"),
     )
-    with pytest.raises(CodingDecisionError, match="boundary"):
-        await w.write(source(), user_id="u")
+    target = next(c for c in w.jev.calls if "0:target" in c["questions"])
+    assert set(target["questions"]["0:target"]["criteria"]) == {
+        "same",
+        "NONE",
+        "MULTIPLE",
+    }
+    assert result["decisions"][0]["update_type"] == "SUPPLEMENT"
     assert store.get("old").is_latest
-    assert len(store.list_by_user(user_id="u")) == 1
 
 
 async def test_multiple_target_unsure_does_not_retire_current(store):
@@ -302,7 +309,6 @@ async def test_multiple_target_unsure_does_not_retire_current(store):
             return {name: "UNSURE" for name in questions}
         return {
             "scene": "CODING",
-            "coverage": "VALID",
             "0:target": "MULTIPLE",
             "0:action": "ADD_OVERRIDE",
         }
@@ -322,7 +328,6 @@ async def test_multiple_target_must_resolve_to_one_head(store):
             return {name: "INCLUDE" for name in questions}
         return {
             "scene": "CODING",
-            "coverage": "VALID",
             "0:target": "MULTIPLE",
         }
 
@@ -369,7 +374,8 @@ async def test_known_and_no_value_are_distinct_explicit_decisions(store, action)
     )
     result = await w.write(source(), user_id="u")
     assert result["memory_ids"] == [] and result["decisions"][0]["action"] == action
-    assert result["commit_passed"] == (action == "SKIP")
+    # Neither appends a version nor archives a head (same contract as chat).
+    assert result["commit_passed"] is False
     assert store.get("old").is_latest
 
 
@@ -410,7 +416,7 @@ async def test_scene_failure_retains_evidence_and_propagates(store):
     with pytest.raises(OSError, match="scene"):
         await w.write(source(), user_id="u")
     assert store._conn.execute("SELECT count(*) FROM coding_sources").fetchone()[0] == 1
-    assert w.llm.calls == []
+    assert w.extractor.llm.calls == []
 
 
 async def test_raw_vector_failure_keeps_sql_source(store):
@@ -473,7 +479,7 @@ async def test_embedding_shape_or_values_fail_before_publication(store, bad):
     assert store.get("bad") is None and store.get("old").is_latest
 
 
-async def test_duplicate_target_batch_rejected_before_any_publication(store):
+async def test_replace_and_archive_one_head_rejected_before_any_reservation(store):
     await store.add(memory())
     w = writer(
         store,
@@ -481,11 +487,11 @@ async def test_duplicate_target_batch_rejected_before_any_publication(store):
         answers={
             "0:action": "ADD_OVERRIDE",
             "0:target": "old",
-            "1:action": "ADD_OVERRIDE",
+            "1:action": "DELETE",
             "1:target": "old",
         },
     )
-    with pytest.raises(CodingConcurrentWriteError):
+    with pytest.raises(CodingDecisionError, match="replaced and archived"):
         await w.write(source(), user_id="u")
     assert len(store.list_by_user(user_id="u")) == 1 and store.get("old").is_latest
     assert (
@@ -607,8 +613,8 @@ async def test_scope_snapshot_has_no_100_row_truncation_and_semantic_selection_i
     def decide(state, questions):
         if any(str(name).endswith(":action") for name in questions):
             return {"0:action": "ADD_OVERRIDE"}
-        if "coverage" in questions:
-            return {"coverage": "VALID", "0:target": "m104"}
+        if "0:target" in questions:
+            return {"0:target": "m104"}
         return {qid: "INCLUDE" if qid == "m104" else "EXCLUDE" for qid in questions}
 
     jev = FakeJev(decide)
@@ -742,3 +748,34 @@ async def test_direct_reconcile_cannot_skip_required_history(store, histories):
             source_messages=source(),
             history_versions=histories,
         )
+
+
+async def test_several_drafts_may_replace_one_head_in_a_batch(store):
+    """Two fragments of the new solution both replacing the same head is consistent:
+    the head retires once and links every successor (seen with a real model)."""
+    await store.add(memory())
+    w = writer(
+        store,
+        candidates=[candidate().to_dict(), candidate(task="Which flag?").to_dict()],
+        answers={
+            "0:target": "old",
+            "1:target": "old",
+            "0:action": "ADD_OVERRIDE",
+            "1:action": "ADD_OVERRIDE",
+        },
+    )
+    result = await w.write(source(), user_id="u")
+    new = result["memory_ids"]
+    assert len(new) == 2 and result["commit_passed"]
+    old = store.get("old")
+    assert not old.is_latest and sorted(old.superseded_by) == sorted(new)
+    assert all(store.get(mid).supersedes == ["old"] for mid in new)
+    assert sorted(store.vector.get("old_key0").superseded_by) == sorted(
+        f"{mid}_key0" for mid in new
+    )
+    assert sorted(m.memory_id for m in store.list_by_user(user_id="u")) == sorted(new)
+    # Persisted history stays valid on reopen.
+    CodingMemoryStore(
+        db_path=store.db_path, vector=store.vector, embed=store.embed
+    ).close()
+

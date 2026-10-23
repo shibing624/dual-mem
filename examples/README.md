@@ -44,7 +44,7 @@ python examples/02_dual.py           # 同样的写入；digest() 只尝试生�
 python examples/03_rest_api.py       # REST。update 返回新 id，delete 归档当前版本
 python examples/04_cli.py            # CLI 的 add / search / search-conversation / list
 python examples/05_lifecycle.py      # add_raw、distill、原文检索、update/delete 演化链
-python examples/06_coding_memory.py  # coding_enabled=True：工程排障 Tool 对话写入与 search_coding
+python examples/06_coding_memory.py  # coding_enabled=True：工程排障 Tool 对话写入、方案演化与 search_coding
 ```
 
 ## 当前写入
@@ -61,5 +61,9 @@ python examples/06_coding_memory.py  # coding_enabled=True：工程排障 Tool �
   `05_lifecycle.py` 用这两步演示演化链，不依赖 JEV 把自然语言更新判成 OVERRIDE。
 - `add_raw` 只写 L0。`distill` 对已有原文抽取，不再写第二条原文。
   默认 `search` 不返回 L0；`search_conversation` 只查 L0。
-- `06_coding_memory.py` 演示 `coding_enabled=True` 下的工程记忆：当 `messages` 含 `role="tool"` 时自动抽取 `task / solution / files`，并通过 `search_coding` 检索。
+- `06_coding_memory.py` 演示 `coding_enabled=True` 下的工程记忆：`messages` 含 tool 调用时，
+  JEV 判为工程场景后抽取 `task / solution / files`。三轮写入：两条独立经验（`ADD/SUPPLEMENT`），
+  第三轮新方案替换第一轮（期望 `ADD/OVERRIDE`，JEV 也可能判 MERGE）。`search_coding` 只返回当前版本，
+  `supersedes` 指向被替换的旧版本。消息使用标准 OpenAI `tool_calls` 格式，`tool_call_id` 与调用 id 一致。
+  用法细节见 [快速开始 · Coding 记忆](../docs/getting-started/quickstart.md#coding)。
 - MCP 工具直接对应上面这些 client 方法。

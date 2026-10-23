@@ -140,21 +140,43 @@ Smoke 通过 MemoryClient 验证演化、已知判断、四个并行 scope 和�
 
 ## Coding 工具来源
 
-实验性 coding 路径同样先保留完整来源（包含 tool arguments/results）再调用语义服务。
-正常请求为一次 scene JEV、一次候选生成，然后与主路径相同的 target-first 裁决。
-没有 current head 时，coverage 和 action 同批完成；有 current head 时先选 target，再按
-是否选中生成 action 选项。不存在 `:repair` 补问。`MULTIPLE` 展开成逐个 INCLUDE。
-coding 仍是单 target 模型：展开必须唯一确定一个 head，零个或多个 INCLUDE 都失败关闭。
-`OVERRIDE` / `MERGE` / `NEGATE` 追加新 ID 并退役当前 head；`DELETE` 只归档。
-`SUPPLEMENT` / `TEMPORAL` / `RAW_ONLY` 不写 target。对外 `MemoryDecision` 带
-action、update_type、targets、proposal_ids。
-所有 coding target 关系必须处于相同 workspace / branch / strict-session 版本边界。
-target 问题还要加入 `NONE` 和 `MULTIPLE`，因此 `coding candidate_limit` 最大为 253。
-SQLite 以 published/is_latest 决定可见性；所有向量写入确认与 scope CAS 成功后整批发布。
-失败的候选保持不可见，旧 SQL head 保持可读；来源仍在 coding_sources/L0。
-现阶段 coding 不支持相同 pending ID 自动回放，失败请求重新生成新 ID，旧 pending 可见性
-始终关闭。SQLite 发布协议与主 SDK 的 versions.db 恢复协议不同；不宣称分布式事务。
-直接 destructive update/delete 已拒绝，版本读取和完整 history_versions 均保留。
+实验性 coding 路径（`coding_enabled=True`）。`messages` 里出现 `role="tool"` 或
+assistant `tool_calls` 才进入；其余写入走主路径。
+
+1. **先留来源**：完整 messages（含 tool arguments / results，结构化 content 原样）写入
+   `coding_sources` 与 L0_RAW，之后任何模型调用失败都不丢来源。
+2. **scene**：一次 JEV choice 判 CODING / CHAT。CHAT 去掉 tool 消息后改走主路径。
+3. **候选生成**：一次 LLM 调用，输出 `{"candidates": [...]}` 对象（JSON 模式只允许对象，
+   不能是裸数组）。字段：`task`、`search_keys`、`solution`、`boundary_envs`（字符串）、
+   `boundary_scope`、`confidence`；`files` 由 tool_calls 的路径参数结构化提取。
+   只抽一次；不做 coverage 判定，与主路径一致。空候选直接 RAW_ONLY，不调用 JEV。
+4. **target-first 裁决**：
+   - 每个候选只看到**同一版本边界**内的 current head：相同 workspace / branch /
+     boundary_scope，`strict` 还要求同一 session。其他边界的 head 不会作为选项出现。
+   - 有可选 head 时先选 target（含 `NONE` / `MULTIPLE`；`MULTIPLE` 展开为逐个 INCLUDE，
+     必须唯一确定一个 head），再按是否选中给出 action 选项；没有可选 head 时直接问 action。
+   - head 超过 `candidate_limit`（默认 64，最大 253，给 `NONE` / `MULTIPLE` 留位）时先分页
+     问 INCLUDE / EXCLUDE 缩小范围。
+5. **执行**：`OVERRIDE` / `MERGE` / `NEGATE` 追加新 ID 并退役 target；`DELETE` 只归档；
+   `SUPPLEMENT` / `TEMPORAL` / `CONFLICT` / `RAW_ONLY` 不退役任何 head。同一批多个候选可以
+   替换同一个 head：head 退役一次，`superseded_by` 链接全部后继。同一 head 既被替换又被
+   归档是矛盾裁决，在预留任何行之前报 `CodingDecisionError`。`INVALID` / `NEED_CONTEXT`
+   同样报错，来源已保留。
+
+**并发与发布**：snapshot → 裁决 → 发布按 `(app_id, user_id, agent_id)` 串行，同进程的并发
+写会看到前一次的 head，不会撞 epoch；候选生成仍并行。SQLite 以 `published` / `is_latest`
+决定可见性：候选行先以未发布状态预留，所有向量写入确认、scope epoch CAS 通过后整批发布。
+另一进程共享同一数据库导致 epoch 变化时报 `CodingConcurrentWriteError`，重试即可。
+
+**幂等**：传 `request_id` 时，raw id 与 memory id 由它派生，结果与发布同事务记录；重放
+直接返回记录结果，输入不同报 `IdempotencyConflictError`。崩溃留下的未发布行在重试时清理。
+
+**对外结果**：`WriteResult.memory_id` 是 raw id，`extra_node_ids` 是新版本 id；
+`commit_passed` 与主路径同口径（追加了版本或归档了 head）；`decisions` 带 action、
+update_type、targets、proposal_ids、source_ids。`search_coding` 只返回已发布的
+`is_latest` 版本，历史保留在 SQLite（`supersedes` / `superseded_by`）。
+直接 destructive update / delete 被拒绝。SQLite 发布协议与主 SDK 的 versions.db 恢复协议
+不同；不宣称分布式事务。
 
 ## 最终本地验证
 

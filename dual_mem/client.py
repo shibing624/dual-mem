@@ -249,7 +249,6 @@ class MemoryClient:
             store=store,
             extractor=extractor,
             reconciler=CodingMemoryReconciler(jev=self.factory.jev),
-            llm=self.factory.llm,
             jev=self.factory.jev,
         )
 
@@ -298,10 +297,10 @@ class MemoryClient:
                     for m in messages
                     if (m.get("role") if isinstance(m, dict) else m.role) != "system"
                 ]
+                # Only text is scrubbed; structured parts stay intact (lossless L0).
                 for raw in raw_dicts:
-                    raw["content"] = strip_memory_injection(
-                        str(raw.get("content") or "")
-                    )
+                    if isinstance(raw.get("content"), str):
+                        raw["content"] = strip_memory_injection(raw["content"])
                 from dual_mem.coding.preproc import (
                     has_any_tool_message,
                     strip_tool_messages,
@@ -334,7 +333,7 @@ class MemoryClient:
                             memory_id=coding_result["raw_id"],
                             extra_node_ids=mids,
                             extracted_count=len(mids),
-                            commit_passed=bool(mids),
+                            commit_passed=coding_result["commit_passed"],
                             is_ephemeral=bool(decisions)
                             and all(d.action == "RAW_ONLY" for d in decisions),
                             decisions=decisions,
