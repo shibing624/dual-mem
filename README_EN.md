@@ -51,7 +51,7 @@ dual-mem hub scan --source all     # turn your past conversations into memory
 dual-mem hub recall "what technical choices have I made before"
 ```
 
-Tools discover the local service with no URL to paste. A conversation is saved and acknowledged immediately; organizing happens in the background. You can also host it on your own server and point several computers at the same memory. See the [MemHub docs](https://github.com/shibing624/dual-mem/blob/main/docs/memhub.md).
+Tools discover the local service with no URL to paste. A conversation is saved and acknowledged immediately; organizing happens in the background. You can also run one Core on your own server and point several computers at that same memory: [server setup](https://github.com/shibing624/dual-mem/blob/main/docs/memhub-server.md). Local use: [MemHub docs](https://github.com/shibing624/dual-mem/blob/main/docs/memhub.md).
 
 ### 4. Debugging sessions stay useful
 

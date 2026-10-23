@@ -30,8 +30,10 @@ pip install "dual-mem[all]"
 # 1. 启动记忆服务（登录后自动运行）
 dual-mem hub install-service
 
-# 2. 接入本机已安装的 AI 工具
+# 2. 接入本机的 AI 工具。all 会写入下面五个的配置；只用其中几个就写出名字
 dual-mem hub install-host all
+# dual-mem hub install-host claude-code
+# dual-mem hub install-host codex
 
 # 3. 导入过去的对话
 dual-mem hub scan --source all
@@ -48,15 +50,17 @@ dual-mem hub status
 
 ## 多台电脑共用一份记忆
 
-把记忆服务放在你自己的云主机上，每台电脑通过加密隧道连接：
+服务器上只跑一个 Core，监听它自己的 `127.0.0.1:8765`。你的电脑用 SSH 把这个端口接到本机，再告诉本机的工具「记忆服务在本机这个端口」。完整步骤（服务器安装、token、端口被占用、断开之后回到本机库）见 [在自己的服务器上跑 MemHub](memhub-server.md)。
 
 ```bash
-ssh -N -L 8765:127.0.0.1:8765 user@memory-host
+# 本机 8766 → 服务器的 127.0.0.1:8765。-N 表示只转发，不打开远程 shell。
+ssh -N -L 8766:127.0.0.1:8765 user@memory-host
 
-dual-mem hub attach --base-url http://127.0.0.1:8765 --api-key 'your-secret'
+# api-key 是服务器上 ~/.dual-mem/runtime-token 的内容，不是模型的 API key。
+dual-mem hub attach --base-url http://127.0.0.1:8766 --api-key 'runtime-token'
 ```
 
-不想连了：`dual-mem hub detach`，恢复使用本机记忆。
+不想连了：`dual-mem hub detach`，这台电脑恢复使用本机记忆。服务器上的那一份还在。
 
 ## 常用命令
 

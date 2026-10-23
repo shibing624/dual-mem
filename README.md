@@ -51,7 +51,7 @@ dual-mem hub scan --source all     # 把过去的对话也变成记忆
 dual-mem hub recall "我之前做过哪些技术选择"
 ```
 
-零配置发现本机服务，对话先存下来立刻返回，整理在后台进行。也可以放到你自己的云主机，多台电脑连同一份记忆。详见 [MemHub 文档](https://github.com/shibing624/dual-mem/blob/main/docs/memhub.md)。
+零配置发现本机服务，对话先存下来立刻返回，整理在后台进行。也可以在你自己的服务器上只跑一个 Core，多台电脑连同一份记忆，见 [服务器搭建](https://github.com/shibing624/dual-mem/blob/main/docs/memhub-server.md)。本机用法见 [MemHub 文档](https://github.com/shibing624/dual-mem/blob/main/docs/memhub.md)。
 
 ### 4. 🛠️ 工程排障也能留下来
 
@@ -143,7 +143,7 @@ with SyncMemoryClient(settings=Settings(coding_enabled=True)) as memory:
 
 - **版本演化** — 「住上海 → 搬北京」是一次更新，旧版本留作历史，回答默认用最新的
 - **分层存放** — 原话（L0）、事实与意图（L1）、画像（L2）、跨证据规律（L3）分开，按需取用
-- **决策模型把关写入** — 新信息、重复，还是更新，由轻量模型判断
+- **决策模型(Jev)把关写入** — 新信息、重复，还是更新，由轻量模型判断
 - **原话可查** — 整理过的记忆之外，原始对话始终保留
 
 **接入**
@@ -171,7 +171,7 @@ with SyncMemoryClient(settings=Settings(coding_enabled=True)) as memory:
 
 欢迎在 [Issues](https://github.com/shibing624/dual-mem/issues) 投票或提需求。
 
-## 🔥 News
+## News
 
 - [2026/10/23] **v0.1.5**：修复 Coding 记忆接真实模型时写不进去的问题。抽取改为返回 `{"candidates": [...]}` 对象，适配默认 `llm_json_mode`；去掉 coverage 硬门槛；同一批写入可以覆盖同一条旧方案；裁决只看当前版本边界内的记录；同一用户的并发写入按 scope 串行。快速上手补充 Coding 记忆章节，`examples/06_coding_memory.py` 增加方案更新后只返回当前版本的示例。详见 [Release-v0.1.5](https://github.com/shibing624/dual-mem/releases/tag/v0.1.5)。
 - [2026/10/23] **v0.1.4**：新增 MemHub 本地单 Core 跨工具记忆中枢（支持 Claude Code / Codex / Cursor / Hermes / Agentica 会话增量导入、后台持久队列写入、开机自启与云端隧道连接）；升级 System 2 v3 聚类认知与版本桥召回；补充 Coding 记忆示例并精简无收益配置项；在 LoCoMo（74.7）、LongMemEval（91.7）、PersonaMem-v2（50.0）同场评测中全面领先 hy-memory 2.0.4 与 mem0。详见 [Release-v0.1.4](https://github.com/shibing624/dual-mem/releases/tag/v0.1.4)。

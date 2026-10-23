@@ -28,7 +28,9 @@ nav:
   - Getting Started:
       - Installation: getting-started/installation.md
       - Quickstart: getting-started/quickstart.md
-  - MemHub: memhub.md
+  - MemHub:
+      - Overview: memhub.md
+      - Your own server: memhub-server.md
   - Integrations:
       - Frameworks & tools: integrations.md
       - MCP / REST: mcp_integration.md
