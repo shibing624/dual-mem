@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **README / README_EN / 文档首页**：开篇改为 chat 双系统。System 1 负责对话中的事实、画像和版本演化；`dual`（System 2）在显式 `digest()` 时跨证据归纳 L3。MemHub 多 Agent 共享保留为生态能力。版式改成「为什么选 dual-mem」分点展开，评测、安装、快速开始、特性、News、文档、引用分开。News 各条链到对应 Release。示例只点 `02_dual.py` 和 `06_coding_memory.py`。安装说明写明 `jev_api_key`、`llm_api_key`、`embed_api_key` 三者都要，三个地址都可以改。
+- **`config.default.yaml`**：文件头写明三把钥匙和三个可改地址。首次生成的 `~/.dual_mem/config.yaml` 用的就是这份模板。键和默认值没有变。
+- **示例不再回退内网 JEV 中转**：`examples/_common.py` 只使用配置里的 `jev_api_key` 或 `DUAL_MEM_JEV_API_KEY` / `DUAL_MEM_JEV_ENDPOINT`。随包发出的 `config.default.yaml` 与示例说明里不再出现内网地址。
+
 ## [0.1.5] — 2026-10-23
 
 - **Coding 记忆修复（真实模型下此前无法写入）**：

@@ -1,35 +1,24 @@
-[**🇨🇳中文**](https://github.com/shibing624/dual-mem/blob/main/README.md) | [**🌐English**](https://github.com/shibing624/dual-mem/blob/main/README_EN.md) | [**📖在线文档**](https://shibing624.github.io/dual-mem)
+<h1 align="center">dual-mem</h1>
 
-<div align="center">
+<p align="center"><b>当场记下事实，事后看出规律。</b><br />System 1 在对话里写下事实和变化，dual（System 2）再把它们归纳成稳定规律。MemHub 让多个 Agent 共用这一份记忆。</p>
 
-# dual-mem
+<p align="center">
+  <a href="https://badge.fury.io/py/dual-mem"><img src="https://badge.fury.io/py/dual-mem.svg" alt="PyPI version" /></a>
+  <a href="https://github.com/shibing624/dual-mem/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License Apache 2.0" /></a>
+  <a href="https://github.com/shibing624/dual-mem/blob/main/pyproject.toml"><img src="https://img.shields.io/badge/Python-3.11%2B-green.svg" alt="Python 3.11+" /></a>
+  <a href="https://github.com/shibing624/dual-mem/issues"><img src="https://img.shields.io/github/issues/shibing624/dual-mem.svg" alt="GitHub issues" /></a>
+  <a href="#社区与支持"><img src="https://img.shields.io/badge/wechat-group-green.svg?logo=wechat" alt="Wechat Group" /></a>
+</p>
 
-**Memory That Evolves With You — Across Every AI Tool.**
+<p align="center">简体中文 | <a href="https://github.com/shibing624/dual-mem/blob/main/README_EN.md">English</a> | <a href="https://shibing624.github.io/dual-mem">在线文档</a></p>
 
-让 AI 真正记住你——偏好变了会自动更新，换个工具也依然懂你。
+## 为什么选 dual-mem
 
-[![PyPI version](https://badge.fury.io/py/dual-mem.svg)](https://badge.fury.io/py/dual-mem)
-[![License Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/shibing624/dual-mem/blob/main/LICENSE)
-[![python_version](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://github.com/shibing624/dual-mem/blob/main/pyproject.toml)
-[![GitHub issues](https://img.shields.io/github/issues/shibing624/dual-mem.svg)](https://github.com/shibing624/dual-mem/issues)
-[![Wechat Group](https://img.shields.io/badge/wechat-group-green.svg?logo=wechat)](#社区与支持)
+你已经告诉 AI 三次「我现在不吃辣了」，它还在推荐川菜馆。聊了几十轮，它背得出每一句原话，却说不出你做事的稳定习惯。在 Cursor 里交代过的代码规范，Codex 并不知道。
 
-</div>
+### 1. 🏆 同一个模型，记得更准、写得更快
 
----
-
-你已经告诉 AI 三次"我现在不吃辣了"，它还在推荐川菜馆。
-在 Cursor 里交代过的代码规范，Codex 并不知道；在 Claude Code 里定下的技术选型，换到 Hermes 又要从头讲一遍。
-
-**dual-mem 帮你彻底解决这些痛点：**
-
-- 🧠 **记得准**：不是把聊天记录越堆越乱，而是像人一样把原话、事实、个人画像分层整理；当你改了主意、换了城市或更新了方案，它会自动演化出新版本并保留历史，回答不再前后打架。
-- 🔗 **记得通**：通过 MemHub，Claude Code、Codex、Cursor、Hermes、Agentica 共用同一份本地记忆。记忆是你的长期资产，不被任何单一工具锁定——无论在哪开口，都从懂你开始。
-- 🛠️ **记得全**：除了日常偏好与长期背景，还能从带工具调用（Tool Calls）的工程会话里自动提炼排障方案与代码经验，下次遇到同类问题直接复用。
-
-## 效果：同场对比，全面领先
-
-同一个模型（Qwen3.8-27B）负责抽取、作答与评分，同一套 embedding（bge-m3）、同一批题目——**只换记忆系统**：
+抽取、作答、评分用同一个模型（Qwen3.8-27B），同一套 embedding（bge-m3），同一批题目——**只换记忆系统**：
 
 | 记忆系统 | LoCoMo<br>(308 题) | LongMemEval<br>(24 题) | PersonaMem-v2<br>(476 题) | 单篇长对话写入耗时<br>(秒，越低越快) |
 |---|:---:|:---:|:---:|:---:|
@@ -37,17 +26,61 @@
 | hy-memory 2.0.4 | 66.6 | 70.8 | 43.5 | 2485 |
 | mem0 | 65.6 | 83.3 | 47.9 | 808 |
 
-> 单篇长对话写入耗时为 LoCoMo 每篇多轮长对话从零写入的中位数耗时。评测协议、显著性检验、题型细分和复现命令见 [评测说明](https://github.com/shibing624/dual-mem/blob/main/docs/benchmarks.md)。
+**三场公开评测都排第一，写入大约是 hy-memory 的五分之一。** 协议、显著性、题型细分和复现命令见 [评测说明](https://github.com/shibing624/dual-mem/blob/main/docs/benchmarks.md)。
 
-## 三分钟上手
+### 2. 🧠 两套系统，这就是 dual
+
+名字里的 dual 指 chat 里的两套记忆，也是论文里要写的方法层。
+
+- **System 1（默认 `system1`）**：对话进行时写入。原话、事实、个人画像分层存放；你改了主意、换了城市或更新了方案，它追加新版本并保留历史，回答用最新的。
+- **dual / System 2（`mode="dual"`，再调用 `digest()`）**：会话告一段落时，跨多条证据归纳行为规律和长期画像（L3）。
+
+对应示例：[`examples/02_dual.py`](https://github.com/shibing624/dual-mem/blob/main/examples/02_dual.py)。
+
+### 3. 🔗 多个 Agent，一份记忆
+
+MemHub 把上面这两套系统接到本机上的多个工具。Claude Code、Codex、Cursor、Hermes、Agentica 读写同一份记忆，数据默认留在你的电脑上。
+
+```bash
+pip install "dual-mem[all]"
+
+dual-mem hub install-service       # 后台常驻，开机自启
+dual-mem hub install-host all      # 一键接入本机已安装的 AI 工具
+dual-mem hub scan --source all     # 把过去的对话也变成记忆
+
+dual-mem hub recall "我之前做过哪些技术选择"
+```
+
+零配置发现本机服务，对话先存下来立刻返回，整理在后台进行。也可以放到你自己的云主机，多台电脑连同一份记忆。详见 [MemHub 文档](https://github.com/shibing624/dual-mem/blob/main/docs/memhub.md)。
+
+### 4. 🛠️ 工程排障也能留下来
+
+Coding 记忆吃的是 coding agent 的工具轨迹，不是一份源代码。`add(messages=...)` 里要有 `role="tool"` 或 assistant 的 `tool_calls`，JEV 再把整段判成工程场景，才会抽出根因、方案和文件。`search_coding` 只查这条库。用法见 [快速开始 · Coding 记忆](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md#coding)。
+
+## 安装
 
 ```bash
 pip install dual-mem
 ```
 
-首次运行会自动生成 `~/.dual_mem/config.yaml`，填入模型服务的 API key 即可（支持任意 OpenAI 兼容端点）。
+含 REST / CLI / MCP / MemHub：`pip install "dual-mem[all]"`。首次运行会把包内 [`config.default.yaml`](https://github.com/shibing624/dual-mem/blob/main/dual_mem/config.default.yaml) 复制成 `~/.dual_mem/config.yaml`。启动要三把钥匙，缺一就拒绝构造：
 
-### 1. 日常记忆与偏好演化
+```yaml
+jev_api_key: ""    # 写入裁决。System One，不是 Chat Completions
+jev_endpoint: https://api.typesafe.ai/v1/systemone
+
+llm_api_key: ""    # 抽取与 System 2。OpenAI 兼容，地址可改
+llm_base_url: https://api.openai.com/v1
+
+embed_api_key: ""  # 向量索引与检索。OpenAI 兼容，地址可改
+embed_base_url: https://api.openai.com/v1
+```
+
+三把钥匙和三个地址都可以改成环境变量：`DUAL_MEM_JEV_API_KEY` / `DUAL_MEM_JEV_ENDPOINT`、`DUAL_MEM_LLM_API_KEY` / `DUAL_MEM_LLM_BASE_URL`、`DUAL_MEM_EMBED_API_KEY` / `DUAL_MEM_EMBED_BASE_URL`。
+
+## 快速开始
+
+### 日常记忆
 
 ```python
 from dual_mem import SyncMemoryClient
@@ -61,11 +94,13 @@ with SyncMemoryClient() as memory:
         print(m.content)
 ```
 
-它会记住 alice 不吃辣、即将搬去北京——而且知道"上海"已经是过去时。
+它会记住 alice 不吃辣、即将搬去北京，并且知道「上海」已经是过去时。
 
-### 2. Coding 记忆：沉淀工程排障经验
+### Coding 记忆
 
-开启 `coding_enabled=True` 后，当传入的 `messages` 含有工具调用（assistant `tool_calls` 或 `role="tool"` 结果）时，dual-mem 会自动识别工程研发场景，将排障根因、修复方案和涉及文件沉淀为结构化 Coding 记忆；方案更新时追加新版本并退役旧版本，`search_coding` 只召回当前有效的方案（用法详见 [快速开始 · Coding 记忆](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md#coding)）：
+`coding_enabled=True` 之后，只有 `messages` 里出现工具轨迹才会进 Coding 库：某条是 `role="tool"`，或者 assistant 带了 `tool_calls`。这是结构条件。接着 JEV 判断整段是不是工程场景，是才抽出 `task` / `solution` / `files`。
+
+把几个 `.py` 文件的正文放进 `add(content=...)` 或普通 user 消息，没有工具轨迹，走的是 chat 记忆。`search()` 能搜到当事实记下的内容，`search_coding` 不会返回。
 
 ```python
 from dual_mem import SyncMemoryClient
@@ -98,80 +133,30 @@ with SyncMemoryClient(settings=Settings(coding_enabled=True)) as memory:
         print(h["task"], "->", h["solution"], h["files"])
 ```
 
-### 3. 可运行示例（`examples/`）
+### 示例
 
-仓库 [`examples/`](https://github.com/shibing624/dual-mem/tree/main/examples) 目录提供了覆盖全部核心路径的端到端脚本：
+两条最值得看的：[`examples/02_dual.py`](https://github.com/shibing624/dual-mem/blob/main/examples/02_dual.py) 是 `digest()` 归纳 L3，[`examples/06_coding_memory.py`](https://github.com/shibing624/dual-mem/blob/main/examples/06_coding_memory.py) 是工具轨迹写入和 `search_coding`。REST、CLI、生命周期在 [`examples/`](https://github.com/shibing624/dual-mem/tree/main/examples) 目录里。异步客户端见 [快速开始](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md)。
 
-| 示例脚本 | 演示内容 | 运行命令 |
-|---|---|---|
-| [`examples/01_system1.py`](https://github.com/shibing624/dual-mem/blob/main/examples/01_system1.py) | 单轮与多轮对话写入、偏好版本演化链、语义检索与历史版本查看 | `python examples/01_system1.py` |
-| [`examples/02_dual.py`](https://github.com/shibing624/dual-mem/blob/main/examples/02_dual.py) | `dual` 模式写入 + `digest()` 跨证据归纳 L3 深层行为规律与主动意图 | `python examples/02_dual.py` |
-| [`examples/03_rest_api.py`](https://github.com/shibing624/dual-mem/blob/main/examples/03_rest_api.py) | FastAPI `/v1/memories/...` 增删改查、版本更新与归档 | `python examples/03_rest_api.py` |
-| [`examples/04_cli.py`](https://github.com/shibing624/dual-mem/blob/main/examples/04_cli.py) | `dual-mem` 命令行写入、检索与原始对话搜索 | `python examples/04_cli.py` |
-| [`examples/05_lifecycle.py`](https://github.com/shibing624/dual-mem/blob/main/examples/05_lifecycle.py) | `add_raw` 原文落盘、`distill` 延后抽取、`search_conversation`、`update` / `delete` | `python examples/05_lifecycle.py` |
-| [`examples/06_coding_memory.py`](https://github.com/shibing624/dual-mem/blob/main/examples/06_coding_memory.py) | Coding 工程记忆：含 Tool 调用的排障对话抽取与 `search_coding` 检索 | `python examples/06_coding_memory.py` |
+## 功能特性
 
-异步客户端、多轮对话写入和 Agent 集成写法见 [快速开始](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md) 与 [示例说明](https://github.com/shibing624/dual-mem/blob/main/examples/README.md)。
+**记忆**
 
-## MemHub：你的 AI 工具共享一份记忆
+- **版本演化** — 「住上海 → 搬北京」是一次更新，旧版本留作历史，回答默认用最新的
+- **分层存放** — 原话（L0）、事实与意图（L1）、画像（L2）、跨证据规律（L3）分开，按需取用
+- **决策模型把关写入** — 新信息、重复，还是更新，由轻量模型判断
+- **原话可查** — 整理过的记忆之外，原始对话始终保留
 
-```text
-   Claude Code   Codex   Cursor   Hermes   Agentica
-        \          |        |        |       /
-         ─────────────  MemHub  ─────────────
-                         │
-                你的个人记忆（本机 / 你的云主机）
-```
+**接入**
 
-```bash
-pip install "dual-mem[all]"
-
-dual-mem hub install-service       # 后台常驻，开机自启
-dual-mem hub install-host all      # 一键接入本机已安装的 AI 工具
-dual-mem hub scan --source all     # 把过去的对话也变成记忆
-
-dual-mem hub recall "我之前做过哪些技术选择"
-```
-
-- **零配置**：工具自动发现本机记忆服务，不用填地址和密钥。
-- **不打断你**：对话先存下来立刻返回，整理在后台进行，不拖慢任何工具。
-- **历史不浪费**：已有的会话记录一键导入，第一天就"懂你"。
-- **数据归你**：默认只存在你的电脑上；也可以放到你自己的云主机，多台电脑连同一份记忆。
-
-当前已支持 **Claude Code、Codex、Cursor、Hermes、Agentica**，更多工具见 [Roadmap](#roadmap)。详见 [MemHub 文档](https://github.com/shibing624/dual-mem/blob/main/docs/memhub.md)。
-
-## 适合谁用
-
-| 你是… | dual-mem 帮你… |
-|---|---|
-| **重度 AI 工具用户** | 用 MemHub 让各个 AI 工具共享你的偏好、规范和项目背景，不再重复交代 |
-| **Agent / 应用开发者** | 三行代码给产品加上长期记忆；SDK、REST、MCP、CLI 任选接入 |
-| **个人助手 / 客服产品** | 记住每位用户的画像与变化，回答越用越贴心 |
-| **研究者** | 同场对比 mem0、hy-memory 的评测工具开箱即用 |
-
-## 为什么记得更准
-
-- **偏好变了会更新，而不是混淆**：每条记忆都有版本，"住上海 → 搬北京"是一次更新，旧版本留作历史，回答默认用最新的。
-- **事实与画像分开整理**：说过的话、明确的事实、你是什么样的人，各存一层，按需取用。
-- **专用决策模型把关**：写入时由一个轻量决策模型判断"新信息、重复，还是更新"，比让大模型自己判断更稳、更便宜。
-- **原话永远可查**：整理过的记忆之外，原始对话始终保留，随时可以核对出处。
-
-想了解实现原理？见下方 [开发者文档](#开发者文档)。
-
-## 接入方式
-
-| 方式 | 适合 | 一句话 |
-|---|---|---|
-| **Python SDK** | 自己写 Agent / 应用 | `pip install dual-mem` |
-| **MemHub** | 日常使用多个 AI 工具 | `dual-mem hub install-host all` |
-| **MCP** | Cursor、Claude Desktop 等支持 MCP 的工具 | `dual-mem-mcp` |
-| **REST API** | 其他语言或独立服务 | `dual-mem serve` |
-| **CLI** | 脚本、调试 | `dual-mem add` / `dual-mem search` |
-| **框架插件** | Agentica、Claude Code Hook、Hermes、OpenClaw | 见 [集成文档](https://github.com/shibing624/dual-mem/blob/main/docs/integrations.md) |
+- **Python SDK** — `pip install dual-mem`
+- **MemHub** — `dual-mem hub install-host all`
+- **MCP / REST / CLI** — `dual-mem-mcp`、`dual-mem serve`、`dual-mem add` / `dual-mem search`
+- **框架插件** — Agentica、Claude Code Hook、Hermes、OpenClaw，见 [集成文档](https://github.com/shibing624/dual-mem/blob/main/docs/integrations.md)
 
 ## Roadmap
 
-- [x] 分层记忆 + 版本演化：偏好更新可追溯
+- [x] System 1 分层记忆 + 版本演化
+- [x] dual / System 2：显式 `digest()` 归纳 L3
 - [x] 专用决策模型把关写入
 - [x] MemHub：5 个 AI 工具共享记忆、历史会话导入、后台整理
 - [x] 云主机单实例：多台电脑连同一份记忆
@@ -186,26 +171,26 @@ dual-mem hub recall "我之前做过哪些技术选择"
 
 欢迎在 [Issues](https://github.com/shibing624/dual-mem/issues) 投票或提需求。
 
-## News
+## 🔥 News
 
-- [2026/10/23] **v0.1.5**：修复 Coding 记忆接真实模型时写不进去的问题。抽取改为返回 `{"candidates": [...]}` 对象，适配默认 `llm_json_mode`；去掉 coverage 硬门槛；同一批写入可以覆盖同一条旧方案；裁决只看当前版本边界内的记录；同一用户的并发写入按 scope 串行。快速上手补充 Coding 记忆章节，`examples/06_coding_memory.py` 增加方案更新后只返回当前版本的示例。
-- [2026/10/23] **v0.1.4**：新增 MemHub 本地单 Core 跨工具记忆中枢（支持 Claude Code / Codex / Cursor / Hermes / Agentica 会话增量导入、后台持久队列写入、开机自启与云端隧道连接）；升级 System 2 v3 聚类认知与版本桥召回；补充 Coding 记忆示例并精简无收益配置项；在 LoCoMo（74.7）、LongMemEval（91.7）、PersonaMem-v2（50.0）同场评测中全面领先 hy-memory 2.0.4 与 mem0。
-- [2026/10/15] **v0.1.3**：升级为 L0_RAW / L1_FACT / L2_PROFILE / L3_DERIVED 四层记忆架构与 JEV 专用决策模型写路径，支持 target-first 关系裁决、版本演化链与历史回溯；新增 Agentica / Claude Code / Hermes / OpenClaw 原生生态集成与 Coding 记忆子系统（存储格式不兼容旧版，需使用新目录）。
+- [2026/10/23] **v0.1.5**：修复 Coding 记忆接真实模型时写不进去的问题。抽取改为返回 `{"candidates": [...]}` 对象，适配默认 `llm_json_mode`；去掉 coverage 硬门槛；同一批写入可以覆盖同一条旧方案；裁决只看当前版本边界内的记录；同一用户的并发写入按 scope 串行。快速上手补充 Coding 记忆章节，`examples/06_coding_memory.py` 增加方案更新后只返回当前版本的示例。详见 [Release-v0.1.5](https://github.com/shibing624/dual-mem/releases/tag/v0.1.5)。
+- [2026/10/23] **v0.1.4**：新增 MemHub 本地单 Core 跨工具记忆中枢（支持 Claude Code / Codex / Cursor / Hermes / Agentica 会话增量导入、后台持久队列写入、开机自启与云端隧道连接）；升级 System 2 v3 聚类认知与版本桥召回；补充 Coding 记忆示例并精简无收益配置项；在 LoCoMo（74.7）、LongMemEval（91.7）、PersonaMem-v2（50.0）同场评测中全面领先 hy-memory 2.0.4 与 mem0。详见 [Release-v0.1.4](https://github.com/shibing624/dual-mem/releases/tag/v0.1.4)。
+- [2026/10/15] **v0.1.3**：升级为 L0_RAW / L1_FACT / L2_PROFILE / L3_DERIVED 四层记忆架构与 JEV 专用决策模型写路径，支持 target-first 关系裁决、版本演化链与历史回溯；新增 Agentica / Claude Code / Hermes / OpenClaw 原生生态集成与 Coding 记忆子系统（存储格式不兼容旧版，需使用新目录）。详见 [Release-v0.1.3](https://github.com/shibing624/dual-mem/releases/tag/v0.1.3)。
 
 <details>
-<summary>展开更早版本</summary>
+<summary>更早版本</summary>
 
-- [2026/06/20] **v0.1.2**：新增 `SyncMemoryClient` 同步客户端封装，支持首次运行自动生成 `~/.dual_mem/config.yaml` 默认配置，完善 REST / MCP / CLI 统一契约与在线文档站点。
-- [2026/06/19] **v0.1.1**：发布双系统分层记忆 SDK，支持语义 + BM25 + RRF 混合检索及 CLI / REST / MCP 接口。
+- [2026/06/20] **v0.1.2**：新增 `SyncMemoryClient` 同步客户端封装，支持首次运行自动生成 `~/.dual_mem/config.yaml` 默认配置，完善 REST / MCP / CLI 统一契约与在线文档站点。详见 [Release-v0.1.2](https://github.com/shibing624/dual-mem/releases/tag/v0.1.2)。
+- [2026/06/19] **v0.1.1**：发布双系统分层记忆 SDK，支持语义 + BM25 + RRF 混合检索及 CLI / REST / MCP 接口。详见 [Release-v0.1.1](https://github.com/shibing624/dual-mem/releases/tag/v0.1.1)。
 - [2026/06/18] **v0.1.0**：首版开源。
 
 </details>
 
 完整变更见 [CHANGELOG](https://github.com/shibing624/dual-mem/blob/main/CHANGELOG.md)。
 
-## 开发者文档
+## 文档
 
-在线文档：**[https://shibing624.github.io/dual-mem](https://shibing624.github.io/dual-mem)** · 本地预览：`pip install -r requirements-docs.txt && mkdocs serve`
+完整使用文档：**[https://shibing624.github.io/dual-mem](https://shibing624.github.io/dual-mem)**
 
 | 文档 | 内容 |
 |---|---|
@@ -220,12 +205,16 @@ dual-mem hub recall "我之前做过哪些技术选择"
 | [评测说明](https://github.com/shibing624/dual-mem/blob/main/docs/benchmarks.md) | 协议、题集、复现与结果细分 |
 | [示例说明](https://github.com/shibing624/dual-mem/blob/main/examples/README.md) | 6 个可运行的端到端示例脚本说明 |
 
+本地预览：`pip install -r requirements-docs.txt && mkdocs serve`
+
 ## 社区与支持
+
+> 如果 dual-mem 帮到了你，欢迎点个 ⭐ Star，让更多人看到。
 
 - **GitHub Issues** — [提交 issue](https://github.com/shibing624/dual-mem/issues)
 - **微信群** — 添加微信号 `xuming624`，备注 "llm"，加入技术交流群
 
-<img src="https://github.com/shibing624/agentica/blob/main/docs/assets/wechat.jpeg" width="200" />
+<img src="https://github.com/shibing624/agentica/blob/main/docs/assets/wechat.jpeg" width="200" alt="微信群二维码" />
 
 ## 引用
 
@@ -233,8 +222,28 @@ dual-mem hub recall "我之前做过哪些技术选择"
 
 > Xu, M. (2026). dual-mem: Dual-System Layered Memory SDK for LLM Applications. GitHub. https://github.com/shibing624/dual-mem
 
-## 许可证 · 贡献 · 致谢
+```bibtex
+@misc{xu2026dualmem,
+  author    = {Xu, Ming},
+  title     = {dual-mem: Dual-System Layered Memory SDK for LLM Applications},
+  year      = {2026},
+  publisher = {GitHub},
+  url       = {https://github.com/shibing624/dual-mem}
+}
+```
 
-[Apache License 2.0](https://github.com/shibing624/dual-mem/blob/main/LICENSE) · 欢迎贡献，见 [CONTRIBUTING.md](https://github.com/shibing624/dual-mem/blob/main/CONTRIBUTING.md)
+## 许可证
 
-感谢 [Chroma](https://github.com/chroma-core/chroma)、[Kuzu](https://github.com/kuzudb/kuzu)、[FastAPI](https://github.com/tiangolo/fastapi)、[MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)、[mem0](https://github.com/mem0ai/mem0)。
+[Apache License 2.0](https://github.com/shibing624/dual-mem/blob/main/LICENSE)
+
+## 贡献
+
+欢迎贡献，见 [CONTRIBUTING.md](https://github.com/shibing624/dual-mem/blob/main/CONTRIBUTING.md)。
+
+## 致谢
+
+- [Chroma](https://github.com/chroma-core/chroma)
+- [Kuzu](https://github.com/kuzudb/kuzu)
+- [FastAPI](https://github.com/tiangolo/fastapi)
+- [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
+- [mem0](https://github.com/mem0ai/mem0)

@@ -23,12 +23,11 @@ embed_model: text-embedding-3-small
 embed_dim: 1536
 ```
 
-也可用环境变量（前缀 `DUAL_MEM_`）。yaml 里没有 `jev_api_key` 时，demo 会读
-`VENUS_TOKEN`，并把 JEV endpoint 指到 `/v1/systemone`。
-家目录配置里已经删除的键（例如 `system2_trigger_mode`）会被丢掉，不会让 `Settings` 报错。
+也可用环境变量（前缀 `DUAL_MEM_`）。家目录配置里已经删除的键（例如
+`system2_trigger_mode`）会被丢掉，不会让 `Settings` 报错。
 
 ```bash
-export VENUS_TOKEN=...          # 没有 jev_api_key 时使用
+export DUAL_MEM_JEV_API_KEY=...
 export DUAL_MEM_LLM_API_KEY=sk-...
 export DUAL_MEM_EMBED_API_KEY=sk-...
 ```

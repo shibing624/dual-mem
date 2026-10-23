@@ -1,9 +1,10 @@
 # dual-mem
 
-**Memory That Evolves With You — Across Every AI Tool.** 让 AI 真正记住你：偏好变了它知道，换个工具它也知道。
+**当场记下事实，事后看出规律。** System 1 在对话里写下事实和变化，dual（System 2）再把它们归纳成稳定规律。
 
-- 🧠 **记得准**：像人一样整理记忆。事实、画像、习惯分开存；你改了主意，它会更新，不会混淆。
-- 🔗 **记得通**：[MemHub](memhub.md) 让 Claude Code、Codex、Cursor、Hermes、Agentica 共享同一份个人记忆。
+- ⚡ **System 1**：对话进行时写入。事实、画像分层存放；你改了主意，它追加新版本。
+- 🧠 **dual / System 2**：显式 `digest()` 跨证据归纳行为规律（L3）。这是 chat 模式的方法层。
+- 🔗 **MemHub**：[MemHub](memhub.md) 让 Claude Code、Codex、Cursor、Hermes、Agentica 共享上面这一份记忆。多 Agent 共享是生态能力。
 - 🏆 **同场领先**：同模型、同题集，LoCoMo 74.7，hy-memory 66.6，mem0 65.6，详见[评测](benchmarks.md)。
 
 ## 从哪里开始

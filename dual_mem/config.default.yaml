@@ -1,14 +1,21 @@
-# 配置优先级：显式参数 > DUAL_MEM_* 环境变量 > YAML > preset > 默认值。
-# 密钥建议只放环境变量；不把本地配置提交到 git。
+# 首次运行复制到 ~/.dual_mem/config.yaml。
+# 优先级：显式参数 > DUAL_MEM_* 环境变量 > YAML > preset > 默认值。
+# 构造客户端必须同时有三把钥匙，缺一会在启动时拒绝：
+#   jev_api_key    写入时判断新增 / 重复 / 更新（System One，不是 Chat Completions）
+#   llm_api_key    抽取候选、System 2 归纳（OpenAI 兼容）
+#   embed_api_key  向量索引与检索（OpenAI 兼容）
+# 三个地址都可以改成你自己的服务：jev_endpoint、llm_base_url、embed_base_url。
+# 对应环境变量：DUAL_MEM_JEV_API_KEY / DUAL_MEM_LLM_API_KEY / DUAL_MEM_EMBED_API_KEY，
+# 以及 DUAL_MEM_JEV_ENDPOINT / DUAL_MEM_LLM_BASE_URL / DUAL_MEM_EMBED_BASE_URL。
+# 密钥建议只放环境变量，不要把填好的本地配置提交到 git。
 mode: system1
 storage_dir: ./.dual_mem_v4
 preset: default
 
-# JEV：全部语义判断。Venus 仅替换 endpoint，model 显式发送。
+# JEV。默认公开端点；地区不可达时换成你自己的 jev_endpoint。
 jev_api_key: ""
 jev_endpoint: https://api.typesafe.ai/v1/systemone
 jev_model: jev-1.13.0
-# Venus: http://v2.open.venus.oa.com/llmproxy/v1/systemone
 reconcile_concurrency: 4
 reconcile_candidate_limit: 64
 reconcile_batch_size: 1
@@ -20,14 +27,14 @@ jev_max_request_chars: 100000
 jev_max_question_chars: 60000
 jev_timeout: 30
 
-# 生成模型：候选文本、System2 推导；不负责关系裁决。
+# 生成模型：候选文本、System 2 推导。不负责关系裁决。llm_base_url 可改。
 llm_api_key: ""
 llm_base_url: https://api.openai.com/v1
 llm_model: gpt-4o-mini
 # llm_context_window: 32768
 # llm_completion_reserve: 4096
 
-# Embedding：索引、读侧检索与关系比较材料的相似度路由，不作写入信用判断。
+# Embedding：索引、检索，以及关系比较前的相似度路由。embed_base_url 可改。
 embed_api_key: ""
 embed_base_url: https://api.openai.com/v1
 embed_model: text-embedding-3-small

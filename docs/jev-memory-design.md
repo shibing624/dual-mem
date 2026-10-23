@@ -109,7 +109,7 @@ System2（v3，对齐 hy-memory 2.0.4）产出三类 L3：
 ## 配置与限制
 
 JEV 可使用 `jev=` 注入 provider，或配置 `jev_api_key` / `jev_endpoint` / `jev_model`。
-`Settings.from_dict({"jev_api_key": ..., "jev_endpoint": ...})` 只接受规范平铺配置。Venus token 只在环境变量/注入中提供。
+`Settings.from_dict({"jev_api_key": ..., "jev_endpoint": ...})` 只接受规范平铺配置。密钥放 `jev_api_key` 或 `DUAL_MEM_JEV_API_KEY`。
 默认并发 4，HTTP 客户端复用，429/529/502/503/504 有限重试；按问题数量和字符预算拆包。
 字符预算是保守配置，不是 tokenizer 实测 token 数。
 
@@ -128,7 +128,6 @@ python -m pytest tests/ -q
 python ~/.agents/rules/check_ast.py .
 python tmp/jev_smoke.py --offline
 python tmp/benchmark_protocol_smoke.py
-VENUS_TOKEN=... python tmp/jev_smoke.py --output /tmp/venus-results.json
 ```
 
 Smoke 通过 MemoryClient 验证演化、已知判断、四个并行 scope 和显式 digest。
@@ -214,12 +213,12 @@ reasoning_content 为空，reasoning token 计数未提供。不能把缺少计�
 
 真实 smoke 六项断言全部通过：无思考内容、返回旧值为 OVERRIDE、重复为 SKIP、
 两个独立搬家事件保持 current、三代画像保留、只有一个 current 画像。
-报告：本地 design/validation/venus-hy3-disabled-smoke.json。早期负例也保留；本次通过
+报告留在本地 design/validation，不进入 Git。早期负例也保留；本次通过
 不证明业务准确率或速度普遍提升。尚无生产 embedding 联调或业务质量 A/B。
 
 ```bash
 python tmp/jev_smoke.py --offline
-# 配置 GENERATION_API_KEY / GENERATION_BASE_URL / GENERATION_MODEL=hy3 / VENUS_TOKEN
+# 配置 GENERATION_API_KEY / GENERATION_BASE_URL / GENERATION_MODEL=hy3 / DUAL_MEM_JEV_API_KEY
 python tmp/jev_generation_smoke.py --output /tmp/generation.json
 ```
 

@@ -1,35 +1,24 @@
-[**🇨🇳中文**](https://github.com/shibing624/dual-mem/blob/main/README.md) | [**🌐English**](https://github.com/shibing624/dual-mem/blob/main/README_EN.md) | [**📖Documentation**](https://shibing624.github.io/dual-mem)
+<h1 align="center">dual-mem</h1>
 
-<div align="center">
+<p align="center"><b>Facts now. Patterns over time.</b><br />System 1 writes facts and changes while you talk. dual (System 2) turns them into stable patterns. MemHub lets several agents share that one memory.</p>
 
-# dual-mem
+<p align="center">
+  <a href="https://badge.fury.io/py/dual-mem"><img src="https://badge.fury.io/py/dual-mem.svg" alt="PyPI version" /></a>
+  <a href="https://github.com/shibing624/dual-mem/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License Apache 2.0" /></a>
+  <a href="https://github.com/shibing624/dual-mem/blob/main/pyproject.toml"><img src="https://img.shields.io/badge/Python-3.11%2B-green.svg" alt="Python 3.11+" /></a>
+  <a href="https://github.com/shibing624/dual-mem/issues"><img src="https://img.shields.io/github/issues/shibing624/dual-mem.svg" alt="GitHub issues" /></a>
+  <a href="#community--support"><img src="https://img.shields.io/badge/wechat-group-green.svg?logo=wechat" alt="Wechat Group" /></a>
+</p>
 
-**Memory That Evolves With You — Across Every AI Tool.**
+<p align="center"><a href="https://github.com/shibing624/dual-mem/blob/main/README.md">简体中文</a> | English | <a href="https://shibing624.github.io/dual-mem">Documentation</a></p>
 
-AI that actually remembers you — it updates automatically when your preferences change, and still knows you when you switch tools.
+## Why dual-mem
 
-[![PyPI version](https://badge.fury.io/py/dual-mem.svg)](https://badge.fury.io/py/dual-mem)
-[![License Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/shibing624/dual-mem/blob/main/LICENSE)
-[![python_version](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://github.com/shibing624/dual-mem/blob/main/pyproject.toml)
-[![GitHub issues](https://img.shields.io/github/issues/shibing624/dual-mem.svg)](https://github.com/shibing624/dual-mem/issues)
-[![Wechat Group](https://img.shields.io/badge/wechat-group-green.svg?logo=wechat)](#community--support)
+You've told your assistant three times that you no longer eat spicy food, and it still recommends a Sichuan restaurant. After dozens of turns it can quote what you said, and still cannot name the habit that shows up every time. The coding conventions you explained in Cursor are unknown to Codex.
 
-</div>
+### 1. Same model, sharper memory, faster writes
 
----
-
-You've told your assistant three times that you no longer eat spicy food, and it still recommends a Sichuan restaurant.
-The coding conventions you explained in Cursor are unknown to Codex; the stack you settled on in Claude Code has to be re-explained in Hermes.
-
-**dual-mem solves these problems for good:**
-
-- 🧠 **Remembers accurately** — instead of piling up chat logs, it organizes raw dialogue, explicit facts, and user profile in separate layers; when you change your mind, move cities, or switch stacks, it appends a new version and keeps history rather than contradicting itself.
-- 🔗 **Remembers everywhere** — MemHub lets Claude Code, Codex, Cursor, Hermes, and Agentica share one local personal memory. Your memory is a long-term asset that no single tool locks in.
-- 🛠️ **Remembers engineering work** — beyond daily preferences, it extracts reusable debugging lessons and code solutions from tool-call sessions so you never debug the same issue twice.
-
-## Results: head-to-head, same setup
-
-The same model (Qwen3.8-27B) does extraction, answering and grading; same embedding model (bge-m3), same questions — **only the memory system changes**:
+One model (Qwen3.8-27B) does extraction, answering and grading. One embedding model (bge-m3). The same questions. **Only the memory system changes**:
 
 | Memory system | LoCoMo<br>(308 q) | LongMemEval<br>(24 q) | PersonaMem-v2<br>(476 q) | Ingestion time per long dialogue<br>(s, lower is better) |
 |---|:---:|:---:|:---:|:---:|
@@ -37,17 +26,61 @@ The same model (Qwen3.8-27B) does extraction, answering and grading; same embedd
 | hy-memory 2.0.4 | 66.6 | 70.8 | 43.5 | 2485 |
 | mem0 | 65.6 | 83.3 | 47.9 | 808 |
 
-> Ingestion time is the median time to ingest one LoCoMo multi-session long conversation from scratch. Protocol, significance tests, per-category results and reproduction commands: [Benchmarks](https://github.com/shibing624/dual-mem/blob/main/docs/benchmarks.md).
+**First on all three public benchmarks, and about one fifth the ingestion time of hy-memory.** Protocol, significance tests, per-category results and reproduction commands: [Benchmarks](https://github.com/shibing624/dual-mem/blob/main/docs/benchmarks.md).
 
-## Get started in 3 minutes
+### 2. Two systems. That is the dual.
+
+The name means two chat-memory systems. That is the method a paper should describe.
+
+- **System 1 (default `system1`)** writes while the conversation is happening. Raw words, facts, and profile live in separate layers. When you change your mind, move cities, or update a plan, it appends a new version and keeps the history. Answers use the latest.
+- **dual / System 2 (`mode="dual"`, then `digest()`)** runs after the session. It induces behavioral patterns and a longer-term profile (L3) across many pieces of evidence.
+
+See [`examples/02_dual.py`](https://github.com/shibing624/dual-mem/blob/main/examples/02_dual.py).
+
+### 3. Several agents, one memory
+
+MemHub connects those two systems to the tools on your machine. Claude Code, Codex, Cursor, Hermes, and Agentica read and write the same memory. By default the data stays on your computer.
+
+```bash
+pip install "dual-mem[all]"
+
+dual-mem hub install-service       # runs in the background, starts at login
+dual-mem hub install-host all      # connect every supported AI tool on this machine
+dual-mem hub scan --source all     # turn your past conversations into memory
+
+dual-mem hub recall "what technical choices have I made before"
+```
+
+Tools discover the local service with no URL to paste. A conversation is saved and acknowledged immediately; organizing happens in the background. You can also host it on your own server and point several computers at the same memory. See the [MemHub docs](https://github.com/shibing624/dual-mem/blob/main/docs/memhub.md).
+
+### 4. Debugging sessions stay useful
+
+Coding memory takes a coding agent's tool trace, not a pile of source files. `add(messages=...)` must include a `role="tool"` turn or assistant `tool_calls`, and JEV must call the whole session engineering, before a cause, a fix, and files are stored. `search_coding` reads only that store. Details: [Quickstart · Coding memory](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md#coding).
+
+## Install
 
 ```bash
 pip install dual-mem
 ```
 
-The first run creates `~/.dual_mem/config.yaml`; fill in API keys for your model services (any OpenAI-compatible endpoint).
+REST / CLI / MCP / MemHub: `pip install "dual-mem[all]"`. The first run copies the packaged [`config.default.yaml`](https://github.com/shibing624/dual-mem/blob/main/dual_mem/config.default.yaml) to `~/.dual_mem/config.yaml`. Construction needs three keys; a missing one refuses to start:
 
-### 1. Daily memory & preference evolution
+```yaml
+jev_api_key: ""    # write decisions. System One, not Chat Completions
+jev_endpoint: https://api.typesafe.ai/v1/systemone
+
+llm_api_key: ""    # extraction and System 2. OpenAI-compatible; base URL is yours
+llm_base_url: https://api.openai.com/v1
+
+embed_api_key: ""  # vector index and search. OpenAI-compatible; base URL is yours
+embed_base_url: https://api.openai.com/v1
+```
+
+The same six values are environment variables: `DUAL_MEM_JEV_API_KEY` / `DUAL_MEM_JEV_ENDPOINT`, `DUAL_MEM_LLM_API_KEY` / `DUAL_MEM_LLM_BASE_URL`, `DUAL_MEM_EMBED_API_KEY` / `DUAL_MEM_EMBED_BASE_URL`.
+
+## Quick start
+
+### Everyday memory
 
 ```python
 from dual_mem import SyncMemoryClient
@@ -61,11 +94,13 @@ with SyncMemoryClient() as memory:
         print(m.content)
 ```
 
-It remembers that alice no longer eats spicy food and is about to move to Beijing — and it knows "Shanghai" is becoming the past.
+It remembers that alice no longer eats spicy food and is about to move to Beijing, and it knows Shanghai is becoming the past.
 
-### 2. Coding memory: reusable debugging & engineering lessons
+### Coding memory
 
-With `coding_enabled=True`, when `messages` include tool calls (assistant `tool_calls` or `role="tool"` results), dual-mem automatically detects engineering sessions and extracts structured `task` / `solution` / `files` memories. A changed solution is appended as a new version that retires the old one, so `search_coding` returns only what currently applies (details: [Quickstart · Coding memory](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md#coding)):
+After `coding_enabled=True`, a write enters the coding store only when `messages` contain a tool trace: a `role="tool"` turn, or assistant `tool_calls`. That check is structural. JEV then decides whether the session is engineering work, and only then extracts `task` / `solution` / `files`.
+
+Putting the text of a few `.py` files into `add(content=...)` or a plain user message has no tool trace, so it stays chat memory. `search()` can find whatever was stored as facts. `search_coding` will not return it.
 
 ```python
 from dual_mem import SyncMemoryClient
@@ -77,7 +112,7 @@ with SyncMemoryClient(settings=Settings(coding_enabled=True)) as memory:
             {"role": "user", "content": "Fix intermittent sqlite3.OperationalError: database is locked under concurrent writes."},
             {
                 "role": "assistant",
-                "content": "Let me inspect how transactions are opened in the vector store.",
+                "content": "Let me inspect how transactions are opened.",
                 "tool_calls": [{"id": "t1", "name": "read_file", "arguments": {"path": "app/db.py"}}],
             },
             {
@@ -98,80 +133,30 @@ with SyncMemoryClient(settings=Settings(coding_enabled=True)) as memory:
         print(h["task"], "->", h["solution"], h["files"])
 ```
 
-### 3. Runnable examples (`examples/`)
+### Examples
 
-The [`examples/`](https://github.com/shibing624/dual-mem/tree/main/examples) directory contains end-to-end runnable scripts covering every major workflow:
+Two worth opening: [`examples/02_dual.py`](https://github.com/shibing624/dual-mem/blob/main/examples/02_dual.py) runs `digest()` and builds L3, and [`examples/06_coding_memory.py`](https://github.com/shibing624/dual-mem/blob/main/examples/06_coding_memory.py) writes a tool trace and calls `search_coding`. REST, CLI, and lifecycle scripts are in [`examples/`](https://github.com/shibing624/dual-mem/tree/main/examples). Async clients: [Quickstart](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md).
 
-| Script | What it covers | Command |
-|---|---|---|
-| [`examples/01_system1.py`](https://github.com/shibing624/dual-mem/blob/main/examples/01_system1.py) | Single-turn & multi-turn writes, version evolution chains, semantic search, history listing | `python examples/01_system1.py` |
-| [`examples/02_dual.py`](https://github.com/shibing624/dual-mem/blob/main/examples/02_dual.py) | `dual` mode writes + `digest()` for cross-evidence L3 schemas and proactive intentions | `python examples/02_dual.py` |
-| [`examples/03_rest_api.py`](https://github.com/shibing624/dual-mem/blob/main/examples/03_rest_api.py) | FastAPI `/v1/memories/...` CRUD, versioned updates and archiving | `python examples/03_rest_api.py` |
-| [`examples/04_cli.py`](https://github.com/shibing624/dual-mem/blob/main/examples/04_cli.py) | `dual-mem` CLI for adding, searching and querying raw conversations | `python examples/04_cli.py` |
-| [`examples/05_lifecycle.py`](https://github.com/shibing624/dual-mem/blob/main/examples/05_lifecycle.py) | `add_raw`, `distill`, `search_conversation`, `update` and `delete` lifecycle | `python examples/05_lifecycle.py` |
-| [`examples/06_coding_memory.py`](https://github.com/shibing624/dual-mem/blob/main/examples/06_coding_memory.py) | Coding memory with `coding_enabled=True`: tool-call dialogue ingestion and `search_coding` | `python examples/06_coding_memory.py` |
+## Features
 
-Building your own agent? See the [Quickstart](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md) and [Examples Guide](https://github.com/shibing624/dual-mem/blob/main/examples/README.md).
+**Memory**
 
-## MemHub: shared memory across your AI tools
+- **Versioned updates** — "lives in Shanghai → moving to Beijing" is an update. The old version stays as history. Answers use the latest.
+- **Separate layers** — raw words (L0), facts and intentions (L1), profile (L2), cross-evidence patterns (L3), retrieved as needed.
+- **A decision model guards writes** — new, duplicate, or update is judged by a lightweight model.
+- **The original words stay available** — raw conversation is kept alongside the organized memory.
 
-```text
-   Claude Code   Codex   Cursor   Hermes   Agentica
-        \          |        |        |       /
-         ─────────────  MemHub  ─────────────
-                         │
-           your personal memory (this machine / your server)
-```
+**Ways in**
 
-```bash
-pip install "dual-mem[all]"
-
-dual-mem hub install-service       # runs in the background, starts at login
-dual-mem hub install-host all      # connect every supported AI tool on this machine
-dual-mem hub scan --source all     # turn your past conversations into memory
-
-dual-mem hub recall "what technical choices have I made before"
-```
-
-- **Zero configuration**: tools discover the local memory service automatically — no URLs or keys to paste.
-- **Never in your way**: conversations are saved and acknowledged instantly; organizing happens in the background.
-- **Your history counts**: import existing sessions in one command, so it knows you from day one.
-- **Your data stays yours**: by default it lives only on your computer; you can also host it on your own server and connect several computers to the same memory.
-
-Supported today: **Claude Code, Codex, Cursor, Hermes, Agentica**. More tools are on the [Roadmap](#roadmap). See the [MemHub docs](https://github.com/shibing624/dual-mem/blob/main/docs/memhub.md).
-
-## Who it's for
-
-| You are… | dual-mem helps you… |
-|---|---|
-| **A heavy AI-tool user** | share your preferences, conventions and project context across tools with MemHub — stop repeating yourself |
-| **An agent / app developer** | add long-term memory to your product in three lines; integrate via SDK, REST, MCP or CLI |
-| **Building assistants or support bots** | remember each user's profile and how it changes, so answers get better over time |
-| **A researcher** | run head-to-head comparisons against mem0 and hy-memory out of the box |
-
-## Why it remembers better
-
-- **Updates instead of confusion**: every memory is versioned. "Lives in Shanghai → moving to Beijing" is an update; the old version is kept as history, and answers use the latest by default.
-- **Facts and profile organized separately**: what you said, explicit facts, and who you are live in separate layers and are retrieved as needed.
-- **A dedicated decision model guards writes**: a lightweight decision model judges "new, duplicate, or update" — steadier and cheaper than asking a large LLM.
-- **The original words are always there**: alongside organized memory, the raw conversation is kept so you can always check the source.
-
-Curious how it works? See the [developer docs](#developer-docs) below.
-
-## Ways to integrate
-
-| Option | Best for | One-liner |
-|---|---|---|
-| **Python SDK** | your own agent or app | `pip install dual-mem` |
-| **MemHub** | daily use across several AI tools | `dual-mem hub install-host all` |
-| **MCP** | Cursor, Claude Desktop and other MCP clients | `dual-mem-mcp` |
-| **REST API** | other languages or a standalone service | `dual-mem serve` |
-| **CLI** | scripts and debugging | `dual-mem add` / `dual-mem search` |
-| **Framework plugins** | Agentica, Claude Code hooks, Hermes, OpenClaw | see [Integrations](https://github.com/shibing624/dual-mem/blob/main/docs/integrations.md) |
+- **Python SDK** — `pip install dual-mem`
+- **MemHub** — `dual-mem hub install-host all`
+- **MCP / REST / CLI** — `dual-mem-mcp`, `dual-mem serve`, `dual-mem add` / `dual-mem search`
+- **Framework plugins** — Agentica, Claude Code hooks, Hermes, OpenClaw. See [Integrations](https://github.com/shibing624/dual-mem/blob/main/docs/integrations.md).
 
 ## Roadmap
 
-- [x] Layered, versioned memory: preference changes are traceable
+- [x] System 1 layered memory and version evolution
+- [x] dual / System 2: explicit `digest()` builds L3
 - [x] Dedicated decision model guarding writes
 - [x] MemHub: 5 AI tools share memory, history import, background organizing
 - [x] Single-instance server mode: several computers share one memory
@@ -188,24 +173,24 @@ Vote or request features in [Issues](https://github.com/shibing624/dual-mem/issu
 
 ## News
 
-- [2026/10/23] **v0.1.5**: Fixed Coding memory writes against real models. Extraction now returns a `{"candidates": [...]}` object so the default `llm_json_mode` keeps the payload; the coverage hard gate is gone; one batch can supersede the same head; JEV only sees heads inside the draft's version boundary; concurrent writes for one user serialize per scope. The quickstart now has a Coding memory section, and `examples/06_coding_memory.py` shows search returning only the current solution after an update.
-- [2026/10/23] **v0.1.4**: Added MemHub local single-Core cross-tool memory hub (incremental session import for Claude Code / Codex / Cursor / Hermes / Agentica, durable background write queue, login service, and SSH/Tailscale tunnel attach); upgraded System 2 v3 clustered cognition and version-bridge recall; added Coding memory runnable demo and removed zero-gain settings; ranked #1 head-to-head on LoCoMo (74.7), LongMemEval (91.7), and PersonaMem-v2 (50.0).
-- [2026/10/15] **v0.1.3**: Redesigned around four canonical layers (`L0_RAW` / `L1_FACT` / `L2_PROFILE` / `L3_DERIVED`) and target-first JEV write decisions with linked version history; added native integrations for Agentica / Claude Code / Hermes / OpenClaw and the Coding memory subsystem (incompatible storage schema; use a new `storage_dir`).
+- [2026/10/23] **v0.1.5**: Fixed Coding memory writes against real models. Extraction now returns a `{"candidates": [...]}` object so the default `llm_json_mode` keeps the payload; the coverage hard gate is gone; one batch can supersede the same head; JEV only sees heads inside the draft's version boundary; concurrent writes for one user serialize per scope. The quickstart now has a Coding memory section, and `examples/06_coding_memory.py` shows search returning only the current solution after an update. See [Release-v0.1.5](https://github.com/shibing624/dual-mem/releases/tag/v0.1.5).
+- [2026/10/23] **v0.1.4**: Added MemHub local single-Core cross-tool memory hub (incremental session import for Claude Code / Codex / Cursor / Hermes / Agentica, durable background write queue, login service, and SSH/Tailscale tunnel attach); upgraded System 2 v3 clustered cognition and version-bridge recall; added Coding memory runnable demo and removed zero-gain settings; ranked #1 head-to-head on LoCoMo (74.7), LongMemEval (91.7), and PersonaMem-v2 (50.0). See [Release-v0.1.4](https://github.com/shibing624/dual-mem/releases/tag/v0.1.4).
+- [2026/10/15] **v0.1.3**: Redesigned around four canonical layers (`L0_RAW` / `L1_FACT` / `L2_PROFILE` / `L3_DERIVED`) and target-first JEV write decisions with linked version history; added native integrations for Agentica / Claude Code / Hermes / OpenClaw and the Coding memory subsystem (incompatible storage schema; use a new `storage_dir`). See [Release-v0.1.3](https://github.com/shibing624/dual-mem/releases/tag/v0.1.3).
 
 <details>
 <summary>Earlier releases</summary>
 
-- [2026/06/20] **v0.1.2**: Added `SyncMemoryClient` synchronous wrapper, automatic `~/.dual_mem/config.yaml` bootstrap on first run, unified REST / MCP / CLI contracts, and the online documentation site.
-- [2026/06/19] **v0.1.1**: Released dual-system layered memory SDK with hybrid retrieval (semantic + BM25 + RRF) and CLI / REST / MCP interfaces.
+- [2026/06/20] **v0.1.2**: Added `SyncMemoryClient` synchronous wrapper, automatic `~/.dual_mem/config.yaml` bootstrap on first run, unified REST / MCP / CLI contracts, and the online documentation site. See [Release-v0.1.2](https://github.com/shibing624/dual-mem/releases/tag/v0.1.2).
+- [2026/06/19] **v0.1.1**: Released dual-system layered memory SDK with hybrid retrieval (semantic + BM25 + RRF) and CLI / REST / MCP interfaces. See [Release-v0.1.1](https://github.com/shibing624/dual-mem/releases/tag/v0.1.1).
 - [2026/06/18] **v0.1.0**: First open-source release.
 
 </details>
 
 Full history in the [CHANGELOG](https://github.com/shibing624/dual-mem/blob/main/CHANGELOG.md).
 
-## Developer docs
+## Docs
 
-Online docs: **[https://shibing624.github.io/dual-mem](https://shibing624.github.io/dual-mem)** · Local preview: `pip install -r requirements-docs.txt && mkdocs serve`
+Full documentation: **[https://shibing624.github.io/dual-mem](https://shibing624.github.io/dual-mem)**
 
 | Doc | Contents |
 |---|---|
@@ -220,21 +205,45 @@ Online docs: **[https://shibing624.github.io/dual-mem](https://shibing624.github
 | [Benchmarks](https://github.com/shibing624/dual-mem/blob/main/docs/benchmarks.md) | protocol, question sets, reproduction, breakdowns |
 | [Examples](https://github.com/shibing624/dual-mem/blob/main/examples/README.md) | 6 runnable end-to-end example scripts |
 
-## Community & Support
+Local preview: `pip install -r requirements-docs.txt && mkdocs serve`
+
+## Community & support
+
+> If dual-mem helps, a ⭐ star helps more people find it.
 
 - **GitHub Issues** — [open an issue](https://github.com/shibing624/dual-mem/issues)
-- **WeChat group** — add WeChat ID `xuming624` with the note "llm" to join
+- **WeChat group** — add `xuming624`, note "llm"
 
-<img src="https://github.com/shibing624/agentica/blob/main/docs/assets/wechat.jpeg" width="200" />
+<img src="https://github.com/shibing624/agentica/blob/main/docs/assets/wechat.jpeg" width="200" alt="WeChat group QR" />
 
 ## Citation
 
-If you use dual-mem in your research, please cite:
+If you use dual-mem in research, please cite:
 
 > Xu, M. (2026). dual-mem: Dual-System Layered Memory SDK for LLM Applications. GitHub. https://github.com/shibing624/dual-mem
 
-## License · Contributing · Acknowledgements
+```bibtex
+@misc{xu2026dualmem,
+  author    = {Xu, Ming},
+  title     = {dual-mem: Dual-System Layered Memory SDK for LLM Applications},
+  year      = {2026},
+  publisher = {GitHub},
+  url       = {https://github.com/shibing624/dual-mem}
+}
+```
 
-[Apache License 2.0](https://github.com/shibing624/dual-mem/blob/main/LICENSE) · Contributions welcome, see [CONTRIBUTING.md](https://github.com/shibing624/dual-mem/blob/main/CONTRIBUTING.md)
+## License
 
-Thanks to [Chroma](https://github.com/chroma-core/chroma), [Kuzu](https://github.com/kuzudb/kuzu), [FastAPI](https://github.com/tiangolo/fastapi), [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) and [mem0](https://github.com/mem0ai/mem0).
+[Apache License 2.0](https://github.com/shibing624/dual-mem/blob/main/LICENSE)
+
+## Contributing
+
+Contributions welcome. See [CONTRIBUTING.md](https://github.com/shibing624/dual-mem/blob/main/CONTRIBUTING.md).
+
+## Acknowledgements
+
+- [Chroma](https://github.com/chroma-core/chroma)
+- [Kuzu](https://github.com/kuzudb/kuzu)
+- [FastAPI](https://github.com/tiangolo/fastapi)
+- [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
+- [mem0](https://github.com/mem0ai/mem0)

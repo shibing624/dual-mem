@@ -1,7 +1,7 @@
 """Demo 4 — CLI：subprocess 调用 `python -m dual_mem.cli.main`。
 
 临时配置只保留 Settings 认识的键，并改 mode 和 storage_dir。
-已删除的旧键不会带进去。没有 jev_api_key 时沿用 VENUS_TOKEN。
+已删除的旧键不会带进去。JEV 凭据来自配置或 DUAL_MEM_JEV_API_KEY。
 
 环境要求：jev_*、llm_*、embed_*。
 

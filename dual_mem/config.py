@@ -152,7 +152,7 @@ class Settings(BaseSettings):
     # Optional full serialization; default overlaps model I/O and validates scope CAS.
     write_serialize_per_user: bool = False
 
-    # Typed decision service (official TypeSafe or Venus-compatible endpoint).
+    # Typed decision service. Default endpoint is the public TypeSafe System One API.
     jev_endpoint: str = "https://api.typesafe.ai/v1/systemone"
     jev_api_key: str = ""
     jev_model: str = "jev-1.13.0"

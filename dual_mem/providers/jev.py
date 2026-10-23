@@ -1,4 +1,4 @@
-"""Typed TypeSafe System One client, also usable through the Venus gateway.
+"""Typed TypeSafe System One client.
 
 Jev evaluates questions; it does not generate memory content. Requests share one
 state across independently evaluated questions. A client-wide semaphore bounds

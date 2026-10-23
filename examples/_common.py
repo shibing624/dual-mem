@@ -2,7 +2,7 @@
 
 配置从 ~/.dual_mem/config.yaml 读取，只保留 Settings 认识的键，再覆盖 mode 和
 storage_dir。已删除的旧键（例如 system2_trigger_mode）不会进入 Settings。
-yaml 里没有 jev_api_key 时，用环境变量 VENUS_TOKEN，并把 endpoint 指到 Venus。
+JEV 凭据用 yaml 的 jev_api_key，或环境变量 DUAL_MEM_JEV_API_KEY / DUAL_MEM_JEV_ENDPOINT。
 """
 import os
 import shutil
@@ -12,8 +12,6 @@ import yaml
 
 from dual_mem.config import DEFAULT_CONFIG_PATH, Settings, config_path
 from dual_mem.sdk_models import MemoryItem, SearchMemories, WriteResult
-
-VENUS_JEV_ENDPOINT = "http://v2.open.venus.oa.com/llmproxy/v1/systemone"
 
 EXAMPLES_DIR = Path(__file__).resolve().parent
 DATA_ROOT = EXAMPLES_DIR / ".data"
@@ -47,11 +45,6 @@ def example_settings(mode: str, name: str, **overrides: object) -> Settings:
         encoding="utf-8",
     )
     os.environ["DUAL_MEM_CONFIG_FILE"] = str(tmp_cfg)
-    if not cfg.get("jev_api_key") and not os.environ.get("DUAL_MEM_JEV_API_KEY"):
-        token = os.environ.get("VENUS_TOKEN", "")
-        if token:
-            os.environ["DUAL_MEM_JEV_API_KEY"] = token
-            os.environ["DUAL_MEM_JEV_ENDPOINT"] = VENUS_JEV_ENDPOINT
     return Settings()
 
 
