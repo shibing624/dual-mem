@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.1.5] — 2026-10-23
+
 - **Coding 记忆修复（真实模型下此前无法写入）**：
   - 抽取输出改为 `{"candidates": [...]}` 对象。原先要求顶层 JSON 数组，但默认 `llm_json_mode=True` 只允许对象，`chat_json` 会把数组丢成 `{}`，导致任何真实 LLM 下抽取都报 `coding extraction requires a JSON array`。prompt 同时写明各字段类型（模型曾把 `boundary_envs` 输出成数组）。
   - 删除 coverage 硬门槛，与 chat 路径一致：JEV 判 `MISSED` 不再作废整次写入；空抽取直接 RAW_ONLY，不调 JEV。

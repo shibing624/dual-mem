@@ -22,7 +22,7 @@ from dual_mem.errors import (
 )
 from dual_mem.sync_client import SyncMemoryClient
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 # Library convention: install a NullHandler on the package logger so the SDK is silent
 # by default. The host application is responsible for configuring handlers.
