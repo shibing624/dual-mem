@@ -1,215 +1,180 @@
 [**🇨🇳中文**](https://github.com/shibing624/dual-mem/blob/main/README.md) | [**🌐English**](https://github.com/shibing624/dual-mem/blob/main/README_EN.md)
 
-# dual-mem: Dual-System Layered Memory SDK
+<div align="center">
+
+# dual-mem
+
+**All your agents. One Memory.**
+
+让 AI 真正记住你——偏好变了它知道，换个工具它也知道。
+
 [![PyPI version](https://badge.fury.io/py/dual-mem.svg)](https://badge.fury.io/py/dual-mem)
 [![License Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![python_version](https://img.shields.io/badge/Python-3.11%2B-green.svg)](pyproject.toml)
 [![GitHub issues](https://img.shields.io/github/issues/shibing624/dual-mem.svg)](https://github.com/shibing624/dual-mem/issues)
 [![Wechat Group](https://img.shields.io/badge/wechat-group-green.svg?logo=wechat)](#社区与支持)
 
-**dual-mem** 让 Agent **真正记住用户**——不是堆聊天记录，而是像人一样：**先快速记下今天说了什么，再慢慢整理成用户画像、习惯和未来打算**。分层存储、偏好会变就更新、检索时自动带出相关记忆。通过 **SDK / REST / MCP / CLI / Skill** 即插即用。
+</div>
 
-## JEV 四层记忆架构
+---
 
-`system1` 与 `dual` 的每次写入共享一个流程：**保留 L0 原文 → 生成候选 → JEV 批量裁决 → 追加版本并链接历史**。`dual` 额外在显式 `digest()` 中生成跨证据记忆。
+你已经告诉 AI 三次"我现在不吃辣了"，它还在推荐川菜馆。
+在 Cursor 里交代过的代码规范，Codex 并不知道；在 Claude Code 里定下的技术选型，换到 Hermes 又要从头讲一遍。
 
-| 层 | 保存内容 |
-| --- | --- |
-| L0_RAW | 原始来源证据 |
-| L1_FACT | 显式事实、独立事件、明确意图 |
-| L2_PROFILE | 用户身份、状态、画像维度 |
-| L3_DERIVED | 跨证据模式、推导、摘要 |
+**dual-mem 解决这两件事：**
 
-JEV 判断 `ADD / DELETE / SKIP` 及 `OVERRIDE / MERGE / SUPPLEMENT / TEMPORAL / NEGATE / CONFLICT`；生成模型只提供候选、合并文本和推导文本。正常写入一次生成、一次 JEV，多个问题共享 state，HTTP 请求默认并行 4。
+- 🧠 **记得准**：不是堆聊天记录，而是像人一样整理——事实、画像、习惯分开存；你改了主意，它更新而不是混淆。
+- 🔗 **记得通**：MemHub 让你常用的 AI 工具共享同一份个人记忆。记忆是你的长期资产，不被任何单一工具锁定——每次开口，都从懂你开始。
 
-北京→上海→北京是对当前状态的更新；不会因为历史曾出现北京而跳过。相似度仅用于读侧检索，novelty 与 weak_candidate_score 不参与写入。所有 reconcile 保留原文与版本，通过 `is_latest` 区分当前表示。
+## 效果：同场对比，全面领先
 
-本分支为 SDK 破坏性设计迁移：`update()` 返回新版本 ID，`delete()` 归档；默认读取 latest。旧层名、旧存储自动迁移及旧控制键兼容已删除；配置只接受规范平铺键。默认数据目录是 `./.dual_mem_v4`，旧的 `.dual_mem_data` 不再使用、也不迁移。使用前配置 `jev_api_key`、`llm_api_key`、`embed_api_key`，或注入三个 provider。
+同一个模型（Qwen3.8-27B）负责抽取、作答与评分，同一套 embedding、同一批题目——**只换记忆系统**：
 
-[完整设计与迁移](docs/jev-memory-design.md) · `docs/design/jev-memory-flow.html`（本地流程页，不提交） · [层定义](docs/memory_layers.md)
+| 记忆系统 | LoCoMo<br>(308 题) | LongMemEval<br>(24 题) | PersonaMem-v2<br>(476 题) |
+|---|:---:|:---:|:---:|
+| **dual-mem** | **74.7** | **91.7** | **50.0** |
+| hy-memory 2.0.4 | 66.6 | 70.8 | 43.5 |
+| mem0 | 65.6 | 83.3 | 47.9 |
 
-## 为什么选 dual-mem
+- **LoCoMo** 长对话问答：比 hy-memory 高 **8.1** 分、比 mem0 高 **9.1** 分（配对检验均显著，p < 0.02）；时间类问题领先最多（78 vs 61 vs 22）。
+- **LongMemEval** 跨会话记忆：24 题答对 22 题，hy-memory 17 题，mem0 20 题。
+- **PersonaMem-v2** 个性化推荐：显著优于 hy-memory（p = 0.007），比 mem0 高 2.1 分。
+- **更快**：每段长对话写入耗时约为 hy-memory 的 **1/5**（503 秒 vs 2485 秒）。
 
-| | |
-|---|---|
-| **开箱即用** | `SyncMemoryClient` 三行写入 + 搜索；配置首次启动自动生成 |
-| **Agent 友好** | 多轮 `messages` 一次写入；与 Agentica 等框架对接见 [Quickstart](docs/getting-started/quickstart.md) |
-| **会进化** | 偏好更新走演化链，不是粗暴覆盖 |
-| **五种接入** | 同一套 `MemoryClient`，按需装 REST / MCP / CLI |
+> 评测协议（与 Mem0 / EverMemOS 公开的 LoCoMo 评测口径一致）、复现命令和题型细分见 [评测说明](docs/benchmarks.md)。
 
-## 🔥 News
-
-- [2026/10/15] **v0.1.3**：JEV 四层记忆与 target-first 裁决；`update` 返回新 id，`delete` 归档。旧数据目录不能打开，需换新的 `storage_dir`。一并纳入生态集成与实验性 coding。
-- [2026/06/20] **v0.1.2**：MemoryOperations 统一 REST/MCP；SyncMemoryClient；CLI `messages`；post-extract embed 合并；MCP 启动修复与文档。
-- [2026/06/19] **v0.1.1**：依赖拆分为 `[api]` / `[cli]` / `[mcp]` extras；默认 `hybrid` 读路径。
-- [2026/06/18] **v0.1.0**：首版开源 — system1 / dual 两档、演化链、REST `/v1/memories/` 契约、MCP 工具集。
-
-## 架构一览
-
-```
-  你的 Agent / 应用
-        │  SDK · REST · MCP · CLI · Skill
-        ▼
-   MemoryClient（写入 System1 / 检索 / 演化链）
-        │
-   向量 + 图 + 本地存储
-```
-
-实现细节（JEV 写入裁决、Reconcile、混合检索管线等）见 [架构文档](docs/architecture.md) · [在线文档](https://shibing624.github.io/dual-mem/architecture/)。
-
-## 安装
-
-需要 Python ≥ 3.11。
+## 三分钟上手
 
 ```bash
-pip install dual-mem              # 核心 SDK
-pip install dual-mem[all]         # + REST / CLI / MCP
+pip install dual-mem
 ```
 
-开发安装：
-
-```bash
-git clone https://github.com/shibing624/dual-mem.git
-cd dual-mem
-pip install -e ".[dev]"
-```
-
-| Extra | 依赖 | 用途 |
-|---|---|---|
-| `api` | fastapi, uvicorn | `dual-mem serve`、REST API |
-| `cli` | typer | `dual-mem add/search/...` |
-| `mcp` | mcp | `dual-mem-mcp`、Cursor MCP |
-| `agentica` | agentica | agentica 框架记忆集成 |
-| `all` | api + cli + mcp | REST / CLI / MCP 一次装齐 |
-
-## 快速开始
-
-脚本 / 同步应用（推荐入门）：
+首次运行会生成 `~/.dual_mem/config.yaml`，填入模型服务的 API key 即可（任意 OpenAI 兼容端点）。
 
 ```python
 from dual_mem import SyncMemoryClient
 
-with SyncMemoryClient(mode="system1", storage_dir="./.dual_mem_v4") as client:
-    client.add(
-        content="我最爱的编程语言是 Java，已经用了5年。",
-        user_id="alice",
-    )
-    res = client.search(
-        query="用户的编程语言偏好",
-        user_id="alice",
-    )
-    for m in res.memories.profile:
+with SyncMemoryClient() as memory:
+    memory.add(content="我住在上海，最近开始不吃辣了。", user_id="alice")
+    memory.add(content="下个月我要搬去北京工作。", user_id="alice")
+
+    res = memory.search(query="给 alice 推荐一家餐厅", user_id="alice")
+    for m in res.memories.profile + res.memories.normal:
         print(m.content)
 ```
 
-FastAPI / asyncio Agent 用异步客户端（同一内核，可 `await`）：
+它会记住 alice 不吃辣、即将搬去北京——而且知道"上海"已经是过去时。
 
-```python
-import asyncio
-from dual_mem import MemoryClient
+想在自己的 Agent 里用？异步客户端、多轮对话写入和 Agent 集成写法见 [快速开始](docs/getting-started/quickstart.md)。
 
+## MemHub：你的 AI 工具共享一份记忆
 
-async def main():
-    client = MemoryClient(mode="system1", storage_dir="./.dual_mem_v4")
-    await client.add(content="...", user_id="alice")
-    await client.aclose()
-
-
-asyncio.run(main())
+```text
+   Claude Code   Codex   Cursor   Hermes   Agentica
+        \          |        |        |       /
+         ─────────────  MemHub  ─────────────
+                         │
+                你的个人记忆（本机 / 你的云主机）
 ```
 
-配置位于 `~/.dual_mem/config.yaml`（**首次启动自动创建**）。**JEV、生成 LLM、Embedding 三套服务均需配置或注入**。
+```bash
+pip install "dual-mem[all]"
 
-→ 参数详解、多轮对话、`aclose()`、Agent 集成最佳实践见 **[Quickstart 文档](docs/getting-started/quickstart.md)**（在线：[Quickstart](https://shibing624.github.io/dual-mem/getting-started/quickstart/)）。
+dual-mem hub install-service       # 后台常驻，开机自启
+dual-mem hub install-host all      # 一键接入本机已安装的 AI 工具
+dual-mem hub scan --source all     # 把过去的对话也变成记忆
 
-## 功能特性
+dual-mem hub recall "我之前做过哪些技术选择"
+```
 
-- **四个阶段层 + 演化链** — `L0_RAW` 到事实、画像和 `L3_DERIVED`，偏好变更可追溯
-- **System1 短期记忆** — 写入即结构化；由 JEV 决定写入动作与关系
-- **System2 深度记忆**（dual）— 在明确业务边界调用 `digest()` 归纳 L3_DERIVED
-- **混合检索** — 语义 + 关键词；画像 / 主动 / 常规三路召回
-- **同步 & 异步 SDK** — `SyncMemoryClient` 给脚本；`MemoryClient` 给 FastAPI / Agent
-- **OpenAI 兼容** — 任意 LLM / Embedding 端点
-- **单产品默认** — 省略 `app_id` 时用 `default_app_id`（默认 `"default"`）；`user_id` 为主隔离键
+- **零配置**：工具自动发现本机记忆服务，不用填地址和密钥。
+- **不打断你**：对话先存下来立刻返回，整理在后台进行，不拖慢任何工具。
+- **历史不浪费**：已有的会话记录一键导入，第一天就"懂你"。
+- **数据归你**：默认只存在你的电脑上；也可以放到你自己的云主机，多台电脑连同一份记忆。
 
-## 两档模式
+当前已支持 **Claude Code、Codex、Cursor、Hermes、Agentica**，更多工具见 [Roadmap](#roadmap)。详见 [MemHub 文档](docs/memhub.md)。
 
-| | **system1**（默认） | **dual** |
+## 适合谁用
+
+| 你是… | dual-mem 帮你… |
+|---|---|
+| **重度 AI 工具用户** | 用 MemHub 让各个 AI 工具共享你的偏好、规范和项目背景，不再重复交代 |
+| **Agent / 应用开发者** | 三行代码给产品加上长期记忆；SDK、REST、MCP、CLI 任选接入 |
+| **个人助手 / 客服产品** | 记住每位用户的画像与变化，回答越用越贴心 |
+| **研究者** | 同场对比 mem0、hy-memory 的评测工具开箱即用 |
+
+## 为什么记得更准
+
+- **偏好变了会更新，而不是混淆**：每条记忆都有版本，"住上海 → 搬北京"是一次更新，旧版本留作历史，回答默认用最新的。
+- **事实与画像分开整理**：说过的话、明确的事实、你是什么样的人，各存一层，按需取用。
+- **专用决策模型把关**：写入时由一个轻量决策模型判断"新信息、重复，还是更新"，比让大模型自己判断更稳、更便宜。
+- **原话永远可查**：整理过的记忆之外，原始对话始终保留，随时可以核对出处。
+
+想了解实现原理？见 [开发者文档](#开发者文档)。
+
+## 接入方式
+
+| 方式 | 适合 | 一句话 |
 |---|---|---|
-| 短期记忆 | ✓ | ✓ |
-| 深度记忆 | — | ✓（显式 `digest()` 巩固） |
-| 适合 | 个人助手、客服、快速接入 | 需要行为画像、意图推断的深度场景 |
-| 图关联 | 关 | 开（记忆之间可关联） |
+| **Python SDK** | 自己写 Agent / 应用 | `pip install dual-mem` |
+| **MemHub** | 日常使用多个 AI 工具 | `dual-mem hub install-host all` |
+| **MCP** | Cursor、Claude Desktop 等支持 MCP 的工具 | `dual-mem-mcp` |
+| **REST API** | 其他语言或独立服务 | `dual-mem serve` |
+| **CLI** | 脚本、调试 | `dual-mem add` / `dual-mem search` |
+| **框架插件** | Agentica、Claude Code Hook、Hermes、OpenClaw | 见 [集成文档](docs/integrations.md) |
 
-## REST / MCP / CLI
+## Roadmap
 
-```bash
-pip install dual-mem[all]
+**已完成**
+- [x] 分层记忆 + 版本演化：偏好更新可追溯
+- [x] 专用决策模型把关写入
+- [x] MemHub：5 个 AI 工具共享记忆、历史会话导入、后台整理
+- [x] 云主机单实例：多台电脑连同一份记忆
+- [x] LoCoMo / LongMemEval / PersonaMem-v2 同场评测领先
 
-dual-mem serve --host 0.0.0.0 --port 8000          # REST
-dual-mem-mcp                                          # MCP stdio
-dual-mem-mcp --transport streamable-http --port 8765 # MCP HTTP /mcp
-dual-mem add --content "用户喜欢咖啡" --app-id default --user-id u1
-dual-mem search "饮品偏好" --app-id default --user-id u1
-dual-mem digest   # dual：生成 L3_DERIVED
-```
+**进行中**
+- [ ] MemHub 接入更多工具：OpenCode、WorkBuddy、Gemini CLI、Windsurf、Trae 等，目标 10+ 种
+- [ ] 云端 HTTP MCP：远程 Agent 直接连接托管记忆
+- [ ] 多跳推理类问题的检索增强（LoCoMo multi-hop 仍有提升空间）
 
-REST 契约：`POST /v1/memories/`、`POST /v1/memories/search`、`GET|DELETE /v1/memories/{id}` 等。MCP 分 **本地 uvx**（已实现）与 **云端 HTTP**（REST 底座已就绪，HTTP MCP 待封装）两条路径，详见 [MCP 接入](docs/mcp_integration.md)。
+**规划中**
+- [ ] 多设备记忆同步：离线可用、联网自动合并
+- [ ] 记忆可视化管理：查看、编辑、删除你的记忆
+- [ ] 隐私分级：敏感记忆只留本机
+- [ ] 补充更多公开评测（CodeMemoryBench 等，待数据公开）
 
-## 生态集成
+欢迎在 [Issues](https://github.com/shibing624/dual-mem/issues) 投票或提需求。
 
-`dual_mem.integrations` 把同一个 `MemoryClient` 适配到主流 Agent 框架与协议，共享统一的记忆注入块格式化（`<relevant-memories>`）：
+## 🔥 News
 
-| 后端 | 接入 | 说明 |
-|------|------|------|
-| **agentica** | `dual-mem[agentica]` | `DualMemMemory` / `DualMemWorkspace`，直接 `Agent(workspace=...)` |
-| **Claude Code** | `dual-mem-hook search` / `ingest` | UserPromptSubmit / Stop hook，自动注入与归档 |
-| **Hermes** | `DualMemHermesProvider` | MemoryProvider 插件（prefetch + `sync_turn`） |
-| **OpenClaw** | `DualMemOpenClawProvider` | 与 Hermes 同源契约 |
-| **MCP** | `dual_mem.integrations.mcp` | FastMCP server（`dual-mem-mcp`） |
+- [2026/10/23] LoCoMo 同场评测：dual-mem 74.7，领先 hy-memory 与 mem0 8 分以上。
+- [2026/10/22] 精简配置：去掉评测无收益的开关，默认即最佳设置。
+- [2026/10/15] **v0.1.3**：新一代分层记忆与决策模型写入（存储格式不兼容旧版，需新目录）。
+- [2026/06/18] **v0.1.0**：首版开源。
 
-```bash
-pip install dual-mem[agentica]   # agentica 框架
-dual-mem-hook search              # Claude Code: 搜记忆注入 additionalContext
-dual-mem-hook ingest              # Claude Code: 提取对话写入记忆
-```
+完整变更见 [CHANGELOG](CHANGELOG.md)。
 
-> 另有 **coding 记忆子系统**（`dual_mem.coding`，`coding_enabled=true`）针对含工具调用的工程对话。它走同一套 JEV 动作，默认关闭。
+## 开发者文档
 
-## 示例
+<details>
+<summary>展开：架构、配置与原理（可选阅读）</summary>
 
-查看 [examples/](https://github.com/shibing624/dual-mem/tree/main/examples) 获取完整示例，涵盖：
+| 文档 | 内容 |
+|---|---|
+| [安装与配置](docs/getting-started/installation.md) | extras、配置文件、凭证与优先级 |
+| [快速开始](docs/getting-started/quickstart.md) | 同步 / 异步客户端、多轮写入、Agent 集成 |
+| [架构说明](docs/architecture.md) | SDK 与各接入层的关系、存储 |
+| [四层记忆](docs/memory_layers.md) | L0 原文 / L1 事实 / L2 画像 / L3 推导 |
+| [写入决策设计](docs/jev-memory-design.md) | 决策模型动作与关系、版本链、并发 |
+| [MemHub](docs/memhub.md) | Core 服务、宿主接入、云端单实例 |
+| [MCP / REST](docs/mcp_integration.md) | 工具 ↔ HTTP ↔ SDK 对照 |
+| [生态集成](docs/integrations.md) | Agentica / Claude Code / Hermes / OpenClaw |
+| [评测说明](docs/benchmarks.md) | 协议、题集、复现与结果细分 |
+| [示例](examples/README.md) | 可运行的完整示例 |
 
-| 类别 | 内容 |
-|------|------|
-| **SDK 基础** | 短期记忆写入、演化链、多轮 `messages` |
-| **深度记忆** | dual 模式、显式 `digest()` 巩固 |
-| **REST** | FastAPI TestClient 走 `/v1/memories/` 全契约 |
-| **生命周期** | `add_raw` / `distill`、原文检索、`update` 新 id、归档删除 |
-| **CLI** | `dual-mem` 子命令 add / search / list / delete |
+在线文档：**https://shibing624.github.io/dual-mem** · 本地预览：`pip install -r requirements-docs.txt && mkdocs serve`
 
-[→ 查看完整示例目录](https://github.com/shibing624/dual-mem/blob/main/examples/README.md)
-
-```bash
-python examples/01_system1.py
-python examples/02_dual.py
-python examples/03_rest_api.py
-python examples/04_cli.py
-python examples/05_lifecycle.py
-```
-
-> 示例需真实 JEV、LLM 与 Embedding，会产生少量费用。
-
-## 文档
-
-完整使用文档：**https://shibing624.github.io/dual-mem**
-
-本地预览：
-
-```bash
-pip install -r requirements-docs.txt
-mkdocs serve
-```
+</details>
 
 ## 社区与支持
 
@@ -224,18 +189,8 @@ mkdocs serve
 
 > Xu, M. (2026). dual-mem: Dual-System Layered Memory SDK for LLM Applications. GitHub. https://github.com/shibing624/dual-mem
 
-## 许可证
+## 许可证 · 贡献 · 致谢
 
-[Apache License 2.0](LICENSE)
+[Apache License 2.0](LICENSE) · 欢迎贡献，见 [CONTRIBUTING.md](CONTRIBUTING.md)
 
-## 贡献
-
-欢迎贡献！请查看 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
-## 致谢
-
-- [chromadb/chroma](https://github.com/chroma-core/chroma) — 向量存储
-- [kuzudb/kuzu](https://github.com/kuzudb/kuzu) — 图存储
-- [tiangolo/fastapi](https://github.com/tiangolo/fastapi) — REST 层
-- [modelcontextprotocol/python-sdk](https://github.com/modelcontextprotocol/python-sdk) — MCP 集成
-- [mem0ai/mem0](https://github.com/mem0ai/mem0) — 记忆 SDK 生态
+感谢 [Chroma](https://github.com/chroma-core/chroma)、[Kuzu](https://github.com/kuzudb/kuzu)、[FastAPI](https://github.com/tiangolo/fastapi)、[MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)、[mem0](https://github.com/mem0ai/mem0)。

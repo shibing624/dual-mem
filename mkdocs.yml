@@ -25,16 +25,18 @@ theme:
 
 nav:
   - Home: index.md
-  - Introduction:
-      - Architecture: architecture.md
-      - Memory layers: memory_layers.md
-      - JEV decisions: jev-memory-design.md
   - Getting Started:
       - Installation: getting-started/installation.md
       - Quickstart: getting-started/quickstart.md
-  - Integration:
-      - MCP: mcp_integration.md
-      - MemHub: memhub.md
+  - MemHub: memhub.md
+  - Integrations:
+      - Frameworks & tools: integrations.md
+      - MCP / REST: mcp_integration.md
+  - Benchmarks: benchmarks.md
+  - Developer guide (optional):
+      - Architecture: architecture.md
+      - Memory layers: memory_layers.md
+      - Write decisions: jev-memory-design.md
 
 markdown_extensions:
   - pymdownx.highlight:

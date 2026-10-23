@@ -1,32 +1,41 @@
 # dual-mem
 
-**dual-mem** 是面向 LLM 应用与 Agent 的分层记忆 SDK。`system1` 和 `dual` 共用同一条写入：保留 `L0_RAW` → 生成候选 → JEV 批量裁决 → 追加版本并链接历史。`dual` 只在显式 `digest()` 时再生成 `L3_DERIVED`。读侧是 hybrid 混合召回，默认只返回当前版本。
+**All your agents. One Memory.** 让 AI 真正记住你：偏好变了它知道，换个工具它也知道。
 
-## 核心能力
+- 🧠 **记得准**：像人一样整理记忆。事实、画像、习惯分开存；你改了主意，它会更新，不会混淆。
+- 🔗 **记得通**：[MemHub](memhub.md) 让 Claude Code、Codex、Cursor、Hermes、Agentica 共享同一份个人记忆。
+- 🏆 **同场领先**：同模型、同题集，LoCoMo 74.7，hy-memory 66.6，mem0 65.6，详见[评测](benchmarks.md)。
 
-| 能力 | 说明 |
-|------|------|
-| **四层** | `L0_RAW` 原文、`L1_FACT` 事实/事件/意图、`L2_PROFILE` 画像、`L3_DERIVED` 跨证据推导 |
-| **JEV 裁决** | 已知与更新分开。动作是 `ADD_*` / `SKIP` / `DELETE` / `RAW_ONLY`；关系是 `OVERRIDE` / `MERGE` / `SUPPLEMENT` / `TEMPORAL` / `NEGATE` / `CONFLICT` |
-| **演化链** | `supersedes` / `superseded_by`。`update` 返回新 id，`delete` 归档，历史用 `is_latest=false` 保留 |
-| **三路召回** | profile / proactive / normal。默认检索不返回 `L0_RAW`；核对原话用 `search_conversation` |
-| **多入口** | SDK / REST / MCP / CLI / Skill 共享 `MemoryClient` |
+## 从哪里开始
 
-## 快速链接
+| 我想… | 看这里 |
+|---|---|
+| 让我常用的 AI 工具共享记忆 | [MemHub](memhub.md) |
+| 给自己的 Agent / 应用加长期记忆 | [安装](getting-started/installation.md) → [快速开始](getting-started/quickstart.md) |
+| 接入 Agentica、Claude Code、Hermes 等框架 | [生态集成](integrations.md) |
+| 通过 MCP 或 REST 接入 | [MCP / REST](mcp_integration.md) |
+| 看效果对比 | [评测](benchmarks.md) |
 
-- [安装与配置](getting-started/installation.md)
-- [5 分钟上手](getting-started/quickstart.md)
-- [架构说明](architecture.md)
-- [四层记忆](memory_layers.md)
-- [JEV 决策与迁移](jev-memory-design.md)
-- [MCP 接入](mcp_integration.md)
-- [示例代码](https://github.com/shibing624/dual-mem/tree/main/examples)
-
-## 安装
+## 三行代码
 
 ```bash
 pip install dual-mem
-pip install dual-mem[all]   # + REST / CLI / MCP
 ```
 
-详见 [Installation](getting-started/installation.md)。
+```python
+from dual_mem import SyncMemoryClient
+
+with SyncMemoryClient() as memory:
+    memory.add(content="我住在上海，最近开始不吃辣了。", user_id="alice")
+    res = memory.search(query="给 alice 推荐一家餐厅", user_id="alice")
+```
+
+---
+
+## 开发者可选阅读
+
+想了解原理和实现细节，可以按这个顺序读：
+
+1. [架构说明](architecture.md)：SDK 与 CLI、REST、MCP、Skill 的关系，以及存储层
+2. [四层记忆](memory_layers.md)：L0 原文、L1 事实、L2 画像、L3 推导
+3. [写入决策设计](jev-memory-design.md)：决策模型的动作与关系、版本链、并发与恢复

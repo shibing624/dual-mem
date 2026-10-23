@@ -1,242 +1,196 @@
-> The SDK now uses to Jev decisions with four canonical layers: L0_RAW, L1_FACT, L2_PROFILE, L3_DERIVED. Both modes reconcile inline; dual adds explicit digest. Configure Jev credentials or inject `jev=`. `update` returns a new version ID and `delete` archives. Legacy layer aliases, nested configuration, deferred reconcile queues and automatic storage migrations are removed; use canonical flat settings. The default data directory is `./.dual_mem_v4`. An existing `.dual_mem_data` directory is left unused and is not migrated. See [the migration design](docs/jev-memory-design.md) and the local interactive flow at `docs/design/jev-memory-flow.html` (Git ignored). Historical release notes below describe earlier SDK versions.
-
 [**🇨🇳中文**](https://github.com/shibing624/dual-mem/blob/main/README.md) | [**🌐English**](https://github.com/shibing624/dual-mem/blob/main/README_EN.md)
 
-# dual-mem: Dual-System Layered Memory SDK
+<div align="center">
+
+# dual-mem
+
+**All your agents. One Memory.**
+
+AI that actually remembers you — it notices when your preferences change, and it still knows you when you switch tools.
+
 [![PyPI version](https://badge.fury.io/py/dual-mem.svg)](https://badge.fury.io/py/dual-mem)
 [![License Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![python_version](https://img.shields.io/badge/Python-3.11%2B-green.svg)](pyproject.toml)
 [![GitHub issues](https://img.shields.io/github/issues/shibing624/dual-mem.svg)](https://github.com/shibing624/dual-mem/issues)
 [![Wechat Group](https://img.shields.io/badge/wechat-group-green.svg?logo=wechat)](#community--support)
 
-**dual-mem** helps agents **actually remember users** — not by dumping chat logs, but like people do: **capture today’s conversation quickly, then consolidate it into profile, habits, and plans**. Layered storage, preference updates with history, and retrieval that surfaces what matters. Plug in via **SDK / REST / MCP / CLI / Skill**.
+</div>
 
-## Four memory layers and two modes
+---
 
-| Layer | Content |
-| --- | --- |
-| L0_RAW | Original source evidence |
-| L1_FACT | Explicit facts, events and intentions |
-| L2_PROFILE | Identity, profile and current state dimensions |
-| L3_DERIVED | Cross-evidence schemas, summaries and inferred intentions |
+You've told your assistant three times that you no longer eat spicy food, and it still recommends a Sichuan restaurant.
+The coding conventions you explained in Cursor are unknown to Codex; the stack you settled on in Claude Code has to be re-explained in Hermes.
 
-Both `system1` and `dual` preserve source → generate explicit candidates → batch JEV
-questions → append/link versions. JEV decides source support, durable value, known versus
-update, targets and six update types. A normal write uses one generation and one JEV
-request; MERGE alone adds lossless text generation and validation. `dual` adds explicit
-`digest()` with complete paged evidence coverage and validated L3 generation.
+**dual-mem fixes both:**
 
-All versions remain stored. `update()` returns a new ID; `delete()` archives.
-Similarity is for retrieval; there is no novelty or weak similarity write gate.
-Default JEV and digest concurrency is four. Configure JEV, generation and embedding
-providers; see [the full design](docs/jev-memory-design.md).
+- 🧠 **Remembers accurately** — instead of piling up chat logs, it organizes memory the way people do: facts, profile, and habits are kept apart, and when you change your mind it updates rather than getting confused.
+- 🔗 **Remembers everywhere** — MemHub lets the AI tools you use share one personal memory. Your memory is a long-term asset that no single tool owns — every conversation starts from knowing you.
 
-## Why dual-mem
+## Results: head-to-head, same setup
 
-| | |
-|---|---|
-| **Easy start** | `SyncMemoryClient`: write + search in a few lines; config auto-created on first run |
-| **Agent-ready** | Batch multi-turn `messages`; Agentica integration in [Quickstart](docs/getting-started/quickstart.md) |
-| **Evolving memory** | Preference updates via chains, not blind overwrite |
-| **Five entry points** | One `MemoryClient`; optional REST / MCP / CLI extras |
+The same model (Qwen3.8-27B) does extraction, answering and grading; same embeddings, same questions — **only the memory system changes**:
 
-## 🔥 News
+| Memory system | LoCoMo<br>(308 q) | LongMemEval<br>(24 q) | PersonaMem-v2<br>(476 q) |
+|---|:---:|:---:|:---:|
+| **dual-mem** | **74.7** | **91.7** | **50.0** |
+| hy-memory 2.0.4 | 66.6 | 70.8 | 43.5 |
+| mem0 | 65.6 | 83.3 | 47.9 |
 
-- [2026/10/15] **v0.1.3**: JEV four-layer memory and target-first decisions; `update` returns a new id and `delete` archives. Old data directories are rejected; use a new `storage_dir`. Ecosystem integrations and experimental coding are included.
-- [2026/06/20] **v0.1.2**: MemoryOperations for REST/MCP; SyncMemoryClient; CLI messages; post-extract embed batching; MCP bootstrap fixes and docs.
-- [2026/06/19] **v0.1.1**: Dependencies split into `[api]` / `[cli]` / `[mcp]` extras; hybrid reader V2 became the default.
-- [2026/06/18] **v0.1.0**: Initial release — system1 / dual modes, evolution chains, REST `/v1/memories/` contract, MCP tools.
+- **LoCoMo** (long conversations): **+8.1** over hy-memory and **+9.1** over mem0 (both significant in paired tests, p < 0.02). The biggest lead is on time-related questions (78 vs 61 vs 22).
+- **LongMemEval** (cross-session memory): 22 of 24 correct, vs 17 for hy-memory and 20 for mem0.
+- **PersonaMem-v2** (personalization): significantly better than hy-memory (p = 0.007), 2.1 points above mem0.
+- **Faster**: writing one long conversation takes about **1/5** of hy-memory's time (503 s vs 2485 s).
 
-## Architecture at a glance
+> Protocol (same LoCoMo setup as the public Mem0 / EverMemOS evaluations), reproduction commands and per-category results: [Benchmarks](docs/benchmarks.md).
 
-```
-  Your agent / app
-        │  SDK · REST · MCP · CLI · Skill
-        ▼
-   MemoryClient (System1 write / search / evolution chains)
-        │
-   Vector + graph + local storage
-```
-
-Implementation details (JEV write decisions, reconcile, hybrid retrieval, etc.): [architecture.md](docs/architecture.md) · [docs site](https://shibing624.github.io/dual-mem/architecture/).
-
-## Installation
-
-Requires Python ≥ 3.11.
+## Get started in 3 minutes
 
 ```bash
-pip install dual-mem              # core SDK
-pip install dual-mem[all]         # + REST / CLI / MCP
+pip install dual-mem
 ```
 
-Development install:
-
-```bash
-git clone https://github.com/shibing624/dual-mem.git
-cd dual-mem
-pip install -e ".[dev]"
-```
-
-| Extra | Dependencies | Use case |
-|---|---|---|
-| `api` | fastapi, uvicorn | `dual-mem serve`, REST API |
-| `cli` | typer | `dual-mem add/search/...` |
-| `mcp` | mcp | `dual-mem-mcp`, Cursor MCP |
-| `agentica` | agentica | agentica framework memory integration |
-| `all` | api + cli + mcp | REST / CLI / MCP in one shot |
-
-## Quick Start
-
-Scripts / sync apps (recommended):
+The first run creates `~/.dual_mem/config.yaml`; fill in API keys for your model services (any OpenAI-compatible endpoint).
 
 ```python
 from dual_mem import SyncMemoryClient
 
-with SyncMemoryClient(mode="system1", storage_dir="./.dual_mem_v4") as client:
-    client.add(
-        content="My favorite language is Java. I've used it for 5 years.",
-        user_id="alice",
-    )
-    res = client.search(
-        query="programming language preference",
-        user_id="alice",
-    )
-    for m in res.memories.profile:
+with SyncMemoryClient() as memory:
+    memory.add(content="I live in Shanghai and recently stopped eating spicy food.", user_id="alice")
+    memory.add(content="I'm moving to Beijing for work next month.", user_id="alice")
+
+    res = memory.search(query="recommend a restaurant for alice", user_id="alice")
+    for m in res.memories.profile + res.memories.normal:
         print(m.content)
 ```
 
-FastAPI / asyncio agents:
+It remembers that alice no longer eats spicy food and is about to move to Beijing — and it knows "Shanghai" is becoming the past.
 
-```python
-import asyncio
-from dual_mem import MemoryClient
+Building your own agent? See the [Quickstart](docs/getting-started/quickstart.md) for the async client, multi-turn writes and agent integration.
 
+## MemHub: one memory for all your AI tools
 
-async def main():
-    client = MemoryClient(mode="system1", storage_dir="./.dual_mem_v4")
-    await client.add(content="...", user_id="alice")
-    await client.aclose()
-
-
-asyncio.run(main())
+```text
+   Claude Code   Codex   Cursor   Hermes   Agentica
+        \          |        |        |       /
+         ─────────────  MemHub  ─────────────
+                         │
+           your personal memory (this machine / your server)
 ```
 
-Config lives at `~/.dual_mem/config.yaml` (**auto-created on first startup**). **Both LLM and embedding API keys are required.**
+```bash
+pip install "dual-mem[all]"
 
-→ Parameters, multi-turn `messages`, `aclose()`, and agent integration patterns: **[Quickstart](docs/getting-started/quickstart.md)** ([online](https://shibing624.github.io/dual-mem/getting-started/quickstart/)).
+dual-mem hub install-service       # runs in the background, starts at login
+dual-mem hub install-host all      # connect every supported AI tool on this machine
+dual-mem hub scan --source all     # turn your past conversations into memory
 
-## Features
+dual-mem hub recall "what technical choices have I made before"
+```
 
-- **Seven implemented layers + evolution chains** — from raw chat to patterns and intentions; preference history preserved
-- **System1 short-term memory** — structured on write; JEV decides actions and version relations
-- **System2 deep memory** (dual) — explicit `digest()` consolidates L3_DERIVED at a business boundary
-- **Hybrid retrieval** — semantic + keyword; profile / proactive / normal routes
-- **Sync & async SDK** — `SyncMemoryClient` for scripts; `MemoryClient` for FastAPI / agents
-- **OpenAI-compatible** — any LLM / embedding endpoint
-- **Single-product default** — omit `app_id` to use `default_app_id` (`"default"`); `user_id` is the primary isolation key
+- **Zero configuration**: tools discover the local memory service automatically — no URLs or keys to paste.
+- **Never in your way**: conversations are saved and acknowledged instantly; organizing happens in the background.
+- **Your history counts**: import existing sessions in one command, so it knows you from day one.
+- **Your data stays yours**: by default it lives only on your computer; you can also host it on your own server and connect several computers to the same memory.
 
-## Modes
+Supported today: **Claude Code, Codex, Cursor, Hermes, Agentica**. More tools are on the [Roadmap](#roadmap). See the [MemHub docs](docs/memhub.md).
 
-| | **system1** (default) | **dual** |
+## Who it's for
+
+| You are… | dual-mem helps you… |
+|---|---|
+| **A heavy AI-tool user** | share your preferences, conventions and project context across tools with MemHub — stop repeating yourself |
+| **An agent / app developer** | add long-term memory to your product in three lines; integrate via SDK, REST, MCP or CLI |
+| **Building assistants or support bots** | remember each user's profile and how it changes, so answers get better over time |
+| **A researcher** | run head-to-head comparisons against mem0 and hy-memory out of the box |
+
+## Why it remembers better
+
+- **Updates instead of confusion**: every memory is versioned. "Lives in Shanghai → moving to Beijing" is an update; the old version is kept as history, and answers use the latest by default.
+- **Facts and profile organized separately**: what you said, explicit facts, and who you are live in separate layers and are retrieved as needed.
+- **A dedicated decision model guards writes**: a lightweight decision model judges "new, duplicate, or update" — steadier and cheaper than asking a large LLM.
+- **The original words are always there**: alongside organized memory, the raw conversation is kept so you can always check the source.
+
+Curious how it works? See the [developer docs](#developer-docs).
+
+## Ways to integrate
+
+| Option | Best for | One-liner |
 |---|---|---|
-| Short-term memory | ✓ | ✓ |
-| Deep memory | — | ✓ (explicit `digest()` consolidation) |
-| Best for | Assistants, support bots, quick integration | Deeper user modeling, intentions, behavior patterns |
-| Graph links | off | on |
+| **Python SDK** | your own agent or app | `pip install dual-mem` |
+| **MemHub** | daily use across several AI tools | `dual-mem hub install-host all` |
+| **MCP** | Cursor, Claude Desktop and other MCP clients | `dual-mem-mcp` |
+| **REST API** | other languages or a standalone service | `dual-mem serve` |
+| **CLI** | scripts and debugging | `dual-mem add` / `dual-mem search` |
+| **Framework plugins** | Agentica, Claude Code hooks, Hermes, OpenClaw | see [Integrations](docs/integrations.md) |
 
-## REST / MCP / CLI
+## Roadmap
 
-```bash
-pip install dual-mem[all]
+**Done**
+- [x] Layered, versioned memory: preference changes are traceable
+- [x] Dedicated decision model guarding writes
+- [x] MemHub: 5 AI tools share memory, history import, background organizing
+- [x] Single-instance server mode: several computers share one memory
+- [x] Leads head-to-head on LoCoMo / LongMemEval / PersonaMem-v2
 
-dual-mem serve --host 0.0.0.0 --port 8000          # REST
-dual-mem-mcp                                          # MCP stdio
-dual-mem-mcp --transport streamable-http --port 8765 # MCP HTTP /mcp
-dual-mem add --content "User likes coffee" --app-id default --user-id u1
-dual-mem search "drink preference" --app-id default --user-id u1
-dual-mem digest   # dual: build L3_DERIVED
-```
+**In progress**
+- [ ] MemHub for more tools: OpenCode, WorkBuddy, Gemini CLI, Windsurf, Trae and others — 10+ in total
+- [ ] Cloud HTTP MCP: remote agents connect to hosted memory directly
+- [ ] Better retrieval for multi-hop questions (LoCoMo multi-hop still has headroom)
 
-REST contract: `POST /v1/memories/`, `POST /v1/memories/search`, `GET|DELETE /v1/memories/{id}`, etc. See [MCP integration](docs/mcp_integration.md).
+**Planned**
+- [ ] Multi-device sync: works offline, merges automatically when online
+- [ ] Visual memory management: view, edit and delete your memories
+- [ ] Privacy tiers: sensitive memories stay on this machine
+- [ ] More public benchmarks (CodeMemoryBench and others, once their data is released)
 
-## Ecosystem integrations
+Vote or request features in [Issues](https://github.com/shibing624/dual-mem/issues).
 
-`dual_mem.integrations` adapts the same `MemoryClient` to popular agent frameworks and protocols, sharing one memory-injection block format (`<relevant-memories>`):
+## 🔥 News
 
-| Backend | Entry point | Notes |
-|---------|-------------|-------|
-| **agentica** | `dual-mem[agentica]` | `DualMemMemory` / `DualMemWorkspace`, use `Agent(workspace=...)` directly |
-| **Claude Code** | `dual-mem-hook search` / `ingest` | UserPromptSubmit / Stop hooks, auto inject + archive |
-| **Hermes** | `DualMemHermesProvider` | MemoryProvider plugin (prefetch + `sync_turn`) |
-| **OpenClaw** | `DualMemOpenClawProvider` | same contract as Hermes |
-| **MCP** | `dual_mem.integrations.mcp` | FastMCP server (`dual-mem-mcp`) |
+- [2026/10/23] LoCoMo head-to-head: dual-mem 74.7, more than 8 points ahead of hy-memory and mem0.
+- [2026/10/22] Leaner configuration: switches with no measured benefit removed; defaults are the best settings.
+- [2026/10/15] **v0.1.3**: new layered memory with decision-model writes (storage format incompatible with older versions; use a new directory).
+- [2026/06/18] **v0.1.0**: first open-source release.
 
-```bash
-pip install dual-mem[agentica]   # agentica framework
-dual-mem-hook search              # Claude Code: inject memories into additionalContext
-dual-mem-hook ingest              # Claude Code: extract conversation into memory
-```
+Full history in the [CHANGELOG](CHANGELOG.md).
 
-> A separate **coding memory subsystem** (`dual_mem.coding`, `coding_enabled=true`) targets tool-using engineering conversations. It uses the same JEV actions and is off by default.
+## Developer docs
 
-## Examples
+<details>
+<summary>Expand: architecture, configuration and internals (optional)</summary>
 
-See [examples/](https://github.com/shibing624/dual-mem/tree/main/examples) for runnable demos:
+| Doc | Contents |
+|---|---|
+| [Installation & configuration](docs/getting-started/installation.md) | extras, config file, credentials and precedence |
+| [Quickstart](docs/getting-started/quickstart.md) | sync / async clients, multi-turn writes, agent integration |
+| [Architecture](docs/architecture.md) | how the SDK relates to each frontend; storage |
+| [Memory layers](docs/memory_layers.md) | L0 raw / L1 facts / L2 profile / L3 derived |
+| [Write decisions](docs/jev-memory-design.md) | decision-model actions and relations, version chains, concurrency |
+| [MemHub](docs/memhub.md) | Core service, host integration, server mode |
+| [MCP / REST](docs/mcp_integration.md) | tool ↔ HTTP ↔ SDK mapping |
+| [Integrations](docs/integrations.md) | Agentica / Claude Code / Hermes / OpenClaw |
+| [Benchmarks](docs/benchmarks.md) | protocol, question sets, reproduction, breakdowns |
+| [Examples](examples/README.md) | runnable end-to-end examples |
 
-| Category | Content |
-|----------|---------|
-| **SDK basics** | Short-term writes, evolution chains, multi-turn `messages` |
-| **Deep memory** | dual mode with explicit consolidation |
-| **REST** | FastAPI TestClient against `/v1/memories/` |
-| **CLI** | `dual-mem` add / search / list / delete |
+Online docs: **https://shibing624.github.io/dual-mem** · Local preview: `pip install -r requirements-docs.txt && mkdocs serve`
 
-[→ Full examples README](https://github.com/shibing624/dual-mem/blob/main/examples/README.md)
-
-```bash
-python examples/01_system1.py
-python examples/02_dual.py
-python examples/03_rest_api.py
-python examples/04_cli.py
-```
-
-> Examples call real LLM + embedding APIs (small cost).
-
-## Documentation
-
-Full docs: **https://shibing624.github.io/dual-mem**
-
-Local preview:
-
-```bash
-pip install -r requirements-docs.txt
-mkdocs serve
-```
+</details>
 
 ## Community & Support
 
 - **GitHub Issues** — [open an issue](https://github.com/shibing624/dual-mem/issues)
-- **WeChat group** — add WeChat ID `xuming624`, note "llm" to join the tech community
+- **WeChat group** — add WeChat ID `xuming624` with the note "llm" to join
 
 <img src="https://github.com/shibing624/agentica/blob/main/docs/assets/wechat.jpeg" width="200" />
 
 ## Citation
 
-If you use dual-mem in research, please cite:
+If you use dual-mem in your research, please cite:
 
 > Xu, M. (2026). dual-mem: Dual-System Layered Memory SDK for LLM Applications. GitHub. https://github.com/shibing624/dual-mem
 
-## License
+## License · Contributing · Acknowledgements
 
-[Apache License 2.0](LICENSE)
+[Apache License 2.0](LICENSE) · Contributions welcome, see [CONTRIBUTING.md](CONTRIBUTING.md)
 
-## Contributing
-
-Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Acknowledgements
-
-- [chromadb/chroma](https://github.com/chroma-core/chroma) — vector store
-- [kuzudb/kuzu](https://github.com/kuzudb/kuzu) — graph store
-- [tiangolo/fastapi](https://github.com/tiangolo/fastapi) — REST layer
-- [modelcontextprotocol/python-sdk](https://github.com/modelcontextprotocol/python-sdk) — MCP integration
-- [mem0ai/mem0](https://github.com/mem0ai/mem0) — memory SDK ecosystem
+Thanks to [Chroma](https://github.com/chroma-core/chroma), [Kuzu](https://github.com/kuzudb/kuzu), [FastAPI](https://github.com/tiangolo/fastapi), [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) and [mem0](https://github.com/mem0ai/mem0).

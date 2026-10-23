@@ -1,6 +1,6 @@
-> JEV 配置与版本 API 的迁移说明见 [设计文档](../jev-memory-design.md)。
-
 # 快速开始
+
+> JEV 配置与版本 API 的迁移说明见 [设计文档](../jev-memory-design.md)。
 
 ## 同步（脚本 / REPL，推荐入门）
 
@@ -180,3 +180,38 @@ await client.aclose()
 ```
 
 更多示例见 [examples/](https://github.com/shibing624/dual-mem/tree/main/examples)。
+
+## 两档模式怎么选
+
+| | **system1**（默认） | **dual** |
+|---|---|---|
+| 记什么 | 原文、事实、画像（L0 / L1 / L2） | 同左，`digest()` 时再归纳跨证据规律（L3） |
+| 适合 | 个人助手、客服、快速接入 | 需要行为画像、意图推断的深度场景 |
+| 额外开销 | 无 | 显式调用 `digest()` 时的生成与校验 |
+
+在当前评测中，L3 推导记忆默认只写入、不进入检索结果（`derived_context_limit=0`）：把它放进问答上下文时，选择题效果下降约 1.5 分。所以对大多数应用来说，`system1` 已经是最佳选择。
+
+## REST / MCP / CLI 速查
+
+```bash
+pip install "dual-mem[all]"
+
+dual-mem serve --host 0.0.0.0 --port 8000              # REST
+dual-mem-mcp                                              # MCP stdio
+dual-mem-mcp --transport streamable-http --port 8765     # MCP HTTP /mcp
+dual-mem add --content "用户喜欢咖啡" --user-id u1
+dual-mem search "饮品偏好" --user-id u1
+dual-mem digest                                           # dual：生成 L3_DERIVED
+```
+
+REST 契约：`POST /v1/memories/`、`POST /v1/memories/search`、`GET|DELETE /v1/memories/{id}` 等，完整对照见 [MCP / REST](../mcp_integration.md)。
+
+## 推荐配置
+
+默认配置就是评测得到的最佳设置，通常不需要改。唯一值得按场景调整的是写入决策的调用阈值：
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `reconcile_relation_threshold` | `0.6` | 新记忆与已有记忆的相似度达到阈值，才请决策模型判断"重复 / 更新 / 新增"；低于阈值直接新增 |
+
+在意决策模型费用时可以设成 `0.7`：调用次数少约 27%，写入时间少约 10%，评测上没有测到掉分。

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### 2026-10-23：README 与文档按用户视角重写
+
+- **README / README_EN**：开篇讲用户痛点和价值（"All your agents. One Memory."）；加入 LoCoMo / LongMemEval / PersonaMem-v2 同场评测表、MemHub 三步上手、适用人群、接入方式和 Roadmap。架构、层定义、配置等技术内容移到折叠的"开发者文档"。快速示例改成默认参数（`SyncMemoryClient()`），并用测试 fake 模型验证可运行。
+- **新增 `docs/benchmarks.md`**：结果摘要放在前面；协议、配对显著性、题型细分和复现命令放在"开发者可选阅读"。
+- **新增 `docs/integrations.md`**：按"你在用什么工具"选择接入方式；Agentica、Claude Code Hook、Hermes / OpenClaw 的接入代码放在可选章节。
+- **`docs/memhub.md`、`docs/index.md` 重写**：先讲收益和三步上手；单 Core 架构、鉴权、写入队列、云端单实例等细节完整保留在可选章节。
+- **`docs/getting-started/quickstart.md`**：并入原 README 的"两档模式怎么选"、REST / MCP / CLI 速查，以及推荐配置（`reconcile_relation_threshold`）。
+- **`mkdocs.yml` 导航**：顺序改为 Home → Getting Started → MemHub → Integrations → Benchmarks → Developer guide (optional)。`mkdocs build` 无告警。
+
 - **MemHub（`dual-mem hub`）**：借鉴 Hy-Memory MemHub，改为本地单 Core 架构。`hub serve` 独占 `~/.dual-mem`，自动生成 `runtime-token` 并通过 `runtime.json` 供同机 CLI/MCP/Hook 零配置发现；持久 `hub_writes` Evidence 队列的唯一 worker 写 Chroma/Kuzu/SQLite。Agentica / Claude Code / Codex / Cursor / Hermes 共用固定个人 scope。云上仍是同一单实例配合 SSH/Tailscale 隧道，通过高级命令 `hub attach --base-url ... --api-key ...` 显式接入，不复制或同步记忆库。
 - **删除 MemHub 多主快照方案**：移除 `--user-id`、`--fs-*`、`--sync-secret`、`--keep-snapshots`、`--install-hosts` 以及 `hub export/import/push/pull/sync`，同时删除 `MulanFs`、客户端 Fernet 加密和 `VectorStore.export_nodes/merge_nodes`；宿主安装改为独立 `hub install-host`，API Key 不写入宿主配置。
 - `MemoryClient.add_raw` / `SyncMemoryClient.add_raw` 新增 `request_id`，raw-only Evidence 现在与普通 `add` 一样支持确定性幂等重放。raw-only 回执与 `add` 分开存，L0 节点相同：同一 `request_id` 先 `add_raw` 再 `add` 会复用已存 L0 继续抽取，不再报 `IdempotencyConflictError`。
