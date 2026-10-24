@@ -50,7 +50,7 @@ def _argv(hub_dir: Path, host: str, port: int) -> list[str]:
     return [
         sys.executable,
         "-m",
-        "dual_mem.cli.main",
+        "dual_mem.cli",
         "hub",
         "serve",
         "--host",

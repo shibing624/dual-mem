@@ -454,7 +454,7 @@ def hub_capture(
         argv = [
             sys.executable,
             "-m",
-            "dual_mem.cli.main",
+            "dual_mem.cli",
             "hub",
             "scan",
             "--source",

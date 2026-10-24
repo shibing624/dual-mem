@@ -21,7 +21,9 @@
   - dual 模式的 Core 在写入队列空闲 `--digest-idle` 秒（默认 300，0 = 关闭）后自动 `digest()`；原先没有任何地方会触发，L3 永远不生成。`hub status` 显示自动 digest 设置。
   - 新增 `dual-mem hub connect user@server`：通过 SSH 读服务器 `runtime-token` 与 Core 端口，在本机空闲端口建 `ssh -N -L` 隧道并装成登录服务（断线重连），确认身份后写 `hub.json`。安全模型不变（Core 仍只听 loopback）；`hub detach` 同时卸载隧道服务。
 - **CLI**：`dual-mem digest` 新增 `--mode`；用 `--mode dual` 写入而配置不是 dual 时，原先 `digest` 直接返回 `processed=0`。
-- **验证**：chat 路径的 LLM prompt、JEV 问题、召回顺序与分数在 system1 / dual 下与 v0.1.5 逐项一致（mock 指纹对比）；全量 pytest 与 AST 检查通过；真实模型验证 procedure 写入、方案演化（OVERRIDE）、`procedures` 分组与阈值（相关查询 0.40–0.64，无关 0.09–0.18），以及 dual digest。
+- **依赖**：`scikit-learn` 加入基础依赖。System 2 的事实聚类一直依赖它，但只在 `[dev]` 环境里被间接装上；干净安装后 `digest()` 报 `ModuleNotFoundError: sklearn`。新增 `tests/test_packaging.py`：核心模块导入的第三方包必须出现在 `[project].dependencies` 里。
+- **`python -m dual_mem.cli`**：新增 `dual_mem/cli/__main__.py`。Core 服务、Hook 与后台 scan 改用 `-m dual_mem.cli` 启动，消除 `'dual_mem.cli.main' found in sys.modules` 的 RuntimeWarning；已装的旧 `-m dual_mem.cli.main` Hook 仍能被识别，重新 `install-host` 时会被替换，不会重复。
+- **验证**：chat 路径的 LLM prompt、JEV 问题、召回顺序与分数在 system1 / dual 下与 v0.1.5 逐项一致（mock 指纹对比）；全量 pytest 与 AST 检查通过；真实模型验证 procedure 写入、方案演化（OVERRIDE）、`procedures` 分组与阈值（相关查询 0.40–0.64，无关 0.09–0.18），以及 dual digest。另在一台 Linux 外网服务器（Python 3.12，systemd --user）上用 0.2.0 wheel 做了端到端：`hub connect` 建隧道、Claude Code 会话经隧道写入同时产出 chat 记忆与 procedure、本机召回 `procedures` 分组、Core 空闲 5 分钟后自动 digest 生成 L3、隧道进程被杀后自动重连、重复 connect 幂等、`detach` 清理干净。
 
 
 - **MemHub 服务器文档**：新增 `docs/memhub-server.md`，说明在自己的机器上跑唯一 Core，以及每台电脑用 SSH 隧道 `attach`。这不是两台库互相合并。`docs/memhub.md` 里的隧道示例改成解释端口转发和 `runtime-token`。

@@ -17,6 +17,8 @@ dependencies = [
     "chromadb>=1.0",
     "kuzu>=0.4",
     "numpy>=1.26",
+    # System 2 digest clusters facts with average-linkage (dual mode).
+    "scikit-learn>=1.4",
 ]
 
 [project.optional-dependencies]

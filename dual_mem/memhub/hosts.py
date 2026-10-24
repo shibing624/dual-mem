@@ -30,8 +30,9 @@ SKILL_MARKER = "<!-- managed by dual-mem hub -->"
 AGENTICA_CONSUMER = "dual-mem-hub"
 TOML_BEGIN = "# >>> dual-mem hub >>>"
 TOML_END = "# <<< dual-mem hub <<<"
-# Our hook commands always run this module, which is how we find them again.
-HOOK_SIGNATURE = "-m dual_mem.cli.main hub "
+# Our hook commands always run this package, which is how we find them again
+# (the prefix also matches hooks written as ``-m dual_mem.cli.main``).
+HOOK_SIGNATURE = "-m dual_mem.cli"
 # agentica.shell_hooks.config.SHELL_HOOK_EVENTS; unlisted events default to on there.
 AGENTICA_EVENTS = (
     "run.started",
@@ -57,7 +58,7 @@ class Launch:
     hub_dir: Path
 
     def dual_mem(self, *args: str) -> list[str]:
-        return [sys.executable, "-m", "dual_mem.cli.main", *args]
+        return [sys.executable, "-m", "dual_mem.cli", *args]
 
     def mcp(self) -> dict[str, Any]:
         return {

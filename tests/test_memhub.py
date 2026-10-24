@@ -603,7 +603,7 @@ def test_cli_attach_capture_hook_and_status(tmp_path: Path, monkeypatch) -> None
         [
             sys.executable,
             "-m",
-            "dual_mem.cli.main",
+            "dual_mem.cli",
             "hub",
             "scan",
             "--source",
@@ -1319,3 +1319,32 @@ def test_tunnel_service_restarts_always_and_never_prompts(
     assert not service.launchd_plist_path(service.LABEL).exists()
     assert service.uninstall_tunnel(runner=run)["removed"] is True
     assert not path.exists()
+
+
+def test_hook_install_replaces_hooks_written_as_cli_main(tmp_path: Path) -> None:
+    """Hooks installed before ``-m dual_mem.cli`` are still recognised as ours."""
+    from dual_mem.memhub.hosts import ClaudeStyleHooks, Launch
+
+    hook_file = tmp_path / "settings.json"
+    old = f"{sys.executable} -m dual_mem.cli.main hub capture claude-code"
+    hook_file.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {"hooks": [{"type": "command", "command": old}]},
+                        {"hooks": [{"type": "command", "command": "other-tool"}]},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    ClaudeStyleHooks().install(hook_file, Launch("claude-code", tmp_path / "hub"))
+
+    stop = json.loads(hook_file.read_text(encoding="utf-8"))["hooks"]["Stop"]
+    commands = [e["hooks"][0]["command"] for e in stop]
+    assert "other-tool" in commands
+    assert old not in commands
+    ours = [c for c in commands if "-m dual_mem.cli" in c]
+    assert len(ours) == 1 and "-m dual_mem.cli hub" in ours[0]
