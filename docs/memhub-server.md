@@ -19,7 +19,7 @@ Core 只监听 loopback。它不接受 `0.0.0.0`。明文 HTTP 只允许打到 `
 
 ## 服务器上
 
-需要 Python 3.11+。模型钥匙写在这台机器的 `~/.dual_mem/config.yaml`（`jev_api_key`、`llm_api_key`、`embed_api_key`，三个地址按你的服务改）。登录自启的服务读不到 shell 里临时 `export` 的变量。抽取和裁决都在服务器上跑，所以这三个地址要**从服务器能访问到**：只在办公内网可达的模型网关，换到公网服务器上会调不通。
+需要 Python 3.11+。模型钥匙写在这台机器的 `~/.dual-mem/config.yaml`（`jev_api_key`、`llm_api_key`、`embed_api_key`，三个地址按你的服务改）。登录自启的服务读不到 shell 里临时 `export` 的变量。抽取和裁决都在服务器上跑，所以这三个地址要**从服务器能访问到**：只在办公内网可达的模型网关，换到公网服务器上会调不通。
 
 ```bash
 pip install "dual-mem[all]"

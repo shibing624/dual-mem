@@ -78,7 +78,7 @@ class MemoryClient:
 
     Picks ``system1`` (MemoryWriter) or ``dual`` (System2Writer) from ``Settings.mode``.
 
-    Constructor kwargs (see also ``Settings`` / ``~/.dual_mem/config.yaml``):
+    Constructor kwargs (see also ``Settings`` / ``~/.dual-mem/config.yaml``):
 
     - ``mode``: ``"system1"`` (default, L0/L1/L2 versions) or ``"dual"`` (+ explicit digest L3).
     - ``storage_dir``: on-disk root for Chroma / Kuzu / SQLite; default ``./.dual_mem_v4``.

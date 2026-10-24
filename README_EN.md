@@ -71,7 +71,7 @@ Chat and coding share one `add()` / `search()`. When `messages` carry a tool tra
 pip install dual-mem
 ```
 
-REST / CLI / MCP / MemHub: `pip install "dual-mem[all]"`; each extra also installs on its own, and MCP runs on mcp 2.x. The first run copies the packaged [`config.default.yaml`](https://github.com/shibing624/dual-mem/blob/main/dual_mem/config.default.yaml) to `~/.dual_mem/config.yaml`. Construction needs three keys; a missing one refuses to start:
+REST / CLI / MCP / MemHub: `pip install "dual-mem[all]"`; each extra also installs on its own, and MCP runs on mcp 2.x. The first run copies the packaged [`config.default.yaml`](https://github.com/shibing624/dual-mem/blob/main/dual_mem/config.default.yaml) to `~/.dual-mem/config.yaml`. Construction needs three keys; a missing one refuses to start:
 
 ```yaml
 jev_api_key: ""    # write decisions. System One, not Chat Completions

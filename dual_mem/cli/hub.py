@@ -306,7 +306,7 @@ def hub_install_service(
 ) -> None:
     """开机/登录自动启动 Hub Core（macOS LaunchAgent / Linux systemd --user）。
 
-    服务不继承 shell 环境变量，模型 API key 请写在 ~/.dual_mem/config.yaml。"""
+    服务不继承 shell 环境变量，模型 API key 请写在 ~/.dual-mem/config.yaml。"""
     _echo(hub_service.install_service(hub_dir=hub_dir, port=port))
 
 

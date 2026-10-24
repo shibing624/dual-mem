@@ -1,4 +1,4 @@
-# 首次运行复制到 ~/.dual_mem/config.yaml。
+# 首次运行复制到 ~/.dual-mem/config.yaml。
 # 优先级：显式参数 > DUAL_MEM_* 环境变量 > YAML > preset > 默认值。
 # 构造客户端必须同时有三把钥匙，缺一会在启动时拒绝：
 #   jev_api_key    写入时判断新增 / 重复 / 更新（System One，不是 Chat Completions）

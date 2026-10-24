@@ -46,7 +46,7 @@ dual-mem hub recall "我之前做过哪些技术选择"
 dual-mem hub status
 ```
 
-> 自启服务不继承 shell 环境变量，模型 API key 请写在 `~/.dual_mem/config.yaml`。
+> 自启服务不继承 shell 环境变量，模型 API key 请写在 `~/.dual-mem/config.yaml`。
 
 ## 多台电脑共用一份记忆
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **配置目录并到 `~/.dual-mem`**。模型配置从 `~/.dual_mem/config.yaml` 改为 `~/.dual-mem/config.yaml`，与 MemHub 的游标、队列、记忆库同一目录。不再读取旧路径。Python 包名仍是 `dual_mem`。
 - **MemHub 自动 digest 改为每天最多一次，并删除 `--digest-idle`**。dual Core 在写入队列排空后检查：距上次成功自动 `digest()` 已满 `--digest-every` 小时（默认 24，`0` = 关闭自动 digest）且仍有待归纳证据才调用模型。原先 `--digest-idle` 默认 300 秒，每次停够 5 分钟就归纳，开会、吃饭会一天跑很多次；这个等待不再决定频率，已从 `hub serve` 去掉。成功时间写在 Hub 根目录 `digest-at`；失败不记，下次队列排空后再试。没有这个文件时，下一次满足条件会归纳一次，然后才开始 24 小时间隔。`hub status` 的 `digest` 为 `auto` / `min_hours` / `last_at` / `last_error`。评测集写完后自己调用 `digest()`。
 
 ## [0.2.0] — 2026-10-24

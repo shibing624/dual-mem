@@ -1,6 +1,6 @@
 """examples 公共工具：每个 demo 用独立干净的本地存储目录。
 
-配置从 ~/.dual_mem/config.yaml 读取，只保留 Settings 认识的键，再覆盖 mode 和
+配置从 ~/.dual-mem/config.yaml 读取，只保留 Settings 认识的键，再覆盖 mode 和
 storage_dir。已删除的旧键（例如 system2_trigger_mode）不会进入 Settings。
 JEV 凭据用 yaml 的 jev_api_key，或环境变量 DUAL_MEM_JEV_API_KEY / DUAL_MEM_JEV_ENDPOINT。
 """

@@ -3,7 +3,7 @@
 
 macOS uses LaunchAgents, Linux systemd user units. Both start at login and
 restart on failure. No credentials are copied into a service file: like any
-dual-mem process, the Core reads model keys from ``~/.dual_mem/config.yaml``
+dual-mem process, the Core reads model keys from ``~/.dual-mem/config.yaml``
 (a login service does not see variables exported in a shell profile), and the
 tunnel authenticates with the user's own SSH keys / ``~/.ssh/config``.
 """

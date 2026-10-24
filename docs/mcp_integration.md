@@ -67,7 +67,7 @@ dual-mem mcp
 }
 ```
 
-配置：`~/.dual_mem/config.yaml` 或 `DUAL_MEM_*` 环境变量。用 MemHub 的话不必手配，`dual-mem hub install-host cursor` 会写好指向 Core 的 MCP。
+配置：`~/.dual-mem/config.yaml` 或 `DUAL_MEM_*` 环境变量。用 MemHub 的话不必手配，`dual-mem hub install-host cursor` 会写好指向 Core 的 MCP。
 
 ## REST / HTTP MCP 底座（已实现 REST，HTTP MCP 待封装）
 

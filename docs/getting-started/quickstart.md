@@ -40,7 +40,7 @@ asyncio.run(main())
 
 已在 async 事件循环内时，必须用 `MemoryClient` + `await`；`SyncMemoryClient` 会报错。
 
-配置：`~/.dual_mem/config.yaml` 首次启动自动创建，填入 `jev_api_key`、`llm_api_key` 与 `embed_api_key` 即可。
+配置：`~/.dual-mem/config.yaml` 首次启动自动创建，填入 `jev_api_key`、`llm_api_key` 与 `embed_api_key` 即可。
 
 ## 核心参数
 
@@ -247,7 +247,7 @@ dual 的 `add()` 和 system1 完全相同，返回前已完成 L1/L2（以及 pr
 一次 digest 只处理一遍。
 
 开启方式（优先级从高到低）：`MemoryClient(mode="dual")`、`DUAL_MEM_MODE=dual`、
-`~/.dual_mem/config.yaml` 里 `mode: dual`。开启之后 `add()` 只是把 scope 登记为待归纳，
+`~/.dual-mem/config.yaml` 里 `mode: dual`。开启之后 `add()` 只是把 scope 登记为待归纳，
 不会自己跑。SDK 在边界上调用一次 `await client.digest()`；命令行用 `dual-mem digest`
 手动跑一次。配置文件已经是 dual 时不用再加参数；配置仍是 system1 时，这次要写成
 `dual-mem digest --mode dual`，否则按 system1 处理，`processed` 为 0。

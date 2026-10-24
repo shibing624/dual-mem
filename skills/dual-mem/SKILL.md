@@ -23,7 +23,7 @@ dual-mem 原生对接 5 类社区生态，统一入口在 `dual_mem.integrations
 | claude code | `dual-mem-hook` 子命令（UserPromptSubmit / Stop） | `dual_mem/integrations/claude_code.py` |
 
 所有适配器都基于内嵌 `MemoryClient`（不再依赖外部 one-memory server），配置走
-`DUAL_MEM_*` 环境变量 / `~/.dual_mem/config.yaml`。程序化构造：
+`DUAL_MEM_*` 环境变量 / `~/.dual-mem/config.yaml`。程序化构造：
 
 ```python
 from dual_mem.integrations import get_backend
@@ -45,7 +45,7 @@ agentica 的 `Agent` 通过 `workspace` 对象消费长期记忆。dual-mem 提�
   覆盖为调用 dual-mem。可直接 `Agent(workspace=...)`，自动召回 + 自动保存。
 
 > 依赖 agentica：`pip install 'dual-mem[agentica]'`（或 `pip install agentica`）。
-> 凭证走 `DUAL_MEM_*` 环境变量 / `~/.dual_mem/config.yaml`，或构造时显式传入 `client=`。
+> 凭证走 `DUAL_MEM_*` 环境变量 / `~/.dual-mem/config.yaml`，或构造时显式传入 `client=`。
 
 **方式一：作为 Agent 的原生长期记忆（推荐）**
 

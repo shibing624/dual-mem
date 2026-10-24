@@ -22,7 +22,7 @@ from pydantic_settings import (
 
 logger = logging.getLogger("dual_mem.config")
 
-DEFAULT_CONFIG_PATH = Path.home() / ".dual_mem" / "config.yaml"
+DEFAULT_CONFIG_PATH = Path.home() / ".dual-mem" / "config.yaml"
 
 
 def config_path() -> Path:
@@ -41,7 +41,7 @@ def _default_config_template() -> str:
 
 
 def ensure_config_file() -> Path:
-    """Create ``~/.dual_mem/config.yaml`` with defaults when missing (MetaGPT-style bootstrap).
+    """Create ``~/.dual-mem/config.yaml`` with defaults when missing (MetaGPT-style bootstrap).
 
     Skipped when ``DUAL_MEM_CONFIG_FILE`` points at a custom path — only the default
     home location is auto-created so tests and explicit overrides stay predictable.

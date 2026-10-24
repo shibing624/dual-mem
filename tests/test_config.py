@@ -88,7 +88,7 @@ def test_init_overrides_yaml(tmp_path, monkeypatch):
 
 
 def test_ensure_config_file_creates_default(tmp_path, monkeypatch):
-    """Default ~/.dual_mem/config.yaml is bootstrapped when missing."""
+    """Default ~/.dual-mem/config.yaml is bootstrapped when missing."""
     monkeypatch.delenv("DUAL_MEM_CONFIG_FILE", raising=False)
     monkeypatch.setattr("dual_mem.config.DEFAULT_CONFIG_PATH", tmp_path / "config.yaml")
     from dual_mem.config import ensure_config_file

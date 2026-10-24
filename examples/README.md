@@ -6,7 +6,7 @@
 ## 前置
 
 `MemoryClient` 需要 **JEV、LLM、Embedding 三套凭据**，缺 JEV key 会在构造时抛
-`MissingCredentialsError`。首次构造会在 `~/.dual_mem/config.yaml` 写默认配置。
+`MissingCredentialsError`。首次构造会在 `~/.dual-mem/config.yaml` 写默认配置。
 
 ```yaml
 jev_endpoint: https://api.typesafe.ai/v1/systemone
