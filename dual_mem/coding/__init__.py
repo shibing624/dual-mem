@@ -1,42 +1,28 @@
 # -*- coding: utf-8 -*-
-"""Coding/tool-use memory subsystem — separate write/store/search path for
-engineering conversations that contain tool calls (Read/Edit/Bash/etc).
+"""Coding scene: procedure memories from coding-agent tool trajectories.
 
-Flow: add() → has_tool_messages? → judge(is_coding?) → coding writer
-      (extract → reconcile → coding store) OR chat path (normal extract).
+A procedure is an L1_FACT node with ``kind="procedure"`` in the main store. It
+shares the raw source, version chain, request journal and System 2 digest with
+chat memories; only its candidate generation and JEV decision stream differ.
+
+Flow inside ``MemoryClient.add(messages=...)``: a tool trace (structural check)
+→ JEV scene question → procedure candidates → JEV decisions → version plan,
+alongside the unchanged chat extraction of the same conversation.
 """
 from dual_mem.coding.types import (
-    CodingMemoryDraft,
-    CodingMemory,
-    CodingReconcileOp,
     BOUNDARY_SCOPES,
+    PROCEDURE_KIND,
     CodingDecisionError,
-    CodingConcurrentWriteError,
-)
-from dual_mem.coding.writer import CodingWriter
-from dual_mem.coding.store import CodingMemoryStore
-from dual_mem.coding.extractor import CodingMemoryExtractor
-from dual_mem.coding.reconciler import CodingMemoryReconciler
-from dual_mem.coding.judge import classify_messages_is_coding
-from dual_mem.coding.preproc import (
-    has_any_tool_message,
-    strip_tool_messages,
-    extract_files,
+    CodingMemory,
+    CodingMemoryDraft,
+    CodingReconcileOp,
 )
 
 __all__ = [
-    "CodingWriter",
-    "CodingMemoryStore",
-    "CodingMemoryExtractor",
-    "CodingMemoryReconciler",
-    "CodingMemoryDraft",
-    "CodingMemory",
-    "CodingReconcileOp",
     "BOUNDARY_SCOPES",
+    "PROCEDURE_KIND",
     "CodingDecisionError",
-    "CodingConcurrentWriteError",
-    "classify_messages_is_coding",
-    "has_any_tool_message",
-    "strip_tool_messages",
-    "extract_files",
+    "CodingMemory",
+    "CodingMemoryDraft",
+    "CodingReconcileOp",
 ]

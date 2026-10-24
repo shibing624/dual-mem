@@ -169,7 +169,7 @@ def tool_messages(solution="Use BEGIN IMMEDIATE to validate before commit"):
 
 def coding_client(tmp_storage, embed, jev=None):
     return MemoryClient(
-        settings=Settings(storage_dir=tmp_storage, coding_enabled=True),
+        settings=Settings(storage_dir=tmp_storage),
         embed=embed,
         llm=FakeLLMClient(
             {
@@ -184,23 +184,12 @@ def coding_client(tmp_storage, embed, jev=None):
                 }
             }
         ),
-        jev=jev
-        or FakeJev(
-            {
-                "scene": "CODING",
-                    "0:action": "ADD_SUPPLEMENT",
-                "0:target": "NONE",
-            }
-        ),
+        jev=jev or FakeJev({"scene": "CODING", "0:action": "ADD_SUPPLEMENT"}),
     )
 
 
-def coding_rows(c):
-    store = c._coding_writer.store
-    with store._lock:
-        return store._conn.execute(
-            "SELECT memory_id, published FROM coding_memory_meta"
-        ).fetchall()
+def procedure_nodes(c):
+    return c.factory.vector.get_many({"kind": "procedure"})
 
 
 def test_requests_index_is_backfilled_for_existing_journals(tmp_storage, fake_embed):
@@ -232,53 +221,35 @@ async def test_tool_path_retry_after_failed_publish_reuses_ids(
     tmp_storage, fake_embed, monkeypatch
 ):
     c = coding_client(tmp_storage, fake_embed)
-    coding_store = c._coding_writer.store
-    original = coding_store._publish
+    vector = c.factory.vector
+    original = vector.apply_version_plan
 
-    def die(*args, **kwargs):
-        raise ProcessDied("died before publish")
+    def die(**kwargs):
+        if kwargs.get("request_key", "").startswith("procedure:"):
+            raise ProcessDied("died before publish")
+        return original(**kwargs)
 
-    monkeypatch.setattr(coding_store, "_publish", die)
+    monkeypatch.setattr(vector, "apply_version_plan", die)
     with pytest.raises(ProcessDied):
         await c.add(messages=tool_messages(), user_id="u", request_id="t1")
-    assert [row["published"] for row in coding_rows(c)] == [0]
-    monkeypatch.setattr(coding_store, "_publish", original)
+    assert procedure_nodes(c) == []
+    monkeypatch.setattr(vector, "apply_version_plan", original)
 
     result = await c.add(messages=tool_messages(), user_id="u", request_id="t1")
-    rows = coding_rows(c)
-    assert [row["published"] for row in rows] == [1]
-    assert result.extracted_count == 1
-    assert coding_store.request_result(next(iter(_request_keys(coding_store))))
+    again = await c.add(messages=tool_messages(), user_id="u", request_id="t1")
+    assert [n.node_id for n in procedure_nodes(c)] == result.procedure_ids
+    assert again.procedure_ids == result.procedure_ids
     await c.aclose()
 
 
-def _request_keys(store):
-    with store._lock:
-        return [r[0] for r in store._conn.execute("SELECT request_key FROM coding_requests")]
-
-
-async def test_tool_path_without_request_id_records_nothing(tmp_storage, fake_embed):
-    """A generated request_id can never be replayed, so nothing is recorded for it."""
+async def test_tool_path_without_request_id_is_never_replayed(tmp_storage, fake_embed):
+    """A generated request_id can never be replayed: each write is its own version."""
     c = coding_client(tmp_storage, fake_embed)
     first = await c.add(messages=tool_messages(), user_id="u")
     second = await c.add(messages=tool_messages(), user_id="u")
     assert first.memory_id != second.memory_id
-    assert _request_keys(c._coding_writer.store) == []
-    await c.aclose()
-
-
-async def test_coding_request_records_expire_on_digest(tmp_storage, fake_embed):
-    c = coding_client(tmp_storage, fake_embed)
-    await c.add(messages=tool_messages(), user_id="u", request_id="old")
-    coding_store = c._coding_writer.store
-    with coding_store._lock, coding_store._conn:
-        coding_store._conn.execute("UPDATE coding_requests SET ts = 0")
-    await c.add(
-        messages=tool_messages("Use WAL instead"), user_id="u", request_id="fresh"
-    )
-    await c.digest()
-    keys = _request_keys(coding_store)
-    assert len(keys) == 1 and keys[0].endswith('"fresh"]')
+    assert first.procedure_ids != second.procedure_ids
+    assert len(procedure_nodes(c)) == 2
     await c.aclose()
 
 

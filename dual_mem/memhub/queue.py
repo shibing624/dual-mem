@@ -10,6 +10,10 @@ or a resubmission of the same request puts it back in the queue.
 
 ``raw_only`` is a mode, not part of the evidence: the same request can be stored
 raw first and extracted later (``extract_raw``), reusing its L0 node.
+
+``on_idle`` runs once the queue has been empty for ``idle_seconds`` after it
+processed work (and once after start): the Core's System 2 digest goes there, so
+nobody has to remember to call ``digest()``.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from typing import Any
 from dual_mem.errors import IdempotencyConflictError
 
 WriteProcessor = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+IdleHook = Callable[[], Awaitable[Any]]
 
 _JOB_COLUMNS = "request_id,status,raw_only,attempts,result,error,created_at,updated_at"
 
@@ -41,6 +46,8 @@ class HubWriteQueue:
         max_attempts: int = 5,
         retry_base_seconds: float = 30.0,
         retry_max_seconds: float = 1800.0,
+        on_idle: IdleHook | None = None,
+        idle_seconds: float = 300.0,
     ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path)
@@ -65,6 +72,9 @@ class HubWriteQueue:
         self._max_attempts = max_attempts
         self._retry_base = retry_base_seconds
         self._retry_max = retry_max_seconds
+        self._on_idle = on_idle
+        self._idle_seconds = idle_seconds
+        self.last_idle_error: str | None = None
         self._wake = asyncio.Event()
         self._closed = False
         self._task: asyncio.Task[None] | None = None
@@ -239,16 +249,34 @@ class HubWriteQueue:
                 ),
             )
 
+    async def _idle(self) -> None:
+        try:
+            await self._on_idle()
+        except Exception as exc:
+            # The hook's work stays queued in its own store and is retried after
+            # the next write; it must never stop the intake worker.
+            self.last_idle_error = f"{type(exc).__name__}: {exc}"
+        else:
+            self.last_idle_error = None
+
     async def _run(self) -> None:
+        # Work left by a previous process (an undigested scope) is handled once.
+        dirty = self._on_idle is not None
         while not self._closed:
             item = self._take()
             if not isinstance(item, tuple):
                 self._wake.clear()
-                timeout = None if item is None else max(item - time.time(), 0.01)
+                idle_due = item is None and dirty
+                if item is None:
+                    timeout = self._idle_seconds if idle_due else None
+                else:
+                    timeout = max(item - time.time(), 0.01)
                 try:
                     await asyncio.wait_for(self._wake.wait(), timeout)
                 except TimeoutError:
-                    pass
+                    if idle_due and not self._closed:
+                        dirty = False
+                        await self._idle()
                 continue
             request_id, payload = item
             try:
@@ -257,6 +285,7 @@ class HubWriteQueue:
                 self._finish_error(request_id, exc)
             else:
                 self._finish_ok(request_id, raw_only=payload["raw_only"], result=result)
+            dirty = self._on_idle is not None
 
     async def close(self) -> None:
         self._closed = True

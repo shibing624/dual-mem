@@ -7,6 +7,7 @@ import asyncio
 import json
 import sqlite3
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -849,7 +850,7 @@ async def test_recall_skips_the_group_the_caller_disabled(
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with HubClient(base_url="http://hub", api_key="secret", transport=transport) as remote:
-            await remote.recall(query="q", limit=0, raw_limit=3)
+            await remote.recall(query="q", limit=0, raw_limit=3, procedure_limit=0)
             assert calls == ["conversations"]
             calls.clear()
             await remote.recall(query="q", limit=3, raw_limit=0)
@@ -892,8 +893,8 @@ def test_install_service_writes_launchd_plist_or_systemd_unit(
     from dual_mem.memhub import service
 
     hub = tmp_path / "hub"
-    monkeypatch.setattr(service, "launchd_plist_path", lambda: tmp_path / "agent.plist")
-    monkeypatch.setattr(service, "systemd_unit_path", lambda: tmp_path / "hub.service")
+    monkeypatch.setattr(service, "launchd_plist_path", lambda label: tmp_path / f"{label}.plist")
+    monkeypatch.setattr(service, "systemd_unit_path", lambda unit: tmp_path / unit)
     commands = []
 
     def runner(argv):
@@ -908,7 +909,7 @@ def test_install_service_writes_launchd_plist_or_systemd_unit(
     if sys.platform == "darwin":
         assert commands[0][:1] == ["launchctl"] and commands[-1][1] == "load"
     else:
-        assert commands[-1][:3] == ["systemctl", "--user", "enable"]
+        assert ["systemctl", "--user", "enable", service.SYSTEMD_UNIT] in commands
 
     removed = service.uninstall_service(runner=runner)
     assert removed["removed"] is True and not Path(removed["service_file"]).exists()
@@ -944,3 +945,377 @@ async def test_unreachable_core_leaves_cursor_in_place(tmp_path: Path) -> None:
                     remote, source="agentica", path=path, cursors=cursors, complete=True
                 )
             assert cursors.get("agentica", str(path.resolve())) is None
+
+
+# --- coding scene: tool steps, version boundary, idle digest ---------------------
+
+
+def test_claude_and_codex_tool_steps_become_turn_steps(tmp_path: Path) -> None:
+    roots = default_source_roots(tmp_path)
+    claude = roots["claude-code"] / "proj" / "cc-tools.jsonl"
+    _jsonl(
+        claude,
+        [
+            {"type": "user", "sessionId": "cc", "cwd": "/repo", "gitBranch": "main",
+             "message": {"content": "fix the flaky test"}},
+            {"type": "assistant", "sessionId": "cc", "cwd": "/repo", "gitBranch": "main",
+             "message": {"content": [
+                 {"type": "text", "text": "running it"},
+                 {"type": "tool_use", "id": "t1", "name": "Bash",
+                  "input": {"command": "pytest -q tests/test_x.py"}},
+             ]}},
+            {"type": "user", "sessionId": "cc", "cwd": "/repo", "gitBranch": "fix",
+             "message": {"content": [
+                 {"type": "tool_result", "tool_use_id": "t1",
+                  "content": [{"type": "text", "text": "1 failed: race in setup"}]},
+             ]}},
+            {"type": "assistant", "sessionId": "cc", "cwd": "/repo", "gitBranch": "fix",
+             "message": {"content": [{"type": "text", "text": "fixed the race"}]}},
+            {"type": "user", "sessionId": "cc", "message": {"content": "thanks"}},
+        ],
+    )
+    messages, _ = SOURCE_SPECS["claude-code"].read(claude, 0)
+    done, open_turn = build_turns(messages)
+    (turn,) = done
+    assert (turn.user, turn.assistant) == ("fix the flaky test", "fixed the race")
+    assert (turn.workspace, turn.branch) == ("/repo", "fix")
+    msgs = turn.messages()
+    assert [m["role"] for m in msgs] == ["user", "assistant", "tool", "assistant"]
+    call = msgs[1]["tool_calls"][0]
+    assert call["function"]["name"] == "Bash"
+    assert json.loads(call["function"]["arguments"]) == {"command": "pytest -q tests/test_x.py"}
+    assert msgs[2] == {"role": "tool", "tool_call_id": "t1", "content": "1 failed: race in setup"}
+    assert open_turn is not None and open_turn.user == "thanks"
+
+    codex = roots["codex"] / "2026" / "10" / "04" / "rollout-tools.jsonl"
+    _jsonl(
+        codex,
+        [
+            {"type": "session_meta",
+             "payload": {"id": "cx", "cwd": "/svc", "git": {"branch": "dev"}}},
+            {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                "type": "UserMessage", "content": [{"type": "text", "text": "why 500?"}]}}},
+            {"type": "response_item", "payload": {
+                "type": "function_call", "call_id": "c1", "name": "shell",
+                "arguments": "{\"cmd\": \"tail app.log\"}"}},
+            {"type": "response_item", "payload": {
+                "type": "function_call_output", "call_id": "c1", "output": "x" * 9000}},
+            {"type": "response_item", "payload": {"type": "reasoning", "summary": []}},
+            {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                "type": "AgentMessage", "content": [{"type": "Text", "text": "DB pool exhausted"}]}}},
+            {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                "type": "UserMessage", "content": [{"type": "text", "text": "ok"}]}}},
+        ],
+    )
+    messages, _ = SOURCE_SPECS["codex"].read(codex, 0)
+    (turn,), _ = build_turns(messages)
+    assert (turn.session_id, turn.workspace, turn.branch) == ("cx", "/svc", "dev")
+    roles = [m["role"] for m in turn.messages()]
+    assert roles == ["user", "assistant", "tool", "assistant"]
+    output = turn.messages()[2]["content"]
+    assert len(output) < 9000 and output.startswith("x") and output.endswith("x")
+
+
+async def test_scan_forwards_tool_steps_and_boundary(tmp_path: Path) -> None:
+    roots = default_source_roots(tmp_path)
+    path = roots["claude-code"] / "proj" / "cc-b.jsonl"
+    _jsonl(
+        path,
+        [
+            {"type": "user", "sessionId": "s", "cwd": "/w", "gitBranch": "b",
+             "message": {"content": "q"}},
+            {"type": "assistant", "sessionId": "s", "message": {"content": [
+                {"type": "tool_use", "id": "t", "name": "Read", "input": {"path": "a.py"}}]}},
+            {"type": "user", "sessionId": "s", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t", "content": "body"}]}},
+            {"type": "assistant", "sessionId": "s", "message": {"content": "a"}},
+            {"type": "user", "sessionId": "s", "message": {"content": "next"}},
+        ],
+    )
+    sent: list[dict] = []
+
+    class Writer:
+        async def write(self, **kwargs):
+            sent.append(kwargs)
+            return {"status": "pending"}
+
+    await scan_file(Writer(), source="claude-code", path=path,
+                    cursors=CursorStore(tmp_path / "cursors.db"))
+    (call,) = sent
+    assert (call["workspace_id"], call["branch"]) == ("/w", "b")
+    assert [m["role"] for m in call["messages"]] == ["user", "assistant", "tool", "assistant"]
+
+
+async def _until(predicate) -> None:
+    while not predicate():
+        await asyncio.sleep(0.01)
+
+
+async def test_idle_hook_runs_after_work_and_survives_failures(tmp_path: Path) -> None:
+    runs: list[int] = []
+    fail = {"on": True}
+
+    async def process(payload):
+        return {}
+
+    async def idle():
+        runs.append(1)
+        if fail["on"]:
+            raise RuntimeError("model down")
+
+    queue = HubWriteQueue(tmp_path / "hub.db", process, on_idle=idle, idle_seconds=0.05)
+    queue.start()
+    # Once after start (work left by a previous process), failure recorded.
+    await asyncio.wait_for(_until(lambda: runs), 5)
+    await asyncio.sleep(0.05)
+    assert queue.last_idle_error == "RuntimeError: model down"
+    await asyncio.sleep(0.15)
+    assert len(runs) == 1  # nothing new written: no repeat
+    fail["on"] = False
+    queue.submit({"content": "x", "messages": None, "session_id": "", "memory_at": None,
+                  "request_id": "r", "raw_only": False})
+    await asyncio.wait_for(_until(lambda: len(runs) >= 2), 5)
+    await asyncio.sleep(0.02)
+    assert queue.last_idle_error is None
+    await queue.close()
+
+
+async def test_dual_core_digests_on_idle_and_recalls_procedures(
+    tmp_path: Path, fake_embed
+) -> None:
+    from conftest import FakeJev, FakeLLMClient
+
+    candidate = {"task": "How to fix the flaky race in setup",
+                 "solution": "Serialize fixture setup with a lock", "search_keys": []}
+    core = MemoryClient(
+        settings=Settings(storage_dir=str(tmp_path / "hub" / "store"), mode="dual"),
+        embed=fake_embed,
+        llm=FakeLLMClient({"json": {"candidates": [candidate]}}),
+        jev=FakeJev({"scene": "CODING"}),
+    )
+    digests: list[int] = []
+    original = core.digest
+
+    async def counted():
+        digests.append(1)
+        return await original()
+
+    core.digest = counted
+    app = create_hub_app(api_key="secret", hub_dir=tmp_path / "hub", client=core,
+                         settings=core.settings, digest_idle_seconds=0.05)
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with HubClient(base_url="http://hub", api_key="secret",
+                             transport=transport) as remote:
+            receipt = await remote.write(
+                messages=[
+                    {"role": "user", "content": "fix the flaky test"},
+                    {"role": "assistant", "content": "", "tool_calls": [
+                        {"id": "t", "type": "function",
+                         "function": {"name": "Bash", "arguments": "{}"}}]},
+                    {"role": "tool", "tool_call_id": "t", "content": "race in setup"},
+                    {"role": "assistant", "content": "fixed"},
+                ],
+                request_id="r1", wait=True, workspace_id="/repo", branch="main",
+            )
+            assert receipt["status"] == "done"
+            assert receipt["result"]["scene"] == "coding"
+            proc = core.factory.vector.get(receipt["result"]["procedure_ids"][0])
+            assert proc.custom["procedure"]["workspace_id"] == "/repo"
+            recalled = await remote.recall(query=candidate["task"], limit=0, raw_limit=0)
+            assert [m["memory_id"] for m in recalled["memories"]["procedures"]] == [
+                proc.node_id
+            ]
+            # The write arrived inside the first idle window: one digest after it.
+            await asyncio.wait_for(_until(lambda: digests), 5)
+            assert core.factory.cache.list_pending_s2_scopes() == []
+            status = await remote.status()
+            assert status["digest"]["auto"] is True and status["digest"]["last_error"] is None
+    await core.aclose()
+
+
+async def test_system1_core_never_digests(tmp_path: Path, fake_embed, fake_llm, fake_jev) -> None:
+    core = _memory_client(tmp_path / "hub", fake_embed, fake_llm, fake_jev)
+    app = create_hub_app(api_key="secret", hub_dir=tmp_path / "hub", client=core,
+                         settings=core.settings, digest_idle_seconds=0.01)
+    async with app.router.lifespan_context(app):
+        assert app.state.queue._on_idle is None
+    await core.aclose()
+
+
+def test_claude_code_hook_keeps_tool_trajectory() -> None:
+    from dual_mem.integrations.claude_code import to_messages
+
+    out = to_messages([
+        {"type": "user", "message": {"role": "user", "content": "fix it"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "checking"},
+            {"type": "tool_use", "id": "t", "name": "Read", "input": {"path": "a.py"}}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t", "content": "print(1)"}]}},
+        {"role": "assistant", "content": "done"},
+        {"type": "summary", "summary": "ignored"},
+    ])
+    assert out == [
+        {"role": "user", "content": "fix it"},
+        {"role": "assistant", "content": "checking", "tool_calls": [
+            {"id": "t", "type": "function",
+             "function": {"name": "Read", "arguments": "{\"path\": \"a.py\"}"}}]},
+        {"role": "tool", "tool_call_id": "t", "content": "print(1)"},
+        {"role": "assistant", "content": "done"},
+    ]
+
+
+def test_connect_reads_remote_core_builds_tunnel_and_attaches(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from dual_mem.memhub import service
+
+    ssh_calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        ssh_calls.append(argv)
+        return SimpleNamespace(
+            returncode=0,
+            stdout='tok-123\n{"base_url": "http://127.0.0.1:8765", "pid": 1}\n',
+            stderr="",
+        )
+
+    tunnels: list[dict] = []
+    monkeypatch.setattr(cli_hub.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        service, "install_tunnel",
+        lambda target, **kw: tunnels.append({"target": target, **kw})
+        or {"service_file": "/x/tunnel.plist", "log": "/x/tunnel.log", "actions": []},
+    )
+    uninstalled: list[int] = []
+    monkeypatch.setattr(service, "uninstall_tunnel", lambda: uninstalled.append(1) or {})
+    seen: list[tuple[str, str]] = []
+
+    async def identity(base_url, api_key, *, timeout):
+        seen.append((base_url, api_key))
+        return {"instance_id": "remote-core"}
+
+    monkeypatch.setattr(cli_hub, "_wait_identity", identity)
+    hub = tmp_path / "hub"
+    result = runner.invoke(
+        cli_main.app,
+        ["hub", "connect", "me@box", "--local-port", "18766",
+         "--ssh-arg=-p", "--ssh-arg=2222", "--hub-dir", str(hub)],
+    )
+    assert result.exit_code == 0, result.output
+    (argv,) = ssh_calls
+    assert argv[:3] == ["ssh", "-o", "BatchMode=yes"] and argv[3:6] == ["-p", "2222", "me@box"]
+    assert argv[-1] == "cat ~/.dual-mem/runtime-token && cat ~/.dual-mem/runtime.json"
+    assert tunnels == [{"target": "me@box", "local_port": 18766, "remote_port": 8765,
+                        "ssh_args": ["-p", "2222"], "hub_dir": str(hub)}]
+    assert seen == [("http://127.0.0.1:18766", "tok-123")]
+    saved = json.loads((hub / "hub.json").read_text())
+    assert saved == {"base_url": "http://127.0.0.1:18766", "api_key": "tok-123",
+                     "ssh_target": "me@box"}
+    out = json.loads(result.output)
+    assert out["config"]["api_key"] == "***" and out["identity"]["instance_id"] == "remote-core"
+    assert resolve_hub_config(hub).resolved_base_url() == "http://127.0.0.1:18766"
+
+    detached = runner.invoke(cli_main.app, ["hub", "detach", "--hub-dir", str(hub)])
+    assert detached.exit_code == 0 and uninstalled == [1]
+    assert not (hub / "hub.json").exists()
+
+
+def test_connect_fails_loudly_and_removes_a_dead_tunnel(tmp_path: Path, monkeypatch) -> None:
+    from dual_mem.memhub import service
+
+    monkeypatch.setattr(
+        cli_hub.subprocess, "run",
+        lambda argv, **kw: SimpleNamespace(
+            returncode=0, stdout='t\n{"base_url": "http://127.0.0.1:9000"}', stderr=""
+        ),
+    )
+    monkeypatch.setattr(
+        service, "install_tunnel",
+        lambda target, **kw: {"service_file": "f", "log": "/x/tunnel.log", "actions": []},
+    )
+    removed: list[int] = []
+    monkeypatch.setattr(service, "uninstall_tunnel", lambda: removed.append(1) or {})
+
+    async def unreachable(*a, **kw):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(cli_hub, "_wait_identity", unreachable)
+    hub = tmp_path / "hub"
+    result = runner.invoke(cli_main.app, ["hub", "connect", "box", "--hub-dir", str(hub)])
+    assert result.exit_code != 0 and "/x/tunnel.log" in result.output
+    assert removed == [1] and not (hub / "hub.json").exists()
+
+    monkeypatch.setattr(
+        cli_hub.subprocess, "run",
+        lambda argv, **kw: SimpleNamespace(returncode=1, stdout="", stderr="No such file"),
+    )
+    result = runner.invoke(cli_main.app, ["hub", "connect", "box", "--hub-dir", str(hub)])
+    assert result.exit_code != 0 and "install-service" in result.output
+
+
+async def test_wait_identity_retries_transport_but_not_a_rejected_token() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if len(calls) < 3:
+            raise httpx.ConnectError("tunnel starting", request=request)
+        return httpx.Response(401, json={"detail": "bad token"})
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            cli_hub,
+            "HubClient",
+            lambda **kw: HubClient(**kw, transport=httpx.MockTransport(handler)),
+        )
+        real_sleep = asyncio.sleep
+        mp.setattr(cli_hub.asyncio, "sleep", lambda _s: real_sleep(0))
+        start = time.monotonic()
+        with pytest.raises(httpx.HTTPStatusError):
+            await cli_hub._wait_identity("http://127.0.0.1:1", "t", timeout=30)
+    # Two refused connects are retried; the 401 ends the wait at once, not at 30s.
+    assert len(calls) == 3 and time.monotonic() - start < 5
+
+
+def test_tunnel_service_restarts_always_and_never_prompts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import plistlib
+
+    from dual_mem.memhub import service
+
+    monkeypatch.setattr(
+        service, "launchd_plist_path", lambda label=service.LABEL: tmp_path / f"{label}.plist"
+    )
+    monkeypatch.setattr(
+        service, "systemd_unit_path", lambda unit=service.SYSTEMD_UNIT: tmp_path / unit
+    )
+    commands: list[list[str]] = []
+
+    def run(argv):
+        commands.append(argv)
+        return {"command": argv, "returncode": 0, "stderr": ""}
+
+    info = service.install_tunnel(
+        "me@box", local_port=18766, remote_port=8765, ssh_args=["-p", "2222"],
+        hub_dir=tmp_path / "hub", runner=run,
+    )
+    argv = service.tunnel_argv("me@box", local_port=18766, remote_port=8765,
+                               ssh_args=["-p", "2222"])
+    assert argv[:2] == ["ssh", "-N"] and argv[-1] == "me@box"
+    assert "BatchMode=yes" in argv and "ExitOnForwardFailure=yes" in argv
+    assert argv[argv.index("-L") + 1] == "127.0.0.1:18766:127.0.0.1:8765"
+    path = Path(info["service_file"])
+    if sys.platform == "darwin":
+        plist = plistlib.loads(path.read_bytes())
+        assert plist["Label"] == service.TUNNEL_LABEL
+        assert plist["ProgramArguments"] == argv and plist["KeepAlive"] is True
+    else:
+        text = path.read_text()
+        assert "Restart=always" in text and "127.0.0.1:18766:127.0.0.1:8765" in text
+    # The Core service is a different file: connecting never touches it.
+    assert not service.launchd_plist_path(service.LABEL).exists()
+    assert service.uninstall_tunnel(runner=run)["removed"] is True
+    assert not path.exists()

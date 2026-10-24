@@ -33,6 +33,8 @@ class HubConfig:
 
     base_url: str = ""
     api_key: str = ""
+    # Set by ``hub connect``: the SSH target whose Core the local tunnel reaches.
+    ssh_target: str = ""
 
     def resolved_base_url(self) -> str:
         return (os.environ.get("DUAL_MEM_HUB_BASE_URL") or self.base_url).rstrip("/")

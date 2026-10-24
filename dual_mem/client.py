@@ -19,8 +19,17 @@ import logging
 import re
 import time
 import uuid
+from dataclasses import asdict
 from typing import Any
 
+from dual_mem.coding.preproc import (
+    clip_tool_results,
+    has_any_tool_message,
+    render_transcript,
+    strip_tool_messages,
+)
+from dual_mem.coding.types import PROCEDURE_KIND, revised_procedure
+from dual_mem.coding.writer import ProcedureWriter
 from dual_mem.config import Settings
 from dual_mem.isolation import build_filter
 from dual_mem.locks import LockRegistry
@@ -126,9 +135,11 @@ class MemoryClient:
         self._build_writer()
         self.reader = Reader(factory=self.factory)
         self._write_locks = self.factory.commit_locks
-        self._coding_writer = None
-        if self.settings.coding_enabled and self.factory.llm is not None:
-            self._init_coding_writer()
+        self.procedures = (
+            ProcedureWriter(factory=self.factory)
+            if self.settings.procedure_enabled
+            else None
+        )
 
     @classmethod
     def from_config(
@@ -226,32 +237,6 @@ class MemoryClient:
             return self._user_write_lock(app_id, user_id)
         return contextlib.nullcontext()
 
-    def _init_coding_writer(self) -> None:
-        """Create the coding memory subsystem (separate store + extractor + writer)."""
-        import os
-        from dual_mem.coding.store import CodingMemoryStore
-        from dual_mem.coding.extractor import CodingMemoryExtractor
-        from dual_mem.coding.reconciler import CodingMemoryReconciler
-        from dual_mem.coding.writer import CodingWriter
-
-        db_path = self.settings.coding_db_path or os.path.join(
-            self.settings.storage_dir, "coding_memory.db"
-        )
-        store = CodingMemoryStore(
-            db_path=db_path,
-            vector=self.factory.vector,
-            embed=self.factory.embed,
-        )
-        extractor = CodingMemoryExtractor(
-            llm=self.factory.llm,
-        )
-        self._coding_writer = CodingWriter(
-            store=store,
-            extractor=extractor,
-            reconciler=CodingMemoryReconciler(jev=self.factory.jev),
-            jev=self.factory.jev,
-        )
-
     async def add(
         self,
         *,
@@ -263,6 +248,8 @@ class MemoryClient:
         session_id: str = "",
         memory_at: int | None = None,
         request_id: str | None = None,
+        workspace_id: str | None = None,
+        branch: str | None = None,
     ) -> WriteResult:
         """Write one memory and run the cognition pipeline (Extract -> commit -> ...).
 
@@ -272,108 +259,54 @@ class MemoryClient:
         ``user_id`` is required. With ``messages``, L0_RAW and the extractor see the shaped
         full dialogue after host-injected system turns are removed.
 
+        Coding scene: when ``messages`` carry a tool trace (``role="tool"`` or assistant
+        ``tool_calls``) and JEV judges the conversation to be engineering work, the
+        same write also decides procedure memories (``kind="procedure"``). Chat
+        memories of the conversation are extracted as usual; both cite one L0_RAW
+        that keeps the (clipped) tool trajectory. ``workspace_id`` / ``branch`` are the
+        version boundary of those procedures: one only replaces another inside the
+        same workspace and branch.
+
         Cost per add: one candidate generation; a candidate with no similar current
         head is appended without a Jev call, otherwise one target question and (when a
-        target is chosen) one action question. ``WriteResult.status`` reports
+        target is chosen) one action question. A tool trace adds one scene question,
+        one procedure generation and its decisions. ``WriteResult.status`` reports
         committed / known / raw_only. Batch ``messages`` at session end to reduce cost.
         """
-        # Only a caller-supplied id can be replayed; the coding store records nothing
-        # for generated ids.
-        idempotency_key = request_id
         request_id = request_id or str(uuid.uuid4())
         start = time.perf_counter()
         resolved_app_id = self._resolve_app_id(app_id)
 
-        user_turn_count = 0
-        if messages:
-            # Coding path: check for tool messages before chat normalization
-            if self._coding_writer:
-                raw_dicts = [
-                    (
-                        dict(m)
-                        if isinstance(m, dict)
-                        else {"role": m.role, "content": m.content}
-                    )
-                    for m in messages
-                    if (m.get("role") if isinstance(m, dict) else m.role) != "system"
-                ]
-                # Only text is scrubbed; structured parts stay intact (lossless L0).
-                for raw in raw_dicts:
-                    if isinstance(raw.get("content"), str):
-                        raw["content"] = strip_memory_injection(raw["content"])
-                from dual_mem.coding.preproc import (
-                    has_any_tool_message,
-                    strip_tool_messages,
-                )
-
-                if has_any_tool_message(raw_dicts):
-                    coding_result = await self._coding_writer.write(
-                        raw_dicts,
-                        user_id=user_id,
-                        agent_id=agent_id,
-                        session_id=session_id,
-                        app_id=resolved_app_id,
-                        request_id=idempotency_key,
-                    )
-                    if coding_result is not None:
-                        mids = coding_result.get("memory_ids") or []
-                        decisions = [
-                            MemoryDecision(
-                                action=d["action"],
-                                update_type=d.get("update_type") or None,
-                                targets=list(d.get("targets") or []),
-                                proposal_ids=list(d.get("proposal_ids") or []),
-                                source_ids=list(d.get("source_ids") or []),
-                                reason=d.get("reason") or "",
-                            )
-                            for d in coding_result.get("decisions", [])
-                        ]
-                        return WriteResult(
-                            success=True,
-                            memory_id=coding_result["raw_id"],
-                            extra_node_ids=mids,
-                            extracted_count=len(mids),
-                            commit_passed=coding_result["commit_passed"],
-                            is_ephemeral=bool(decisions)
-                            and all(d.action == "RAW_ONLY" for d in decisions),
-                            decisions=decisions,
-                            status=write_status(decisions),
-                            request_id=request_id,
-                            processing_time_ms=round(
-                                (time.perf_counter() - start) * 1000, 2
-                            ),
-                        )
-                    # Not coding → strip tool messages so chat path sees clean dialogue
-                    messages = strip_tool_messages(raw_dicts)
-            normalized = _normalize_messages(messages)
-            # Host-injected role=system turns (e.g. "You are a helpful assistant") are not
-            # user memory — drop before L1/extract. Extract LLM's own EXTRACT_* template is
-            # separate instruction, not part of this dialogue.
-            normalized = [m for m in normalized if m.role != "system"]
-            normalized = [
-                ChatMessage(role=m.role, content=strip_memory_injection(m.content))
-                for m in normalized
+        trajectory: list[dict] | None = None
+        if messages and self.procedures is not None:
+            turns = [
+                dict(m) if isinstance(m, dict) else {"role": m.role, "content": m.content}
+                for m in messages
             ]
-            normalized = [m for m in normalized if m.content.strip()]
-            cpt = self.settings.chars_per_token
-            threshold_chars = int(
-                self.settings.llm_context_window
-                * self.settings.extract_dialogue_context_ratio
-                * cpt
+            turns = [m for m in turns if m.get("role") != "system"]
+            if has_any_tool_message(turns):
+                # Only text is scrubbed; structured parts stay intact.
+                for turn in turns:
+                    if isinstance(turn.get("content"), str):
+                        turn["content"] = strip_memory_injection(turn["content"])
+                trajectory = clip_tool_results(
+                    turns, self.settings.procedure_tool_result_max_chars
+                )
+                # The chat extractor sees the conversation without tool turns.
+                messages = strip_tool_messages(turns)
+
+        normalized: list[ChatMessage] | None = None
+        user_turn_count = 0
+        if messages is not None:
+            content, normalized, user_turn_count = _prepare_write_text(
+                content, messages, settings=self.settings
             )
-            normalized = _shape_history(
-                normalized,
-                threshold_chars=threshold_chars,
-                assistant_max_chars=int(
-                    self.settings.extract_assistant_max_tokens * cpt
-                ),
-            )
-            user_turn_count = sum(
-                1 for m in normalized if m.role == "user" and m.content.strip()
-            )
-            content = _format_dialogue(normalized)
         else:
             content = strip_memory_injection(content)
+        if trajectory is not None:
+            # L0_RAW keeps the trajectory: tool calls and results are the evidence
+            # procedures cite. Chat extraction still reads ``normalized``.
+            content = render_transcript(trajectory)
 
         if not content.strip():
             return WriteResult(
@@ -388,12 +321,13 @@ class MemoryClient:
             )
 
         logger.info(
-            "add app=%s user=%s mode=%s len=%d turns=%d",
+            "add app=%s user=%s mode=%s len=%d turns=%d tools=%s",
             resolved_app_id,
             user_id,
             self.mode,
             len(content),
             user_turn_count,
+            trajectory is not None,
         )
 
         write_kwargs = {
@@ -405,20 +339,46 @@ class MemoryClient:
             "request_id": request_id,
             "memory_at": memory_at,
         }
-        write_kwargs["messages"] = normalized if messages is not None else None
         async with self._user_write_lock_ctx(resolved_app_id, user_id):
-            result = await self.writer.write(**write_kwargs)
+            if trajectory is not None and not normalized:
+                # Tool turns only: nothing for the chat extractor, keep the source.
+                result = await self.writer.write_raw(**write_kwargs)
+            else:
+                result = await self.writer.write(**write_kwargs, messages=normalized)
+            procedure = None
+            if trajectory is not None:
+                raw = self.factory.vector.get(result.memory_id)
+                procedure = await self.procedures.write(
+                    messages=trajectory,
+                    raw=raw,
+                    request_id=request_id,
+                    workspace_id=workspace_id,
+                    branch=branch,
+                )
+                if procedure.committed and isinstance(self.writer, System2Writer):
+                    self.factory.cache.enqueue_s2_task(
+                        user_id=user_id, app_id=resolved_app_id, agent_id=agent_id
+                    )
+        decisions = list(result.decisions)
+        node_ids = list(result.extra_node_ids)
+        if procedure is not None and procedure.coding:
+            decisions.extend(procedure.decisions)
+            node_ids.extend(procedure.node_ids)
         return WriteResult(
             success=True,
             memory_id=result.memory_id,
             request_id=request_id,
             processing_time_ms=round((time.perf_counter() - start) * 1000, 2),
-            commit_passed=result.commit_passed,
-            extracted_count=len(result.extra_node_ids),
-            extra_node_ids=list(result.extra_node_ids),
-            is_ephemeral=result.is_ephemeral,
-            decisions=result.decisions,
-            status=result.status,
+            commit_passed=result.commit_passed
+            or (procedure is not None and procedure.committed),
+            extracted_count=len(node_ids),
+            extra_node_ids=node_ids,
+            is_ephemeral=bool(decisions)
+            and all(d.action == "RAW_ONLY" for d in decisions),
+            decisions=decisions,
+            status=write_status(decisions),
+            scene="coding" if procedure is not None and procedure.coding else "chat",
+            procedure_ids=list(procedure.node_ids) if procedure is not None else [],
         )
 
     async def add_raw(
@@ -552,8 +512,10 @@ class MemoryClient:
         as_of: int | None = None,
         raw_limit: int = 0,
         include_relations: bool = True,
+        procedure_limit: int = 0,
+        procedure_min_score: float = 0.3,
     ) -> SearchResult:
-        """Semantic search; returns profile / proactive / normal groups.
+        """Semantic search; returns profile / proactive / normal / procedure groups.
 
         读路径只用 embedding + 混合检索，无 LLM，可在 agent 每轮生成前安全调用。
         Read path uses embedding + hybrid retrieval — no LLM; safe to call every user turn.
@@ -595,6 +557,11 @@ class MemoryClient:
                 evidence for details extraction did not keep.
             include_relations: 为命中填充一跳 ``previous``（被直接取代的旧值）与仍有效的
                 ``conflicts`` / attach the one-hop previous value and live conflicts.
+            procedure_limit: 工程经验路（``kind="procedure"``）条数，``0`` = 关闭。
+                procedure 不进入 normal/profile 路，分数只在本组内比较；coding agent
+                的检索打开它，对话场景保持 0 / size of the procedure route, ``0`` = OFF.
+                Procedures never enter the chat routes; their scores rank within the group.
+            procedure_min_score: 工程经验路最低融合分 / min fused score for procedures.
         """
         request_id = request_id or str(uuid.uuid4())
         start = time.perf_counter()
@@ -636,6 +603,8 @@ class MemoryClient:
             as_of=as_of,
             raw_limit=raw_limit,
             include_relations=include_relations,
+            procedure_limit=procedure_limit,
+            procedure_min_score=procedure_min_score,
         )
 
         return SearchResult(
@@ -720,11 +689,18 @@ class MemoryClient:
         if not content.strip() or not node.is_latest:
             return UpdateResult(success=False, error_code=409)
         scope = (node.app_id, node.user_id, node.agent_id)
+        custom = dict(node.custom or {})
+        index_text = content
+        if node.kind == PROCEDURE_KIND:
+            # A procedure correction replaces its solution; the task stays the index.
+            draft = revised_procedure(node, content)
+            custom["procedure"] = asdict(draft.detail())
+            content, index_text = draft.content(), draft.index_text()
         replacement = replace(
             node,
             node_id=str(uuid.uuid4()),
             content=content,
-            embedding=await self.factory.embed.embed(content),
+            embedding=await self.factory.embed.embed(index_text),
             supersedes=[node.node_id],
             superseded_by=[],
             revision=0,
@@ -732,7 +708,7 @@ class MemoryClient:
             gmt_modified=None,
             s2_evidence_count=0,
             custom={
-                **(node.custom or {}),
+                **custom,
                 "update_type": "OVERRIDE",
                 "explicit_update": True,
             },
@@ -843,8 +819,6 @@ class MemoryClient:
         if self.settings.request_outcome_ttl_seconds:
             cutoff = time.time() - self.settings.request_outcome_ttl_seconds
             self.factory.cache.purge_request_outcomes(older_than=cutoff)
-            if self._coding_writer:
-                self._coding_writer.store.purge_requests(older_than=cutoff)
         if not isinstance(self.writer, System2Writer):
             return DigestResult(success=True, processed=0, timing=timing)
         processed = await self.writer.digest_pending()
@@ -853,31 +827,8 @@ class MemoryClient:
             self.factory.cache.purge_done_queues()
         return DigestResult(success=True, processed=processed, timing=timing)
 
-    async def search_coding(
-        self,
-        *,
-        query: str,
-        user_id: str,
-        agent_id: str = "",
-        app_id: str | None = None,
-        top_k: int = 10,
-    ) -> list[dict]:
-        """Search coding memories (tool-use / engineering memories)."""
-        if not self._coding_writer:
-            return []
-        resolved = self._resolve_app_id(app_id)
-        return await self._coding_writer.search(
-            query=query,
-            user_id=user_id,
-            agent_id=agent_id,
-            app_id=resolved,
-            top_k=top_k,
-        )
-
     async def aclose(self) -> None:
         """Release storage resources. Idempotent; call once at application shutdown."""
-        if self._coding_writer is not None:
-            self._coding_writer.store.close()
         provider = self.factory._jev
         if provider is not None and hasattr(provider, "aclose"):
             await provider.aclose()

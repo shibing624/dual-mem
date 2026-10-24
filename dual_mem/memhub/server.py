@@ -42,6 +42,9 @@ class HubWriteRequest(BaseModel):
     memory_at: int | None = None
     request_id: str
     raw_only: bool = False
+    # Version boundary of procedures from a tool trajectory.
+    workspace_id: str | None = None
+    branch: str | None = None
     # ``False`` returns as soon as the evidence is durable; the job runs later.
     wait: bool = False
 
@@ -50,6 +53,8 @@ class HubRecallRequest(BaseModel):
     query: str
     limit: int = 10
     raw_limit: int = 5
+    # MemHub serves coding CLIs: engineering experience is recalled by default.
+    procedure_limit: int = 3
 
 
 class HubProcessLock:
@@ -98,12 +103,16 @@ def create_hub_app(
     settings: Settings | None = None,
     published_base_url: str = "http://127.0.0.1:8765",
     queue_retry_seconds: float = 30.0,
+    digest_idle_seconds: float = 300.0,
 ) -> FastAPI:
     """Create the personal Hub Core; one process owns one local store.
 
     ``api_key`` (else the persisted runtime token, created on first start) is
     written to the token file inside the lifespan, after the exclusive lock, so a
     second ``hub serve`` cannot replace the running Core's token on its way out.
+
+    In ``dual`` mode the Core runs ``digest()`` itself once its write queue has
+    been idle for ``digest_idle_seconds``; ``0`` turns that off.
     """
     root = hub_root(hub_dir)
     lock = HubProcessLock(root / "hub.lock")
@@ -141,11 +150,24 @@ def create_hub_app(
                 if payload["raw_only"]:
                     result = await core_client.add_raw(**kwargs)
                 else:
-                    result = await core_client.add(**kwargs)
+                    # Rows queued before procedures existed carry no boundary.
+                    result = await core_client.add(
+                        **kwargs,
+                        workspace_id=payload.get("workspace_id"),
+                        branch=payload.get("branch"),
+                    )
                 return result.to_dict()
 
+            async def digest() -> None:
+                await core_client.digest()
+
+            auto_digest = core_client.settings.mode == "dual" and digest_idle_seconds > 0
             queue = HubWriteQueue(
-                root / "hub.db", process, retry_base_seconds=queue_retry_seconds
+                root / "hub.db",
+                process,
+                retry_base_seconds=queue_retry_seconds,
+                on_idle=digest if auto_digest else None,
+                idle_seconds=digest_idle_seconds,
             )
             app.state.queue = queue
             queue.start()
@@ -210,7 +232,13 @@ def create_hub_app(
                 status_code=400,
                 detail="content and messages cannot both be empty",
             )
-        job = app.state.queue.submit(body.model_dump(exclude={"wait"}))
+        payload = body.model_dump(exclude={"wait"})
+        # An absent boundary stays absent, so receipts written before boundaries
+        # existed keep their fingerprint when the same batch is resubmitted.
+        for key in ("workspace_id", "branch"):
+            if payload[key] is None:
+                del payload[key]
+        job = app.state.queue.submit(payload)
         if body.wait:
             job = await app.state.queue.wait(body.request_id)
         return job
@@ -236,13 +264,14 @@ def create_hub_app(
         core_client: MemoryClient = app.state.client
         memories = SearchMemories()
         conversations = SearchMemories()
-        if body.limit > 0:
+        if body.limit > 0 or body.procedure_limit > 0:
             memories = (
                 await core_client.search(
                     query=body.query,
                     user_id=HUB_USER_ID,
                     agent_ids=[""],
                     limit=body.limit,
+                    procedure_limit=body.procedure_limit,
                 )
             ).memories
         if body.raw_limit > 0:
@@ -288,6 +317,11 @@ def create_hub_app(
                 ),
             },
             "writes": app.state.queue.counts(),
+            "digest": {
+                "auto": app.state.client.settings.mode == "dual" and digest_idle_seconds > 0,
+                "idle_seconds": digest_idle_seconds,
+                "last_error": app.state.queue.last_idle_error,
+            },
         }
 
     return app

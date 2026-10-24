@@ -15,6 +15,7 @@ _GROUP_TITLES = [
     ("proactive", "【主动 Proactive】"),
     ("normal", "【常规记忆 Normal】"),
     ("raw", "【原文 Raw】"),
+    ("procedures", "【工程经验 Procedures】"),
 ]
 
 _DATE_PREAMBLE = (

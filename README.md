@@ -55,7 +55,7 @@ dual-mem hub recall "我之前做过哪些技术选择"
 
 ### 4. 🛠️ 工程排障也能留下来
 
-Coding 记忆吃的是 coding agent 的工具轨迹，不是一份源代码。`add(messages=...)` 里要有 `role="tool"` 或 assistant 的 `tool_calls`，JEV 再把整段判成工程场景，才会抽出根因、方案和文件。`search_coding` 只查这条库。用法见 [快速开始 · Coding 记忆](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md#coding)。
+chat 和 coding 是同一个 `add()` / `search()`。`messages` 里带工具轨迹（`role="tool"` 或 assistant 的 `tool_calls`）、且 JEV 判成工程会话时，除了照常写入的事实和画像，还会抽出可复用的工程经验（`kind="procedure"`：任务、方案、文件、适用边界）。它和对话记忆共用存储、版本链和 JEV 裁决，`search(procedure_limit=3)` 单独返回 `procedures` 组；`dual` 模式下也参与 `digest()` 归纳。用法见 [快速开始 · Coding 记忆](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md#coding)。
 
 ## 安装
 
@@ -98,15 +98,14 @@ with SyncMemoryClient() as memory:
 
 ### Coding 记忆
 
-`coding_enabled=True` 之后，只有 `messages` 里出现工具轨迹才会进 Coding 库：某条是 `role="tool"`，或者 assistant 带了 `tool_calls`。这是结构条件。接着 JEV 判断整段是不是工程场景，是才抽出 `task` / `solution` / `files`。
+不需要开关，也没有第二个检索入口。`messages` 里出现工具轨迹（某条是 `role="tool"`，或者 assistant 带了 `tool_calls`）是结构条件；接着 JEV 判断整段是不是工程会话，是才另外抽出 `task` / `solution` / `files`，作为 `kind="procedure"` 的 L1 记忆。同一段会话里用户顺口说的偏好（例如「我习惯用 uv」）照常进事实和画像。
 
-把几个 `.py` 文件的正文放进 `add(content=...)` 或普通 user 消息，没有工具轨迹，走的是 chat 记忆。`search()` 能搜到当事实记下的内容，`search_coding` 不会返回。
+把几个 `.py` 文件的正文放进 `add(content=...)` 或普通 user 消息，没有工具轨迹，只走 chat 记忆。
 
 ```python
 from dual_mem import SyncMemoryClient
-from dual_mem.config import Settings
 
-with SyncMemoryClient(settings=Settings(coding_enabled=True)) as memory:
+with SyncMemoryClient() as memory:
     memory.add(
         messages=[
             {"role": "user", "content": "高并发写入 SQLite 偶发 database is locked，帮我排查。"},
@@ -126,16 +125,21 @@ with SyncMemoryClient(settings=Settings(coding_enabled=True)) as memory:
             },
         ],
         user_id="alice",
+        workspace_id="~/code/app",  # procedure 的版本边界，可省略
     )
 
-    hits = memory.search_coding(query="SQLite 并发写入报 database is locked 怎么解决", user_id="alice")
-    for h in hits:
-        print(h["task"], "->", h["solution"], h["files"])
+    res = memory.search(
+        query="SQLite 并发写入报 database is locked 怎么解决",
+        user_id="alice",
+        procedure_limit=3,  # 默认 0：chat 检索结果和以前完全一样
+    )
+    for m in res.memories.procedures:
+        print(m.procedure.task, "->", m.procedure.solution, m.procedure.files)
 ```
 
 ### 示例
 
-两条最值得看的：[`examples/02_dual.py`](https://github.com/shibing624/dual-mem/blob/main/examples/02_dual.py) 是 `digest()` 归纳 L3，[`examples/06_coding_memory.py`](https://github.com/shibing624/dual-mem/blob/main/examples/06_coding_memory.py) 是工具轨迹写入和 `search_coding`。REST、CLI、生命周期在 [`examples/`](https://github.com/shibing624/dual-mem/tree/main/examples) 目录里。异步客户端见 [快速开始](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md)。
+两条最值得看的：[`examples/02_dual.py`](https://github.com/shibing624/dual-mem/blob/main/examples/02_dual.py) 是 `digest()` 归纳 L3，[`examples/06_coding_memory.py`](https://github.com/shibing624/dual-mem/blob/main/examples/06_coding_memory.py) 是工具轨迹写入、方案演化和 `procedures` 组检索。REST、CLI、生命周期在 [`examples/`](https://github.com/shibing624/dual-mem/tree/main/examples) 目录里。异步客户端见 [快速开始](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md)。
 
 ## 功能特性
 
@@ -173,6 +177,7 @@ with SyncMemoryClient(settings=Settings(coding_enabled=True)) as memory:
 
 ## News
 
+- [2026/10/24] **v0.2.0**：chat 与 coding 统一成同一套 `add()` / `search()`。带工具轨迹的工程会话在对话记忆之外沉淀 `kind="procedure"` 工程经验，共用存储、版本链和 JEV 裁决，`search(procedure_limit=3)` 单独返回 `procedures` 组；`dual` 的 `digest()` 也覆盖工程经验。删除 `search_coding` 与独立的 coding 库。chat 路径的 prompt、裁决与召回不变。MemHub 采集保留工具轨迹，dual 模式空闲时自动 digest；新增 `dual-mem hub connect user@server`，一条命令建隧道、读 token、写好 `hub.json`。详见 [Release-v0.2.0](https://github.com/shibing624/dual-mem/releases/tag/v0.2.0)。
 - [2026/10/23] **v0.1.5**：修复 Coding 记忆接真实模型时写不进去的问题。抽取改为返回 `{"candidates": [...]}` 对象，适配默认 `llm_json_mode`；去掉 coverage 硬门槛；同一批写入可以覆盖同一条旧方案；裁决只看当前版本边界内的记录；同一用户的并发写入按 scope 串行。快速上手补充 Coding 记忆章节，`examples/06_coding_memory.py` 增加方案更新后只返回当前版本的示例。详见 [Release-v0.1.5](https://github.com/shibing624/dual-mem/releases/tag/v0.1.5)。
 - [2026/10/23] **v0.1.4**：新增 MemHub 本地单 Core 跨工具记忆中枢（支持 Claude Code / Codex / Cursor / Hermes / Agentica 会话增量导入、后台持久队列写入、开机自启与云端隧道连接）；升级 System 2 v3 聚类认知与版本桥召回；补充 Coding 记忆示例并精简无收益配置项；在 LoCoMo（74.7）、LongMemEval（91.7）、PersonaMem-v2（50.0）同场评测中全面领先 hy-memory 2.0.4 与 mem0。详见 [Release-v0.1.4](https://github.com/shibing624/dual-mem/releases/tag/v0.1.4)。
 - [2026/10/15] **v0.1.3**：升级为 L0_RAW / L1_FACT / L2_PROFILE / L3_DERIVED 四层记忆架构与 JEV 专用决策模型写路径，支持 target-first 关系裁决、版本演化链与历史回溯；新增 Agentica / Claude Code / Hermes / OpenClaw 原生生态集成与 Coding 记忆子系统（存储格式不兼容旧版，需使用新目录）。详见 [Release-v0.1.3](https://github.com/shibing624/dual-mem/releases/tag/v0.1.3)。

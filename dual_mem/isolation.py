@@ -22,8 +22,12 @@ def build_filter(
     statuses: list[MemoryStatus] | None = None,
     created_after: int | None = None,
     latest_only: bool = False,
+    kinds: list[str] | None = None,
+    exclude_kinds: list[str] | None = None,
 ) -> dict:
-    """Build a metadata where-filter from scope, layer, status and time constraints."""
+    """Build a metadata where-filter from scope, layer, kind, status and time constraints."""
+    if kinds is not None and exclude_kinds is not None:
+        raise ValueError("pass kinds or exclude_kinds, not both")
     where: dict = {
         "app_id": {"$in": app_ids},
         "user_id": user_id,
@@ -34,6 +38,10 @@ def build_filter(
         where["session_id"] = {"$in": session_ids}
     if layers is not None:
         where["layer"] = {"$in": [layer.value for layer in layers]}
+    if kinds is not None:
+        where["kind"] = {"$in": kinds}
+    if exclude_kinds is not None:
+        where["kind"] = {"$nin": exclude_kinds}
     if statuses is not None:
         where["status"] = {"$in": [status.value for status in statuses]}
     if created_after is not None:

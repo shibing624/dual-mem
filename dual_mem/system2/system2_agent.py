@@ -39,6 +39,7 @@ import uuid
 import numpy as np
 
 from dual_mem.errors import DecisionContextError
+from dual_mem.coding.types import PROCEDURE_KIND
 from dual_mem.isolation import build_filter
 from dual_mem.registry import ComponentFactory
 from dual_mem.storage.graph_store import GraphNode
@@ -276,7 +277,11 @@ class System2Agent:
                 logger.warning("System2 scope=%s cross-domain sweep dropped: %s", scope, exc)
         if settings.system2_catalog_enabled:
             try:
-                stats["catalog_entries"] = await self._catalog(scope, own)
+                # The persona catalog describes the person; engineering procedures
+                # still feed schemas above but are not persona facts.
+                stats["catalog_entries"] = await self._catalog(
+                    scope, [f for f in own if f.kind != PROCEDURE_KIND]
+                )
             except (DecisionContextError, ValueError) as exc:
                 logger.warning("System2 scope=%s persona catalog dropped: %s", scope, exc)
         return stats

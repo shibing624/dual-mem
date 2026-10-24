@@ -87,16 +87,20 @@ await client.add(
 
 ## Coding 记忆（工程排障经验）
 
-实验功能，默认关闭。开启后，`add(messages=...)` 里只要出现 tool 调用（assistant 的
-`tool_calls` 或 `role="tool"` 结果），就先由 JEV 判断是否工程场景：是则沉淀为结构化工程
-经验，否则去掉 tool 消息后按普通对话写入。没有 tool 消息的写入完全不受影响。
+chat 和 coding 用同一个 `add()` / `search()`，不需要开关。`add(messages=...)` 里出现工具轨迹
+（assistant 的 `tool_calls` 或 `role="tool"` 结果）时，JEV 判断整段是不是工程会话：
+
+- **是**：照常抽事实和画像，同时另外抽出可复用的工程经验，存成 `kind="procedure"` 的 L1 记忆。
+  两路抽取并行，结果进同一次写入。
+- **否**：去掉工具消息后按普通对话写入。
+
+没有工具消息的写入完全不受影响，chat 的 prompt、裁决和召回与此前逐字节一致。
 
 ```python
 import json
 from dual_mem import MemoryClient
-from dual_mem.config import Settings
 
-client = MemoryClient(settings=Settings(coding_enabled=True))
+client = MemoryClient()
 
 result = await client.add(
     messages=[
@@ -114,28 +118,44 @@ result = await client.add(
         {"role": "assistant", "content": "写事务改为 BEGIN IMMEDIATE，timeout 调到 30s。"},
     ],
     user_id="alice",
+    workspace_id="~/code/app",   # 可选：procedure 的版本边界
+    branch="main",
 )
-print(result.status, [f"{d.action}/{d.update_type}" for d in result.decisions])
+print(result.scene, result.procedure_ids)   # "coding", [新 procedure 版本 id]
 
-hits = await client.search_coding(query="SQLite database is locked 怎么解决", user_id="alice")
-for h in hits:
-    print(h["task"], "->", h["solution"], h["files"], h["supersedes"])
+res = await client.search(
+    query="SQLite database is locked 怎么解决",
+    user_id="alice",
+    procedure_limit=3,          # 默认 0 = 不返回 procedures 组
+)
+for m in res.memories.procedures:
+    p = m.procedure
+    print(p.task, "->", p.solution, p.files, m.evolution_chain)
 ```
 
 - **消息格式**：OpenAI 风格。`tool_calls` 支持嵌套 `function.name / function.arguments`
-  （字符串或对象）和扁平 `name / arguments` 两种写法；`files` 从 `path`、`file_path` 等路径
-  参数结构化提取。content 可以是字符串或结构化 parts，L0 原样保存。
-- **一条经验**包含 `task`（检索问题）、`solution`、`search_keys`、`boundary_envs`、
-  `boundary_scope`（`strict` / `project` / `user` / `global`）、`files`。
+  （字符串或对象）和扁平 `name / arguments`；`files` 从 `path`、`file_path` 等路径参数结构化
+  提取。单条工具结果超过 `procedure_tool_result_max_chars`（默认 4000）时保留头尾。
+- **一条经验**（`MemoryItem.procedure`）：`task`（检索问题）、`solution`、`search_keys`、
+  `boundary_envs`、`boundary_scope`（`strict` / `project` / `user` / `global`）、`files`、
+  `workspace_id`、`branch`。`content` 是 task + solution 的可读文本；向量由 task 和
+  `search_keys` 拼接后计算（检索时匹配的是「问题」一侧，而不是方案正文）。
+- **存储与隔离**：和对话记忆同一个向量库、同一个 scope（`app_id / user_id / agent_id`）和同一条
+  版本链。chat 的 profile / proactive / normal 组和 chat 写入裁决都看不到 procedure，
+  两边分数不需要互相比较。
 - **版本演化**：同一问题出现新方案时，JEV 判 OVERRIDE / MERGE 追加新版本并退役旧版本；
-  `search_coding` 只返回当前版本，结果的 `supersedes` 指向被替换的旧版本。只有同一版本边界
+  检索只返回当前版本，`evolution_chain` 指向被替换的旧版本。只有同一版本边界
   （workspace / branch / boundary_scope，`strict` 还要求同一 session）内的经验之间才会建立关系。
-- **返回值**：`memory_id` 是保存完整工具会话的 L0 id，`extra_node_ids` 是新写入的经验 id；
-  `commit_passed` 表示追加了版本或归档了旧经验，`status` 为 committed / known / raw_only。
-- **代价**：每次写入 = 一次 scene 判断 + 一次候选生成 + 裁决（无相关旧经验时一次，有则两次）。
-  建议会话结束时整段写入，不要每轮调用。
-- **存储**：`{storage_dir}/coding_memory.db`（`coding_db_path` 可改），与对话记忆分开；
-  `search` 不返回 coding 经验，需用 `search_coding`。
+  `update()` / `delete()` / `get()` / `list()` 对 procedure 同样适用。
+- **裁决**：JEV 判 `INVALID`（候选与来源不符）只丢弃那一条候选，其它候选和 L0 来源照常保留；
+  `NEED_CONTEXT` 写成独立版本。
+- **dual**：procedure 写入同样登记 System 2 待处理 scope，`digest()` 可以从多次工程经验里
+  归纳出习惯（例如「这个用户一贯先跑完整测试」）；人格目录（catalog）只引用对话事实。
+- **代价**：带工具轨迹的写入 = 一次 scene 判断 + chat 抽取与 procedure 抽取（并行）+ 各自裁决。
+  建议会话结束时整段写入，不要每轮调用。`procedure_enabled=False` 可整体关闭。
+- **接口**：REST `POST /v1/memories/`（`workspace_id` / `branch`）与 `POST /v1/memories/search`
+  （`procedure_limit` / `procedure_min_score`）、MCP 同名参数、CLI `dual-mem add --workspace-id`
+  和 `dual-mem search --procedure-limit`。MemHub 采集 Claude Code / Codex 会话时保留工具轨迹。
 
 完整可运行示例（含方案演化）：[`examples/06_coding_memory.py`](https://github.com/shibing624/dual-mem/blob/main/examples/06_coding_memory.py)。
 
@@ -221,7 +241,15 @@ if __name__ == "__main__":
 
 ## dual 模式与 System2 触发
 
-dual 写入只登记待处理 scope，不启动后台任务。由应用在会话结束、批量导入完成或其它明确边界调用 `await client.digest()`。
+dual 的 `add()` 和 system1 完全相同，返回前已完成 L1/L2（以及 procedure）写入；
+额外只做一件事：把这个 scope 登记为待归纳。SDK 不启动后台任务，由应用在会话结束、
+批量导入完成或其它明确边界调用 `await client.digest()`。同一 scope 不论 add 多少次，
+一次 digest 只处理一遍。
+
+开启方式（优先级从高到低）：`MemoryClient(mode="dual")`、`DUAL_MEM_MODE=dual`、
+`~/.dual_mem/config.yaml` 里 `mode: dual`；CLI 用 `--mode dual`（`dual-mem digest --mode dual`
+也要带上）。MemHub 以 dual 启动时（`dual-mem hub serve --mode dual`），Core 会在写入队列空闲
+`--digest-idle` 秒（默认 300，0 = 关闭）后自动 digest，不需要任何人手动调用。
 
 ```python
 from dual_mem import MemoryClient
@@ -255,7 +283,7 @@ dual-mem-mcp                                              # MCP stdio
 dual-mem-mcp --transport streamable-http --port 8765     # MCP HTTP /mcp
 dual-mem add --content "用户喜欢咖啡" --user-id u1
 dual-mem search "饮品偏好" --user-id u1
-dual-mem digest                                           # dual：生成 L3_DERIVED
+dual-mem digest --mode dual                               # dual：生成 L3_DERIVED
 ```
 
 REST 契约：`POST /v1/memories/`、`POST /v1/memories/search`、`GET|DELETE /v1/memories/{id}` 等，完整对照见 [MCP / REST](../mcp_integration.md)。

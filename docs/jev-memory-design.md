@@ -137,45 +137,37 @@ Smoke 通过 MemoryClient 验证演化、已知判断、四个并行 scope 和�
 真实验证使用确定性 embedding，生成与裁决分别计时。最新版数据见下方最终本地验证；
 历史报告均保留在本地 docs/design/validation，不进入 Git。
 
-## Coding 工具来源
+## Coding 场景：procedure 记忆
 
-实验性 coding 路径（`coding_enabled=True`）。`messages` 里出现 `role="tool"` 或
-assistant `tool_calls` 才进入；其余写入走主路径。
+chat 和 coding 不是两套系统。场景是每条数据的属性：带工具轨迹、被判为工程会话的写入，
+除了 chat 抽取，还另外产出 `kind="procedure"` 的 L1 记忆。存储、scope、版本链、
+演化链接、`apply_version_plan`、幂等和 System 2 队列全部复用主路径。
 
-1. **先留来源**：完整 messages（含 tool arguments / results，结构化 content 原样）写入
-   `coding_sources` 与 L0_RAW，之后任何模型调用失败都不丢来源。
-2. **scene**：一次 JEV choice 判 CODING / CHAT。CHAT 去掉 tool 消息后改走主路径。
-3. **候选生成**：一次 LLM 调用，输出 `{"candidates": [...]}` 对象（JSON 模式只允许对象，
-   不能是裸数组）。字段：`task`、`search_keys`、`solution`、`boundary_envs`（字符串）、
-   `boundary_scope`、`confidence`；`files` 由 tool_calls 的路径参数结构化提取。
-   只抽一次；不做 coverage 判定，与主路径一致。空候选直接 RAW_ONLY，不调用 JEV。
-4. **target-first 裁决**：
-   - 每个候选只看到**同一版本边界**内的 current head：相同 workspace / branch /
-     boundary_scope，`strict` 还要求同一 session。其他边界的 head 不会作为选项出现。
-   - 有可选 head 时先选 target（含 `NONE` / `MULTIPLE`；`MULTIPLE` 展开为逐个 INCLUDE，
-     必须唯一确定一个 head），再按是否选中给出 action 选项；没有可选 head 时直接问 action。
-   - head 超过 `candidate_limit`（默认 64，最大 253，给 `NONE` / `MULTIPLE` 留位）时先分页
-     问 INCLUDE / EXCLUDE 缩小范围。
-5. **执行**：`OVERRIDE` / `MERGE` / `NEGATE` 追加新 ID 并退役 target；`DELETE` 只归档；
-   `SUPPLEMENT` / `TEMPORAL` / `CONFLICT` / `RAW_ONLY` 不退役任何 head。同一批多个候选可以
-   替换同一个 head：head 退役一次，`superseded_by` 链接全部后继。同一 head 既被替换又被
-   归档是矛盾裁决，在预留任何行之前报 `CodingDecisionError`。`INVALID` / `NEED_CONTEXT`
-   同样报错，来源已保留。
+1. **先留来源**：完整 messages（含 tool arguments / results；单条工具结果超过
+   `procedure_tool_result_max_chars` 时保留头尾）写入 L0_RAW，之后任何模型调用失败都不丢来源。
+2. **scene**：`messages` 里有 `role="tool"` 或 assistant `tool_calls`（结构条件）时，一次
+   JEV choice 判 CODING / CHAT。CHAT 去掉工具消息后只走主路径；CODING 两路都走。
+3. **两路抽取并行**：chat 抽取输入与没有工具轨迹时相同（工具消息剔除），prompt 不变；
+   procedure 抽取一次 LLM 调用，输出 `{"candidates": [...]}`，字段 `task`、`search_keys`、
+   `solution`、`boundary_envs`、`boundary_scope`、`confidence`；`files` 由 tool_calls 的路径参数
+   结构化提取。空候选不调用 JEV。
+4. **互不可见**：chat 裁决的候选池排除 procedure；procedure 裁决只看同 scope 内
+   `kind="procedure"` 的 current head，且只看**同一版本边界**（workspace / branch /
+   boundary_scope，`strict` 还要求同一 session）。有可选 head 时先选 target（含 `NONE` /
+   `MULTIPLE`），再按是否选中给出 action；head 超过 `candidate_limit` 时先分页 INCLUDE / EXCLUDE。
+5. **执行**：裁决结果转成主路径的版本计划。`OVERRIDE` / `MERGE` / `NEGATE` 追加新版本并退役
+   target；`DELETE` 只归档；`SUPPLEMENT` / `TEMPORAL` / `CONFLICT` 不退役任何 head。
+   同一批多个候选替换同一个 head 时，head 退役一次并链接全部后继。`INVALID` 只丢弃那一条候选，
+   `NEED_CONTEXT` 写成独立版本，都不让整次写入失败。
+6. **检索**：hybrid 的 chat 各路（profile / proactive / normal / 派生融合）过滤掉 procedure；
+   `procedure_limit > 0` 时另跑一路只召回 procedure，有自己的配额和阈值
+   （`procedure_min_score`，默认 0.3），结果放在 `SearchMemories.procedures`。两组分数从不互相比较。
+7. **System 2**：procedure 写入同样登记待处理 scope；归纳输入包含 procedure，
+   人格目录（catalog）只引用对话事实。
 
-**并发与发布**：snapshot → 裁决 → 发布按 `(app_id, user_id, agent_id)` 串行，同进程的并发
-写会看到前一次的 head，不会撞 epoch；候选生成仍并行。SQLite 以 `published` / `is_latest`
-决定可见性：候选行先以未发布状态预留，所有向量写入确认、scope epoch CAS 通过后整批发布。
-另一进程共享同一数据库导致 epoch 变化时报 `CodingConcurrentWriteError`，重试即可。
-
-**幂等**：传 `request_id` 时，raw id 与 memory id 由它派生，结果与发布同事务记录；重放
-直接返回记录结果，输入不同报 `IdempotencyConflictError`。崩溃留下的未发布行在重试时清理。
-
-**对外结果**：`WriteResult.memory_id` 是 raw id，`extra_node_ids` 是新版本 id；
-`commit_passed` 与主路径同口径（追加了版本或归档了 head）；`decisions` 带 action、
-update_type、targets、proposal_ids、source_ids。`search_coding` 只返回已发布的
-`is_latest` 版本，历史保留在 SQLite（`supersedes` / `superseded_by`）。
-直接 destructive update / delete 被拒绝。SQLite 发布协议与主 SDK 的 versions.db 恢复协议
-不同；不宣称分布式事务。
+**对外结果**：`WriteResult.scene` 为 `chat` / `coding`，`procedure_ids` 是新 procedure 版本 id
+（同时在 `extra_node_ids` 里）；`decisions` 合并两路裁决。`MemoryItem.procedure` 给出结构化字段。
+`update` / `delete` / `get` / `list` 与其它 L1 记忆一致。
 
 ## 最终本地验证
 

@@ -1,4 +1,4 @@
-"""Generate complete coding candidates; JEV owns all semantic decisions."""
+"""Generate complete procedure candidates; JEV owns all semantic decisions."""
 
 import json
 import math
@@ -12,18 +12,25 @@ from dual_mem.coding.types import (
 )
 from dual_mem.providers.llm import LLMClient
 
-_EXTRACT_PROMPT = """Generate candidate engineering memories from the source JSON.
+_EXTRACT_PROMPT = """Generate candidate procedure memories from the source JSON.
+A procedure is reusable engineering experience from a coding-agent trajectory: how a
+task was solved, the root cause, the working commands/configuration, a decision with
+its reason, or an approach that failed and why.
 Only produce candidate text, never decide persistence value, knownness, updates,
 actions or targets. Include every potentially useful explicit engineering fact,
 constraint, decision, changed solution and distinct event. Do not filter trivial
 or already documented information: JEV will decide its value and coverage.
+Personal preferences, identity and plans of the user are stored by another
+extractor; do not restate them here unless they are an engineering constraint.
 Preserve complete commands, paths, numbers, reasons, tool arguments/results,
 environment boundaries and qualifications. Do not invent missing details.
-Write every text field in the language of the source conversation.
+Write every text field in the language of the user's messages; do not translate.
 
 Output a JSON object {"candidates": [...]}, each candidate an object with:
 - task: string, a self-contained retrieval question
-- search_keys: array of strings, alternative phrasings of the task
+- search_keys: array of strings, alternative phrasings of the task: the user's own
+  wording of the problem (verbatim when the source has it), the exact error message
+  or symptom, and a short rephrasing someone would search for later
 - solution: string, the complete content
 - boundary_envs: string, environment constraints in one sentence ("" if none)
 - boundary_scope: one of "strict" | "project" | "user" | "global"
@@ -40,12 +47,9 @@ class CodingMemoryExtractor:
         self,
         messages: list[dict],
         *,
-        user_id: str,
-        agent_id: str = "",
-        app_id: str = "default",
         workspace_id: str | None = None,
         branch: str | None = None,
-        session_id: str | None = None,
+        session_id: str = "",
     ) -> list[CodingMemoryDraft]:
         # An object envelope, not a bare array: JSON mode (llm_json_mode, on by
         # default) only admits objects, and the parser drops anything else.
@@ -90,9 +94,6 @@ class CodingMemoryExtractor:
                     boundary_envs=self._text(item, "boundary_envs"),
                     boundary_scope=scope,
                     confidence=float(confidence),
-                    user_id=user_id,
-                    agent_id=agent_id,
-                    app_id=app_id,
                     workspace_id=workspace_id,
                     branch=branch,
                     session_id=session_id,

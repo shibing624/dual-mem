@@ -136,6 +136,8 @@ class SyncMemoryClient:
         session_id: str = "",
         memory_at: int | None = None,
         request_id: str | None = None,
+        workspace_id: str | None = None,
+        branch: str | None = None,
     ) -> WriteResult:
         return self._run(
             self._client.add(
@@ -147,6 +149,8 @@ class SyncMemoryClient:
                 session_id=session_id,
                 memory_at=memory_at,
                 request_id=request_id,
+                workspace_id=workspace_id,
+                branch=branch,
             )
         )
 
@@ -221,6 +225,8 @@ class SyncMemoryClient:
         as_of: int | None = None,
         raw_limit: int = 0,
         include_relations: bool = True,
+        procedure_limit: int = 0,
+        procedure_min_score: float = 0.3,
     ) -> SearchResult:
         return self._run(
             self._client.search(
@@ -242,6 +248,8 @@ class SyncMemoryClient:
                 as_of=as_of,
                 raw_limit=raw_limit,
                 include_relations=include_relations,
+                procedure_limit=procedure_limit,
+                procedure_min_score=procedure_min_score,
             )
         )
 
@@ -327,25 +335,6 @@ class SyncMemoryClient:
 
     def digest(self) -> DigestResult:
         return self._run(self._client.digest())
-
-    def search_coding(
-        self,
-        *,
-        query: str,
-        user_id: str,
-        agent_id: str = "",
-        app_id: str | None = None,
-        top_k: int = 10,
-    ) -> list[dict]:
-        return self._run(
-            self._client.search_coding(
-                query=query,
-                user_id=user_id,
-                agent_id=agent_id,
-                app_id=app_id,
-                top_k=top_k,
-            )
-        )
 
     def close(self) -> None:
         """Release resources; idempotent. Prefer ``with SyncMemoryClient(...) as client:``."""

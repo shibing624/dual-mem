@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## [0.2.0] — 2026-10-24
+
+**破坏性变更**：删除 `MemoryClient.search_coding` / `SyncMemoryClient.search_coding`、`Settings.coding_enabled` / `coding_db_path`、`CodingMemoryStore` 与 `{storage_dir}/coding_memory.db`。旧 coding 库不迁移；chat 记忆（向量库、versions.db、图）格式不变，可以直接沿用。
+
+- **chat 与 coding 统一**：场景是每条数据的属性，不再是一套独立子系统。
+  - 带工具轨迹（`role="tool"` 或 assistant `tool_calls`）且 JEV 判为工程会话的 `add()`，照常做 chat 抽取，同时并行做 procedure 抽取，产出 `kind="procedure"` 的 L1 记忆。原先 coding 会话会跳过 chat 路径，用户在写代码时说的偏好（如「我习惯用 uv」）进不了画像；现在两者都写。
+  - procedure 与 chat 记忆共用向量库、scope、版本链、演化链接、`apply_version_plan`、幂等回执与 System 2 队列；`update` / `delete` / `get` / `list` 一致适用。删除了 coding 模块里重复实现的 SQLite 版本链、发布协议与 `coding_{app_id}` 前缀隔离。
+  - `search(procedure_limit=..., procedure_min_score=0.3)` 另跑一路只召回 procedure，结果在 `SearchMemories.procedures`，有独立配额与阈值，两组分数不互相比较。`procedure_limit` 默认 0，chat 检索结果与此前一致。`MemoryItem.procedure` 给出 `task / solution / search_keys / boundary_envs / boundary_scope / files / workspace_id / branch`。
+  - chat 裁决候选池与 chat 各检索路（profile / proactive / normal / 派生融合）排除 procedure；procedure 裁决只看同版本边界内的 procedure head。
+  - `add()` 新增 `workspace_id` / `branch`（procedure 的版本边界）；`WriteResult` 新增 `scene`（`chat` / `coding`）与 `procedure_ids`。
+  - procedure 裁决判 `INVALID` 只丢弃那一条候选，`NEED_CONTEXT` 写成独立版本，不再让整次写入报 `CodingDecisionError`。
+  - 新配置：`procedure_enabled`（默认 True）、`procedure_tool_result_max_chars`（默认 4000，单条工具结果超长时保留头尾）。
+- **dual 覆盖工程经验**：procedure 写入同样登记 System 2 待处理 scope，`digest()` 的归纳输入包含 procedure；人格目录（catalog）只引用对话事实。
+- **接口面打通**：REST（`POST /v1/memories/` 的 `workspace_id` / `branch`，`POST /v1/memories/search` 的 `procedure_limit` / `procedure_min_score`）、MCP、CLI（`dual-mem add --workspace-id/--branch`、`dual-mem search --procedure-limit`）与 `SyncMemoryClient` 同步支持。
+- **MemHub**：
+  - Claude Code / Codex 会话采集与 Claude Code Hook 保留工具调用和结果，并把会话的 cwd / git 分支作为 `workspace_id` / `branch`；原先只保留 user / assistant 文本，coding 记忆在集成路径上写不进去。`recall` / `hook-search` 默认带最多 3 条 procedure。`/recall` 在 `limit=0` 但 `procedure_limit>0` 时仍返回 procedures。
+  - dual 模式的 Core 在写入队列空闲 `--digest-idle` 秒（默认 300，0 = 关闭）后自动 `digest()`；原先没有任何地方会触发，L3 永远不生成。`hub status` 显示自动 digest 设置。
+  - 新增 `dual-mem hub connect user@server`：通过 SSH 读服务器 `runtime-token` 与 Core 端口，在本机空闲端口建 `ssh -N -L` 隧道并装成登录服务（断线重连），确认身份后写 `hub.json`。安全模型不变（Core 仍只听 loopback）；`hub detach` 同时卸载隧道服务。
+- **CLI**：`dual-mem digest` 新增 `--mode`；用 `--mode dual` 写入而配置不是 dual 时，原先 `digest` 直接返回 `processed=0`。
+- **验证**：chat 路径的 LLM prompt、JEV 问题、召回顺序与分数在 system1 / dual 下与 v0.1.5 逐项一致（mock 指纹对比）；全量 pytest 与 AST 检查通过；真实模型验证 procedure 写入、方案演化（OVERRIDE）、`procedures` 分组与阈值（相关查询 0.40–0.64，无关 0.09–0.18），以及 dual digest。
+
+
+- **MemHub 服务器文档**：新增 `docs/memhub-server.md`，说明在自己的机器上跑唯一 Core，以及每台电脑用 SSH 隧道 `attach`。这不是两台库互相合并。`docs/memhub.md` 里的隧道示例改成解释端口转发和 `runtime-token`。
+- **README / README_EN / 文档首页**：开篇改为 chat 双系统。System 1 负责对话中的事实、画像和版本演化；`dual`（System 2）在显式 `digest()` 时跨证据归纳 L3。MemHub 多 Agent 共享保留为生态能力。版式改成「为什么选 dual-mem」分点展开，评测、安装、快速开始、特性、News、文档、引用分开。News 各条链到对应 Release。示例只点 `02_dual.py` 和 `06_coding_memory.py`。安装说明写明 `jev_api_key`、`llm_api_key`、`embed_api_key` 三者都要，三个地址都可以改。
+- **`config.default.yaml`**：文件头写明三把钥匙和三个可改地址。首次生成的 `~/.dual_mem/config.yaml` 用的就是这份模板。键和默认值没有变。
+- **示例不再回退内网 JEV 中转**：`examples/_common.py` 只使用配置里的 `jev_api_key` 或 `DUAL_MEM_JEV_API_KEY` / `DUAL_MEM_JEV_ENDPOINT`。随包发出的 `config.default.yaml` 与示例说明里不再出现内网地址。
 - **MemHub 服务器文档**：新增 `docs/memhub-server.md`，说明在自己的机器上跑唯一 Core，以及每台电脑用 SSH 隧道 `attach`。这不是两台库互相合并。`docs/memhub.md` 里的隧道示例改成解释端口转发和 `runtime-token`。
 - **README / README_EN / 文档首页**：开篇改为 chat 双系统。System 1 负责对话中的事实、画像和版本演化；`dual`（System 2）在显式 `digest()` 时跨证据归纳 L3。MemHub 多 Agent 共享保留为生态能力。版式改成「为什么选 dual-mem」分点展开，评测、安装、快速开始、特性、News、文档、引用分开。News 各条链到对应 Release。示例只点 `02_dual.py` 和 `06_coding_memory.py`。安装说明写明 `jev_api_key`、`llm_api_key`、`embed_api_key` 三者都要，三个地址都可以改。
 - **`config.default.yaml`**：文件头写明三把钥匙和三个可改地址。首次生成的 `~/.dual_mem/config.yaml` 用的就是这份模板。键和默认值没有变。

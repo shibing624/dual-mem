@@ -50,17 +50,15 @@ dual-mem hub status
 
 ## 多台电脑共用一份记忆
 
-服务器上只跑一个 Core，监听它自己的 `127.0.0.1:8765`。你的电脑用 SSH 把这个端口接到本机，再告诉本机的工具「记忆服务在本机这个端口」。完整步骤（服务器安装、token、端口被占用、断开之后回到本机库）见 [在自己的服务器上跑 MemHub](memhub-server.md)。
+服务器上只跑一个 Core，监听它自己的 `127.0.0.1:8765`。每台电脑一条命令连上：
 
 ```bash
-# 本机 8766 → 服务器的 127.0.0.1:8765。-N 表示只转发，不打开远程 shell。
-ssh -N -L 8766:127.0.0.1:8765 user@memory-host
-
-# api-key 是服务器上 ~/.dual-mem/runtime-token 的内容，不是模型的 API key。
-dual-mem hub attach --base-url http://127.0.0.1:8766 --api-key 'runtime-token'
+dual-mem hub connect user@memory-host
 ```
 
-不想连了：`dual-mem hub detach`，这台电脑恢复使用本机记忆。服务器上的那一份还在。
+它通过 SSH 读服务器的 `runtime-token`，在本机空闲端口建常驻 SSH 隧道（登录服务，断线重连），确认身份后写好本机 `hub.json`。Core 仍只监听服务器的 loopback。完整步骤（服务器安装、免密 SSH、自定义端口、不用 SSH 时怎么接）见 [在自己的服务器上跑 MemHub](memhub-server.md)。
+
+不想连了：`dual-mem hub detach`，同时卸载隧道服务，这台电脑恢复使用本机记忆。服务器上的那一份还在。
 
 ## 常用命令
 
@@ -104,11 +102,13 @@ dual-mem hub serve（唯一写者）
 - 会话扫描游标存在发起扫描那台机器的 `cursors.db`，只越过 Core 已接收的批次；Core 不可达时游标不动。
 - 冷启动可以先 `scan --raw-only`，只存 L0 原文、不调抽取模型；之后 `dual-mem hub extract` 在后台补跑抽取，复用已存的 L0。
 - 普通扫描按会话分批写入，`session_id` 带来源前缀，例如 `codex:<session-id>`。
+- Claude Code / Codex 会话里的工具调用和结果随对话一起送达（单条结果过长时保留头尾），会话的工作目录和 git 分支作为 `workspace_id` / `branch`。Core 据此在对话记忆之外沉淀 procedure 工程经验；`recall` 和 `hook-search` 默认返回最多 3 条相关经验。
+- Core 以 dual 模式运行时（`hub serve --mode dual`），写入队列空闲 `--digest-idle` 秒（默认 300，0 = 关闭）后自动 `digest()`，不需要任何人手动触发。
 
 ### 云端单实例
 
 - 云模式仍然只有一个数据库、一个写者。Core 只监听云主机的 loopback，客户端用 SSH、Tailscale 或 WireGuard 隧道映射到自己的 loopback。
-- 远程 Core 的密钥在它自己的 `~/.dual-mem/runtime-token`。`attach` 会把显式连接保存在本机的 `hub.json`。
+- 远程 Core 的密钥在它自己的 `~/.dual-mem/runtime-token`。`connect`（或手动的 `attach`）把连接保存在本机的 `hub.json`。
 - 会话解析和游标留在客户端；记忆内容、Evidence、上传目录和向量 / 图数据库只存在 Core 主机的 `~/.dual-mem`。
 - MemHub 不做 `push` / `pull`、快照合并或网络数据库复制。不走 loopback 隧道时，远程 `base_url` 必须是 HTTPS。
 - 离线可用、联网自动合并的多设备同步在 Roadmap 中。

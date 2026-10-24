@@ -157,6 +157,8 @@ def create_app(
             session_id=body.session_id,
             memory_at=body.memory_at,
             request_id=body.request_id,
+            workspace_id=body.workspace_id,
+            branch=body.branch,
         )
 
     # ── memory_search ─────────────────────────────────────────────────────────
@@ -190,6 +192,8 @@ def create_app(
             as_of=body.as_of,
             raw_limit=body.raw_limit,
             include_relations=body.include_relations,
+            procedure_limit=body.procedure_limit,
+            procedure_min_score=body.procedure_min_score,
         )
 
     @app.post(

@@ -6,6 +6,7 @@
 import asyncio
 import time
 
+from dual_mem.coding.types import procedure_detail
 from dual_mem.isolation import build_filter
 from dual_mem.registry import ComponentFactory
 from dual_mem.retrieval.hybrid_engine import search_hybrid
@@ -40,6 +41,8 @@ class Reader:
         as_of: int | None = None,
         raw_limit: int = 0,
         include_relations: bool = True,
+        procedure_limit: int = 0,
+        procedure_min_score: float = 0.3,
     ) -> tuple[SearchMemories, ReadResult | None]:
         """Recall memories using explicit filters; no query-intent guessing is performed."""
         start = time.perf_counter()
@@ -66,6 +69,8 @@ class Reader:
             as_of=as_of,
             raw_limit=raw_limit,
             include_relations=include_relations,
+            procedure_limit=procedure_limit,
+            procedure_min_score=procedure_min_score,
         )
 
         elapsed_ms = (time.perf_counter() - start) * 1000.0
@@ -78,6 +83,7 @@ class Reader:
                     + len(memories.proactive)
                     + len(memories.normal)
                     + len(memories.raw)
+                    + len(memories.procedures)
                 ),
                 elapsed_ms=elapsed_ms,
             )
@@ -89,6 +95,7 @@ class Reader:
                 "normal": len(memories.normal),
                 "proactive": len(memories.proactive),
                 "raw": len(memories.raw),
+                "procedures": len(memories.procedures),
                 "include_derived": include_derived,
             },
         )
@@ -171,5 +178,5 @@ class Reader:
             merged_timestamps=merged_timestamps,
             update_type=update_type,
             source_node_id=source_node_id,
-
+            procedure=procedure_detail(node),
         )

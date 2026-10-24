@@ -8,7 +8,6 @@ from dual_mem.coding.types import (
     CodingMemory,
     CodingMemoryDraft,
     CodingReconcileOp,
-    coding_scope,
     version_boundary,
 )
 from dual_mem.providers.jev import DecisionProvider
@@ -93,47 +92,15 @@ class CodingMemoryReconciler:
         if not source_messages:
             raise CodingDecisionError("coding reconciliation requires source evidence")
         histories = history_versions or {}
-        if drafts and len({coding_scope(d) for d in drafts}) != 1:
-            raise CodingDecisionError("coding candidates cross tenant scope")
-        scope = coding_scope(drafts[0]) if drafts else None
         current = []
-        by_id = {}
+        by_id: dict[str, CodingMemory] = {}
         for mem in existing:
-            if not mem.is_latest or (scope is not None and coding_scope(mem) != scope):
-                raise CodingDecisionError(
-                    "coding current target crosses scope or is retired"
-                )
+            if not mem.is_latest:
+                raise CodingDecisionError("coding current target is retired")
             if mem.memory_id in by_id or mem.memory_id in ("NONE", "MULTIPLE"):
                 raise CodingDecisionError("invalid coding current target ID")
-            if mem.supersedes and mem.memory_id not in histories:
-                raise CodingDecisionError("missing coding history_versions")
-            history = histories.get(mem.memory_id, [])
-            ancestors = {m["memory_id"]: m for m in history}
-            if len(ancestors) != len(history):
-                raise CodingDecisionError("duplicate coding history_versions")
-            pending = [(old_id, mem.memory_id) for old_id in mem.supersedes]
-            visited = set()
-            while pending:
-                old_id, child_id = pending.pop()
-                old = ancestors.get(old_id)
-                if old is None:
-                    raise CodingDecisionError(
-                        "missing coding history_versions ancestor"
-                    )
-                if (
-                    old.get("is_latest", True)
-                    or (old.get("app_id"), old.get("user_id"), old.get("agent_id"))
-                    != coding_scope(mem)
-                    or child_id not in old.get("superseded_by", [])
-                ):
-                    raise CodingDecisionError(
-                        "invalid coding history_versions ancestor"
-                    )
-                if old_id not in visited:
-                    visited.add(old_id)
-                    pending.extend((oid, old_id) for oid in old.get("supersedes", []))
-            if visited != set(ancestors):
-                raise CodingDecisionError("unlinked coding history_versions")
+            # The version store owns chain integrity; the head shows its ancestors so
+            # a return to an earlier solution is recognised as an override.
             current.append(
                 dict(mem.to_dict(), history_versions=histories.get(mem.memory_id, []))
             )
@@ -275,10 +242,23 @@ class CodingMemoryReconciler:
             # evaluate_decisions already restricts the choice to the offered criteria.
             action = answers[f"{i}:action"].choice
             target = chosen[i]
-            if action in ("INVALID", "NEED_CONTEXT"):
-                raise CodingDecisionError(
-                    f"coding JEV decision {action} for draft {i}"
+            reason = action
+            if action == "NEED_CONTEXT":
+                # As in the chat path: an undecided relation is written now as an
+                # independent version instead of failing the whole write.
+                action, target = "ADD_SUPPLEMENT", None
+                reason = "NEED_CONTEXT: kept as an independent version"
+            if action == "INVALID":
+                # Rejects only this draft; the other drafts and the source stay.
+                ops.append(
+                    CodingReconcileOp(
+                        action="INVALID",
+                        draft_idx=i,
+                        reason=reason,
+                        confidence=float(answers[f"{i}:action"].confidence or 0.0),
+                    )
                 )
+                continue
             ops.append(
                 CodingReconcileOp(
                     action="ADD" if action.startswith("ADD_") else action,
@@ -287,7 +267,8 @@ class CodingMemoryReconciler:
                     ),
                     draft_idx=i,
                     target_memory_id=target if action in _NEEDS_TARGET else None,
-                    reason=action,
+                    reason=reason,
+                    confidence=float(answers[f"{i}:action"].confidence or 0.0),
                 )
             )
         return ops

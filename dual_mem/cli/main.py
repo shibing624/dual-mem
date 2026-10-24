@@ -40,8 +40,11 @@ def _parse_messages_json(raw: str, *, source: str) -> list[dict]:
         typer.echo(f"{source} 须为非空 JSON 数组，如 [{{\"role\":\"user\",\"content\":\"...\"}}]", err=True)
         raise typer.Exit(code=1)
     for i, item in enumerate(data):
-        if not isinstance(item, dict) or not str(item.get("content", "")).strip():
-            typer.echo(f"{source} 第 {i} 项须为含 content 的对象", err=True)
+        # An assistant turn of a tool trace may carry only tool_calls.
+        if not isinstance(item, dict) or not (
+            str(item.get("content") or "").strip() or item.get("tool_calls")
+        ):
+            typer.echo(f"{source} 第 {i} 项须为含 content 或 tool_calls 的对象", err=True)
             raise typer.Exit(code=1)
     return data
 
@@ -80,6 +83,12 @@ def add(
     user_id: str = typer.Option(..., "--user-id"),
     agent_id: str = typer.Option("", "--agent-id"),
     session_id: str = typer.Option("", "--session-id"),
+    workspace_id: str | None = typer.Option(
+        None, "--workspace-id", help="工具轨迹里 procedure 的版本边界：工作区"
+    ),
+    branch: str | None = typer.Option(
+        None, "--branch", help="工具轨迹里 procedure 的版本边界：分支"
+    ),
     mode: str | None = typer.Option(None, "--mode", help="system1 | dual（默认取配置）"),
 ):
     """写入记忆（MemoryClient.add）。content 与 messages 二选一。"""
@@ -98,6 +107,8 @@ def add(
                 user_id=user_id,
                 agent_id=agent_id,
                 session_id=session_id,
+                workspace_id=workspace_id,
+                branch=branch,
             )
         )
     else:
@@ -123,6 +134,9 @@ def search(
     ),
     user_id: str = typer.Option(..., "--user-id"),
     limit: int = typer.Option(10, "--limit"),
+    procedure_limit: int = typer.Option(
+        0, "--procedure-limit", help="工程经验（procedure）组条数，0 = 关闭"
+    ),
     json_out: bool = typer.Option(False, "--json", help="输出原始 JSON 而非格式化文本"),
     mode: str | None = typer.Option(None, "--mode", help="system1 | dual"),
 ):
@@ -134,6 +148,7 @@ def search(
             app_ids=[app_id] if app_id is not None else None,
             user_id=user_id,
             limit=limit,
+            procedure_limit=procedure_limit,
         )
     )
     if json_out:
@@ -260,9 +275,13 @@ def list_scopes(
 
 
 @app.command()
-def digest():
+def digest(
+    mode: str | None = typer.Option(
+        None, "--mode", help="system1 | dual（默认取配置）；写入用了 --mode dual 时这里也要传"
+    ),
+):
     """dual 模式生成 L3_DERIVED；system1 的 processed 为 0。"""
-    client = make_client()
+    client = make_client(mode)
     result = _run(client.digest())
     _echo_json(result.to_dict())
 

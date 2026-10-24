@@ -17,6 +17,9 @@ class AddRequest(BaseModel):
     session_id: str = ""
     memory_at: int | None = None
     request_id: str | None = None
+    # Version boundary of procedure memories from a tool trace.
+    workspace_id: str | None = None
+    branch: str | None = None
 
 
 class AddResponse(BaseModel):
@@ -32,6 +35,8 @@ class AddResponse(BaseModel):
     extra_node_ids: list[str] = []
     is_ephemeral: bool = False
     decisions: list[dict] = []
+    scene: str = "chat"
+    procedure_ids: list[str] = []
 
 
 class SearchRequest(BaseModel):
@@ -53,6 +58,8 @@ class SearchRequest(BaseModel):
     as_of: int | None = None
     raw_limit: int = 0
     include_relations: bool = True
+    procedure_limit: int = 0
+    procedure_min_score: float = 0.3
 
 
 class ConversationSearchRequest(BaseModel):

@@ -1,11 +1,14 @@
-"""Demo 6 — Coding 记忆：含 Tool 调用的工程排障对话沉淀、版本演化与检索。
+"""Demo 6 — Coding 记忆：同一次 add 同时沉淀对话记忆和工程经验（procedure）。
 
-开启 `coding_enabled=True` 后，当 `add(messages=[...])` 包含 tool 调用或 `role="tool"` 消息时：
-1. 先将完整工具会话落为不可丢的 L0 原始证据；
-2. JEV 判定对话是否属于工程研发场景（CODING vs CHAT）；
-3. CodingExtractor 抽取结构化经验（`task`、`solution`、`search_keys`、`boundary_envs`、`files`）；
-4. JEV 在相同作用域与版本边界内执行 target-first 关系裁决（新增 / 覆盖 / 合并 / 跳过 / 归档）；
-5. 通过 `search_coding()` 只检索当前生效的工程经验，被覆盖的旧方案保留在历史里。
+`add(messages=[...])` 里出现工具轨迹（`role="tool"` 或 assistant `tool_calls`）时：
+1. L0_RAW 保存整段轨迹（工具结果按 head+tail 截断），是 chat 与 procedure 共同的来源；
+2. chat 抽取照常进行（看不到工具噪声），用户说的偏好、事实照样进 L1/L2；
+3. JEV 判定场景（CODING / CHAT），是 CODING 才生成 procedure 候选
+   （`task`、`solution`、`search_keys`、`boundary_envs`、`files`）；
+4. JEV 在同一 workspace / branch 版本边界内裁决新增 / 覆盖 / 合并 / 跳过 / 归档，
+   版本链与 chat 记忆共用一套；
+5. `search(..., procedure_limit=3)` 在独立的 procedures 组里只返回当前生效的方案；
+   chat 的 normal / profile 组永远不混入 procedure。
 
 环境要求：jev_*、llm_*、embed_* 都要有。
 运行：python examples/06_coding_memory.py
@@ -45,22 +48,26 @@ def tool_session(
 
 async def show_hits(client: MemoryClient, query: str) -> None:
     print(f"\n  Query: {query}")
-    for item in await client.search_coding(query=query, user_id=USER, top_k=3):
+    out = await client.search(query=query, user_id=USER, limit=3, procedure_limit=3)
+    for item in out.memories.procedures:
+        p = item.procedure
         print(
-            f"    - [score={item['score']:.2f}] task: {item['task']}\n"
-            f"      solution: {item['solution']}\n"
-            f"      files: {item['files']}  supersedes: {item['supersedes']}"
+            f"    - [score={item.score:.2f}] task: {p.task}\n"
+            f"      solution: {p.solution}\n"
+            f"      files: {p.files}  workspace: {p.workspace_id}  branch: {p.branch}"
         )
+    for item in out.memories.normal:
+        print(f"    · chat/{item.kind}: {item.content}")
 
 
 async def main() -> None:
-    settings = example_settings("system1", "coding", coding_enabled=True)
+    settings = example_settings("system1", "coding")
     client = MemoryClient(settings=settings)
     try:
         section("第 1 轮：SQLite 并发写入报 database is locked")
         res = await client.add(
             messages=tool_session(
-                ask="app/db.py 在高并发写入时偶发 sqlite3.OperationalError: database is locked，帮我定位并修复。",
+                ask="我们项目统一用 uv 管理依赖，别用 pip。app/db.py 在高并发写入时偶发 sqlite3.OperationalError: database is locked，帮我定位并修复。",
                 call_id="call_1",
                 tool="read_file",
                 args={"path": "app/db.py"},
@@ -76,6 +83,8 @@ async def main() -> None:
             ),
             user_id=USER,
             session_id="s1",
+            workspace_id="~/code/app",
+            branch="main",
         )
         show_write(res, "写入 SQLite 锁冲突排障经验")
 
@@ -94,6 +103,8 @@ async def main() -> None:
             ),
             user_id=USER,
             session_id="s2",
+            workspace_id="~/code/app",
+            branch="main",
         )
         show_write(res, "写入 pytest 释放 Chroma 缓存经验")
 
@@ -113,12 +124,15 @@ async def main() -> None:
             ),
             user_id=USER,
             session_id="s3",
+            workspace_id="~/code/app",
+            branch="main",
         )
         show_write(res, "写入新方案（期望 ADD/OVERRIDE 覆盖第 1 轮）")
 
-        section("search_coding：只返回当前生效的方案")
+        section("search：procedures 组只返回当前生效的方案，chat 记忆在 normal 组")
         await show_hits(client, "SQLite 高并发写入报 database is locked 怎么解决？")
         await show_hits(client, "pytest 全量测试卡死在 chromadb 怎么办？")
+        await show_hits(client, "这个项目用什么工具装依赖？")
     finally:
         await client.aclose()
 

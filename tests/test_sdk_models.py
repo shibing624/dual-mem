@@ -26,4 +26,4 @@ def test_flatten_schemas_never_take_evidence_slots():
     memories = SearchMemories(normal=facts, schema=schemas)
     result = [r.memory_id for r in memories.flatten(limit=4)]
     assert result == ["f0", "f1", "f2", "f3", "s0", "s1"]
-    assert set(memories.to_dict()) == {"profile", "proactive", "normal", "raw", "schema", "catalog"}
+    assert set(memories.to_dict()) == {"profile", "proactive", "normal", "raw", "schema", "catalog", "procedures"}

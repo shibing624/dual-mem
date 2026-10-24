@@ -55,7 +55,7 @@ Tools discover the local service with no URL to paste. A conversation is saved a
 
 ### 4. Debugging sessions stay useful
 
-Coding memory takes a coding agent's tool trace, not a pile of source files. `add(messages=...)` must include a `role="tool"` turn or assistant `tool_calls`, and JEV must call the whole session engineering, before a cause, a fix, and files are stored. `search_coding` reads only that store. Details: [Quickstart · Coding memory](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md#coding).
+Chat and coding share one `add()` / `search()`. When `messages` carry a tool trace (a `role="tool"` turn or assistant `tool_calls`) and JEV calls the session engineering work, the write also yields reusable engineering experience (`kind="procedure"`: task, solution, files, boundary) next to the usual facts and profile. Procedures share the store, the version chain and JEV adjudication with chat memories; `search(procedure_limit=3)` returns them as a separate `procedures` group, and in `dual` mode they feed `digest()` too. Details: [Quickstart · Coding memory](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md#coding).
 
 ## Install
 
@@ -98,15 +98,14 @@ It remembers that alice no longer eats spicy food and is about to move to Beijin
 
 ### Coding memory
 
-After `coding_enabled=True`, a write enters the coding store only when `messages` contain a tool trace: a `role="tool"` turn, or assistant `tool_calls`. That check is structural. JEV then decides whether the session is engineering work, and only then extracts `task` / `solution` / `files`.
+No switch and no second search entry point. A tool trace in `messages` (a `role="tool"` turn, or assistant `tool_calls`) is the structural condition; JEV then decides whether the session is engineering work, and only then extracts `task` / `solution` / `files` as an L1 memory with `kind="procedure"`. Preferences the user mentions in the same session ("I always use uv") still become facts and profile.
 
-Putting the text of a few `.py` files into `add(content=...)` or a plain user message has no tool trace, so it stays chat memory. `search()` can find whatever was stored as facts. `search_coding` will not return it.
+Putting the text of a few `.py` files into `add(content=...)` or a plain user message has no tool trace, so it stays chat memory only.
 
 ```python
 from dual_mem import SyncMemoryClient
-from dual_mem.config import Settings
 
-with SyncMemoryClient(settings=Settings(coding_enabled=True)) as memory:
+with SyncMemoryClient() as memory:
     memory.add(
         messages=[
             {"role": "user", "content": "Fix intermittent sqlite3.OperationalError: database is locked under concurrent writes."},
@@ -126,16 +125,21 @@ with SyncMemoryClient(settings=Settings(coding_enabled=True)) as memory:
             },
         ],
         user_id="alice",
+        workspace_id="~/code/app",  # version boundary of the procedure; optional
     )
 
-    hits = memory.search_coding(query="how to fix SQLite database is locked on concurrent writes", user_id="alice")
-    for h in hits:
-        print(h["task"], "->", h["solution"], h["files"])
+    res = memory.search(
+        query="how to fix SQLite database is locked on concurrent writes",
+        user_id="alice",
+        procedure_limit=3,  # default 0: chat results are exactly as before
+    )
+    for m in res.memories.procedures:
+        print(m.procedure.task, "->", m.procedure.solution, m.procedure.files)
 ```
 
 ### Examples
 
-Two worth opening: [`examples/02_dual.py`](https://github.com/shibing624/dual-mem/blob/main/examples/02_dual.py) runs `digest()` and builds L3, and [`examples/06_coding_memory.py`](https://github.com/shibing624/dual-mem/blob/main/examples/06_coding_memory.py) writes a tool trace and calls `search_coding`. REST, CLI, and lifecycle scripts are in [`examples/`](https://github.com/shibing624/dual-mem/tree/main/examples). Async clients: [Quickstart](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md).
+Two worth opening: [`examples/02_dual.py`](https://github.com/shibing624/dual-mem/blob/main/examples/02_dual.py) runs `digest()` and builds L3, and [`examples/06_coding_memory.py`](https://github.com/shibing624/dual-mem/blob/main/examples/06_coding_memory.py) writes a tool trace, evolves a solution, and reads the `procedures` group. REST, CLI, and lifecycle scripts are in [`examples/`](https://github.com/shibing624/dual-mem/tree/main/examples). Async clients: [Quickstart](https://github.com/shibing624/dual-mem/blob/main/docs/getting-started/quickstart.md).
 
 ## Features
 
@@ -173,6 +177,7 @@ Vote or request features in [Issues](https://github.com/shibing624/dual-mem/issu
 
 ## News
 
+- [2026/10/24] **v0.2.0**: Chat and coding now share one `add()` / `search()`. An engineering session with a tool trace yields `kind="procedure"` experience next to its chat memories, on the same store, version chain and JEV adjudication; `search(procedure_limit=3)` returns them as a separate `procedures` group, and `dual` `digest()` covers them too. `search_coding` and the separate coding store are gone. Chat prompts, adjudication and recall are unchanged. MemHub keeps tool traces when capturing sessions and auto-digests when idle in dual mode; new `dual-mem hub connect user@server` sets up the tunnel, reads the token and writes `hub.json` in one command. See [Release-v0.2.0](https://github.com/shibing624/dual-mem/releases/tag/v0.2.0).
 - [2026/10/23] **v0.1.5**: Fixed Coding memory writes against real models. Extraction now returns a `{"candidates": [...]}` object so the default `llm_json_mode` keeps the payload; the coverage hard gate is gone; one batch can supersede the same head; JEV only sees heads inside the draft's version boundary; concurrent writes for one user serialize per scope. The quickstart now has a Coding memory section, and `examples/06_coding_memory.py` shows search returning only the current solution after an update. See [Release-v0.1.5](https://github.com/shibing624/dual-mem/releases/tag/v0.1.5).
 - [2026/10/23] **v0.1.4**: Added MemHub local single-Core cross-tool memory hub (incremental session import for Claude Code / Codex / Cursor / Hermes / Agentica, durable background write queue, login service, and SSH/Tailscale tunnel attach); upgraded System 2 v3 clustered cognition and version-bridge recall; added Coding memory runnable demo and removed zero-gain settings; ranked #1 head-to-head on LoCoMo (74.7), LongMemEval (91.7), and PersonaMem-v2 (50.0). See [Release-v0.1.4](https://github.com/shibing624/dual-mem/releases/tag/v0.1.4).
 - [2026/10/15] **v0.1.3**: Redesigned around four canonical layers (`L0_RAW` / `L1_FACT` / `L2_PROFILE` / `L3_DERIVED`) and target-first JEV write decisions with linked version history; added native integrations for Agentica / Claude Code / Hermes / OpenClaw and the Coding memory subsystem (incompatible storage schema; use a new `storage_dir`). See [Release-v0.1.3](https://github.com/shibing624/dual-mem/releases/tag/v0.1.3).

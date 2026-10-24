@@ -201,7 +201,7 @@ class Settings(BaseSettings):
     system2_catalog_content_chars: int = 180
     system2_catalog_per_domain: int = 4
     system2_catalog_total: int = 32
-    # Idempotent add(request_id=...) outcomes (chat and coding paths) are kept this
+    # Idempotent add(request_id=...) outcomes (chat and procedure decisions) are kept this
     # many seconds and purged by digest() (0 = forever).
     request_outcome_ttl_seconds: int = 7 * 24 * 3600
 
@@ -249,12 +249,13 @@ class Settings(BaseSettings):
     schema_min_support: int = 1
     # Return the persona catalog (question-blind, exact current facts) with every search.
     catalog_context_enabled: bool = True
-    # Coding/tool-use memory subsystem — separate write/store path for engineering
-    # conversations containing tool calls. When enabled, add() first checks for tool
-    # messages; if found, Jev decides coding vs chat, and coding memories
-    # go to a separate SQLite+VDB store with task/search_keys/solution schema.
-    coding_enabled: bool = False  # opt-in; experimental
-    coding_db_path: str = ""  # empty = auto: {storage_dir}/coding_memory.db
+    # Coding scene: a write whose messages carry a tool trace (role="tool" or
+    # assistant tool_calls) and that JEV judges to be engineering work also yields
+    # procedure memories (L1, kind="procedure") next to its chat memories.
+    procedure_enabled: bool = True
+    # Each tool result is clipped to head+tail of this many chars for model input;
+    # the stored L0_RAW trajectory keeps the same clipped form.
+    procedure_tool_result_max_chars: int = 4000
 
     @field_validator(
         "jev_timeout",

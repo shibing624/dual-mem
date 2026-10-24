@@ -73,6 +73,8 @@ class HubClient:
         request_id: str,
         raw_only: bool = False,
         wait: bool = False,
+        workspace_id: str | None = None,
+        branch: str | None = None,
     ) -> dict[str, Any]:
         """Submit evidence. Returns once it is durable in the Core (a receipt with
         status ``pending``); ``wait=True`` instead blocks until it is processed."""
@@ -87,6 +89,8 @@ class HubClient:
                 "request_id": request_id,
                 "raw_only": raw_only,
                 "wait": wait,
+                "workspace_id": workspace_id,
+                "branch": branch,
             },
         )
 
@@ -106,11 +110,17 @@ class HubClient:
         query: str,
         limit: int = 10,
         raw_limit: int = 5,
+        procedure_limit: int = 3,
     ) -> dict[str, Any]:
         return await self._request(
             "POST",
             "/v1/hub/recall",
-            json={"query": query, "limit": limit, "raw_limit": raw_limit},
+            json={
+                "query": query,
+                "limit": limit,
+                "raw_limit": raw_limit,
+                "procedure_limit": procedure_limit,
+            },
         )
 
     async def status(self) -> dict[str, Any]:

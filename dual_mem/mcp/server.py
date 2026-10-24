@@ -17,6 +17,8 @@ DEFAULT_PORT = 8765
 _SEARCH_DOC = (
     "语义检索，结果按 profile / proactive / normal 三路分组；"
     "有演化历史的记忆带 evolution_chain（最新→最旧）。"
+    "procedure_limit>0 时另返回 procedures 组：coding agent 工具轨迹里沉淀的工程经验"
+    "（task / solution / files）。"
 )
 
 
@@ -45,8 +47,9 @@ def build_mcp(
     @mcp.tool(
         description=(
             "写入记忆。content 与 messages 二选一；"
-            "messages 为 [{role, content}, ...] 多轮对话。必填 user_id；"
-            "app_id 省略则用 default_app_id。"
+            "messages 为 [{role, content}, ...] 多轮对话，可含 role=tool 与 assistant "
+            "tool_calls（工具轨迹会另外沉淀 procedure 经验）。必填 user_id；"
+            "app_id 省略则用 default_app_id；workspace_id / branch 是 procedure 的版本边界。"
         )
     )
     async def memory_add(
@@ -56,6 +59,8 @@ def build_mcp(
         messages: list[dict] | None = None,
         agent_id: str = "",
         session_id: str = "",
+        workspace_id: str | None = None,
+        branch: str | None = None,
     ) -> dict:
         return await ops.memory_add(
             user_id=user_id,
@@ -64,6 +69,8 @@ def build_mcp(
             messages=messages,
             agent_id=agent_id,
             session_id=session_id,
+            workspace_id=workspace_id,
+            branch=branch,
         )
 
     @mcp.tool(description=f"语义检索。{_SEARCH_DOC}")
@@ -78,6 +85,7 @@ def build_mcp(
         include_derived: bool | None = None,
         as_of: int | None = None,
         raw_limit: int = 0,
+        procedure_limit: int = 0,
     ) -> dict:
         return await ops.memory_search(
             query=query,
@@ -90,6 +98,7 @@ def build_mcp(
             include_derived=include_derived,
             as_of=as_of,
             raw_limit=raw_limit,
+            procedure_limit=procedure_limit,
         )
 
     @mcp.tool(description="检索 L0 原文及保留的历史，用于核对原话/时间/来源。")

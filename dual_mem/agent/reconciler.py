@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 
 from dual_mem.errors import CoverageError, DecisionContextError, DecisionPlanError
+from dual_mem.coding.types import PROCEDURE_KIND
 from dual_mem.isolation import build_filter
 from dual_mem.providers.jev import DecisionProvider, JevAnswer
 from dual_mem.providers.llm import LLMClient
@@ -432,6 +433,8 @@ class Reconciler:
             layers=[Layer.L1_FACT, Layer.L2_PROFILE, Layer.L3_DERIVED],
             latest_only=True,
             statuses=[MemoryStatus.ACTIVE],
+            # Procedures have their own decision stream (dual_mem.coding.writer).
+            exclude_kinds=[PROCEDURE_KIND],
         )
         embeddings: dict[str, list[float]] = {}
         near = await self._neighbours(

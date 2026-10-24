@@ -73,6 +73,7 @@ def show_write(res: WriteResult, text: str = "") -> None:
     print(
         f"    -> raw={res.memory_id[:8]}  versions={res.extracted_count}  "
         f"commit={res.commit_passed}  decisions={decisions}  "
+        f"scene={res.scene}  procedures={len(res.procedure_ids)}  "
         f"({res.processing_time_ms / 1000:.2f}s)"
     )
 

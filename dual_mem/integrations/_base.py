@@ -278,6 +278,8 @@ class MemoryBackend:
         agent_id: str = "",
         session_id: str = "",
         memory_at: Optional[int] = None,
+        workspace_id: Optional[str] = None,
+        branch: Optional[str] = None,
     ) -> Any:
         return await self.client.add(
             content=content,
@@ -287,6 +289,8 @@ class MemoryBackend:
             agent_id=agent_id,
             session_id=session_id,
             memory_at=memory_at,
+            workspace_id=workspace_id,
+            branch=branch,
         )
 
     async def add_raw(
@@ -348,6 +352,7 @@ class MemoryBackend:
         intention_limit: int = 0,
         include_derived: Optional[bool] = None,
         created_after: Optional[int] = None,
+        procedure_limit: int = 0,
     ) -> Any:
         return await self.client.search(
             query=query,
@@ -362,6 +367,7 @@ class MemoryBackend:
             intention_limit=intention_limit,
             include_derived=include_derived,
             created_after=created_after,
+            procedure_limit=procedure_limit,
         )
 
     async def search_conversation(

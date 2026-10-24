@@ -120,6 +120,10 @@ class WriteResult:
     decisions: list[MemoryDecision] = field(default_factory=list)
     # committed / known / raw_only（见 ``write_status``）
     status: str = "committed"
+    # chat：只走对话抽取；coding：工具轨迹被判为工程会话，另外抽取了 procedure
+    scene: str = "chat"
+    # 本次写入新增的 procedure 版本 id（也包含在 extra_node_ids 中）
+    procedure_ids: list[str] = field(default_factory=list)
     # REST 风格错误码；成功时为 None
     error_code: int | None = None
     # 错误描述；成功时为 None
@@ -149,6 +153,30 @@ class EvolutionItem:
 
     def to_dict(self) -> dict:
         """Serialize a single chain entry as a dict, omitting null fields."""
+        return _omit_none(asdict(self))
+
+
+@dataclass
+class ProcedureDetail:
+    """Structured fields of one procedure (reusable engineering experience)."""
+
+    # 自洽的检索问题：这条经验解决什么任务
+    task: str
+    # 完整方案：命令、路径、数值、原因
+    solution: str
+    # 同一任务的其它问法（参与向量索引）
+    search_keys: list[str] = field(default_factory=list)
+    # 适用的环境约束（一句话，可为空）
+    boundary_envs: str = ""
+    # 版本边界：strict / project / user / global
+    boundary_scope: str = "project"
+    # 工具调用里出现过的文件路径
+    files: list[str] = field(default_factory=list)
+    workspace_id: str | None = None
+    branch: str | None = None
+    confidence: float = 0.7
+
+    def to_dict(self) -> dict:
         return _omit_none(asdict(self))
 
 
@@ -199,6 +227,8 @@ class MemoryItem:
     # conflicts_with 指向的、仍然有效的对立版本内容
     conflicts: list[EvolutionItem] | None = None
     owner: str = ""
+    # kind=procedure 时的结构化字段；其它记忆为 None
+    procedure: ProcedureDetail | None = None
 
     def to_dict(self) -> dict:
         """Serialize this memory item with its (optional) evolution chain expanded."""
@@ -242,6 +272,8 @@ class MemoryItem:
             out["previous"] = [item.to_dict() for item in self.previous]
         if self.conflicts:
             out["conflicts"] = [item.to_dict() for item in self.conflicts]
+        if self.procedure is not None:
+            out["procedure"] = self.procedure.to_dict()
         return out
 
     def to_search_result(self) -> dict[str, Any]:
@@ -286,6 +318,8 @@ class SearchMemories:
     schema: list[MemoryItem] = field(default_factory=list)
     # 画像目录：System 2 按领域选出的当前事实原文（与问题无关）
     catalog: list[MemoryItem] = field(default_factory=list)
+    # 工程经验路：kind=procedure（独立配额，procedure_limit=0 时为空）
+    procedures: list[MemoryItem] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Flatten each route's items into plain dicts."""
@@ -296,13 +330,15 @@ class SearchMemories:
             "raw": [item.to_dict() for item in self.raw],
             "schema": [item.to_dict() for item in self.schema],
             "catalog": [item.to_dict() for item in self.catalog],
+            "procedures": [item.to_dict() for item in self.procedures],
         }
 
     def flatten(self, *, limit: int | None = None) -> list[MemoryItem]:
-        """System 1 evidence ordered by score (``limit`` applies), then schemas, then catalog.
+        """System 1 evidence ordered by score (``limit`` applies), then procedures,
+        schemas and catalog.
 
-        Schema scores rank schemas among themselves and are never compared with
-        evidence scores, so System 2 groups are appended after the bounded evidence.
+        Procedure and schema scores rank within their own group and are never
+        compared with evidence scores, so those groups follow the bounded evidence.
         """
         items = [*self.profile, *self.proactive, *self.normal, *self.raw]
         items.sort(key=lambda x: x.score, reverse=True)
@@ -315,7 +351,14 @@ class SearchMemories:
             unique.append(item)
         if limit is not None and limit >= 0:
             unique = unique[:limit]
-        return [*unique, *(s for s in [*self.schema, *self.catalog] if s.memory_id not in seen)]
+        return [
+            *unique,
+            *(
+                s
+                for s in [*self.procedures, *self.schema, *self.catalog]
+                if s.memory_id not in seen
+            ),
+        ]
 
     def to_search_results(self, *, limit: int | None = None) -> list[dict[str, Any]]:
         """Current-state search hits for QA pipelines (see ``MemoryItem.to_search_result``)."""

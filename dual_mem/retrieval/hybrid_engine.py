@@ -14,6 +14,7 @@ import math
 import re
 from dataclasses import replace
 
+from dual_mem.coding.types import PROCEDURE_KIND, procedure_detail
 from dual_mem.isolation import build_filter
 from dual_mem.registry import ComponentFactory
 from dual_mem.retrieval.bm25 import (
@@ -284,6 +285,7 @@ def _item_to_memory(item: dict) -> MemoryItem:
         content=node.content,
         category=node.category.value,
         score=item["score"],
+        procedure=procedure_detail(node),
         tags=list(node.tags),
         session_id=node.session_id,
         memory_at=node.memory_at,
@@ -307,6 +309,101 @@ def _persona_catalog(vector, *, app_ids, user_id, agent_ids, as_of) -> list[dict
     return [{"node_id": n.node_id, "node": n, "score": 1.0, "source": "catalog"} for n in nodes[:1]]
 
 
+async def _procedure_route(
+    *,
+    vector,
+    query: str,
+    query_embedding: list[float],
+    where: dict,
+    limit: int,
+    min_score: float,
+    weights: tuple[float, float],
+    version_bridge_limit: int,
+    as_of: int | None,
+) -> list[dict]:
+    """Current procedures near the query, scored like normal recall within the group.
+
+    A procedure is embedded from its task and alternative phrasings, so semantic
+    recall matches the question side; BM25 over the readable text and file anchors
+    catches exact error strings, commands and paths. A superseded procedure that
+    matches bridges to its current replacement.
+    """
+    if limit <= 0:
+        return []
+    current_where = where | {"is_latest": True}
+    pool_size = max(limit * 4, 20)
+    nodes = await asyncio.to_thread(
+        vector.query, embedding=query_embedding, where=current_where, top_k=pool_size
+    )
+    pool = {n.node_id: n for n in nodes if _valid_at(n, as_of)}
+    if version_bridge_limit > 0:
+        old = await asyncio.to_thread(
+            vector.query,
+            embedding=query_embedding,
+            where=where | {"is_latest": False},
+            top_k=version_bridge_limit,
+        )
+        bridged = await asyncio.to_thread(
+            _current_versions,
+            vector=vector,
+            hits=[{"node_id": n.node_id, "score": n.score, "node": n} for n in old],
+            where=current_where,
+            as_of=as_of,
+            limit=version_bridge_limit,
+        )
+        heads = await asyncio.to_thread(
+            vector.get_by_ids, [b["node_id"] for b in bridged if b["node_id"] not in pool]
+        )
+        for hit in bridged:
+            node = pool.get(hit["node_id"]) or heads.get(hit["node_id"], hit["node"])
+            node.score = max(
+                pool[node.node_id].score if node.node_id in pool
+                else _cosine_score(query_embedding, node.embedding),
+                hit["inherited"],
+            )
+            pool[node.node_id] = node
+    terms = tokenize(query)
+    w_sem, w_bm25 = weights
+    bm25: dict[str, float] = {}
+    if terms and w_bm25 > 0:
+        lexical = await asyncio.to_thread(
+            _lexical_candidates,
+            vector=vector,
+            where=current_where,
+            terms=terms,
+            excluded=set(pool),
+            limit=limit,
+            as_of=as_of,
+        )
+        embedded = await asyncio.to_thread(vector.get_by_ids, [n.node_id for n in lexical])
+        for candidate in lexical:
+            node = embedded.get(candidate.node_id, candidate)
+            node.score = _cosine_score(query_embedding, node.embedding)
+            pool[node.node_id] = node
+        rows = list(pool.values())
+        contents = [f"{n.content} {' '.join(n.tags)}".strip() for n in rows]
+        calibrated = compute_bm25_confidences(
+            terms, contents, compute_bm25_scores(terms, contents)
+        )
+        bm25 = {n.node_id: s for n, s in zip(rows, calibrated, strict=True) if s > 0}
+    scored = [
+        {
+            "node_id": n.node_id,
+            "node": n,
+            "score": (
+                score_vdb_node(n.score, bm25.get(n.node_id, 0.0), w_sem, w_bm25)
+                if bm25
+                else n.score
+            ),
+            "source": "procedure",
+        }
+        for n in pool.values()
+    ]
+    scored = [row for row in scored if row["score"] >= min_score]
+    scored.sort(key=lambda row: row["score"], reverse=True)
+    return scored[:limit]
+
+
 async def search_hybrid(
     *,
     factory: ComponentFactory,
@@ -327,8 +424,10 @@ async def search_hybrid(
     as_of: int | None = None,
     raw_limit: int = 0,
     include_relations: bool = True,
+    procedure_limit: int = 0,
+    procedure_min_score: float = 0.3,
 ) -> SearchMemories:
-    """Run hybrid recall + fusion; return profile/proactive/normal/raw groups.
+    """Run hybrid recall + fusion; return profile/proactive/normal/raw/procedure groups.
 
     ``as_of`` drops memories whose explicit ``valid_from``/``valid_until`` window
     excludes that time (a past TEMPORAL exception). ``raw_limit`` adds an L0_RAW
@@ -367,6 +466,7 @@ async def search_hybrid(
         statuses=recall_statuses,
         latest_only=True,
         created_after=created_after,
+        exclude_kinds=[PROCEDURE_KIND],
     )
     profile_where = build_filter(
         app_ids=app_ids,
@@ -387,6 +487,7 @@ async def search_hybrid(
         layers=_VDB_RECALL_LAYERS,
         statuses=recall_statuses,
         created_after=created_after,
+        exclude_kinds=[PROCEDURE_KIND],
     ) | {"is_latest": False}
 
     async def _vdb_semantic() -> list[dict]:
@@ -518,6 +619,26 @@ async def search_hybrid(
         _graph_schema(),
         _raw_route(),
         _superseded_semantic(),
+        _procedure_route(
+            vector=vector,
+            query=query,
+            query_embedding=query_embedding,
+            where=build_filter(
+                app_ids=app_ids,
+                user_id=user_id,
+                agent_ids=agent_ids,
+                session_ids=session_ids,
+                layers=[Layer.L1_FACT],
+                statuses=[MemoryStatus.ACTIVE],
+                created_after=created_after,
+                kinds=[PROCEDURE_KIND],
+            ),
+            limit=procedure_limit,
+            min_score=procedure_min_score,
+            weights=(w_sem, w_bm25),
+            version_bridge_limit=version_bridge_limit,
+            as_of=as_of,
+        ),
         return_exceptions=True,
     )
 
@@ -537,6 +658,10 @@ async def search_hybrid(
         logger.warning("[hybrid] raw route failed: %s", results[3])
     if isinstance(results[4], Exception):
         logger.warning("[hybrid] superseded route failed: %s", results[4])
+    # The procedure group is its own product: a failure must be visible, not empty.
+    if isinstance(results[5], Exception):
+        raise results[5]
+    procedure_hits: list[dict] = results[5]
 
     intention_hits: list[dict] = []
     if use_derived and intention_limit > 0:
@@ -847,6 +972,7 @@ async def search_hybrid(
         raw=[_item_to_memory(it) for it in raw_hits],
         schema=[_item_to_memory(it) for it in schema_results],
         catalog=[_item_to_memory(it) for it in catalog_results],
+        procedures=[_item_to_memory(it) for it in procedure_hits],
     )
     if include_relations:
         attach_relations(

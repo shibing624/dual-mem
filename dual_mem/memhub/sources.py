@@ -15,7 +15,11 @@ blocks, harness markup tags); they never guess meaning from wording:
 - hermes      ``~/.hermes/state.db`` table ``messages`` (cursor = message id)
 
 A turn is the user's message plus the assistant's *last* text before the next
-user message — the answer, not the tool-call narration in between.
+user message — the answer, not the tool-call narration in between. Where a host
+records tool calls structurally (Claude Code ``tool_use`` / ``tool_result`` blocks,
+Codex ``function_call`` / ``function_call_output`` items) they are kept as the
+turn's steps, so the Core can store procedure memories from them; the working
+directory and git branch the host records become their version boundary.
 """
 from __future__ import annotations
 
@@ -25,12 +29,13 @@ import re
 import sqlite3
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 from dual_mem.client import strip_memory_injection
+from dual_mem.coding.preproc import clip_text
 from dual_mem.memhub.config import CursorStore
 
 SOURCES = ("agentica", "claude-code", "codex", "cursor", "hermes")
@@ -47,6 +52,8 @@ _CLAUDE_MARKUP = (
     "local-command-caveat",
 )
 _CURSOR_QUERY_RE = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.DOTALL)
+# Tool output kept per step (head + tail); the transcript itself stays the source.
+TOOL_RESULT_MAX_CHARS = 4000
 
 
 class HubWriter(Protocol):
@@ -59,6 +66,8 @@ class HubWriter(Protocol):
         memory_at: int | None = None,
         request_id: str,
         raw_only: bool = False,
+        workspace_id: str | None = None,
+        branch: str | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -71,6 +80,10 @@ class Message:
     # Reader positions before and after this record; a cursor stores ``end``.
     start: int
     end: int
+    # Tool calls / results of this record as OpenAI-style messages.
+    steps: tuple[dict, ...] = ()
+    workspace: str | None = None
+    branch: str | None = None
 
 
 @dataclass
@@ -81,9 +94,12 @@ class Turn:
     at: int | None
     start: int
     end: int
+    steps: list[dict] = field(default_factory=list)
+    workspace: str | None = None
+    branch: str | None = None
 
-    def messages(self) -> list[dict[str, str]]:
-        out = [{"role": "user", "content": self.user}]
+    def messages(self) -> list[dict]:
+        out: list[dict] = [{"role": "user", "content": self.user}, *self.steps]
         if self.assistant:
             out.append({"role": "assistant", "content": self.assistant})
         return out
@@ -115,8 +131,36 @@ def _strip_tags(text: str, tags: tuple[str, ...]) -> str:
 
 
 # A record parser gets (record, state) and returns (role, text, session_id, at) or None.
-# ``state`` carries per-file context such as the Codex session id from session_meta.
+# ``state`` carries per-file context such as the Codex session id from session_meta,
+# plus ``steps`` (tool calls / results of the record), ``workspace`` and ``branch``.
 RecordParser = Callable[[dict, dict], "tuple[str, str, str, int | None] | None"]
+
+
+def _tool_call(call_id: str, name: str, arguments: Any) -> dict:
+    if not isinstance(arguments, str):
+        arguments = json.dumps(arguments, ensure_ascii=False)
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            }
+        ],
+    }
+
+
+def _tool_result(call_id: str, output: Any) -> dict:
+    text = output if isinstance(output, str) else _blocks_text(output)
+    if not text and output:
+        text = json.dumps(output, ensure_ascii=False)
+    return {
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": clip_text(text, TOOL_RESULT_MAX_CHARS),
+    }
 
 
 def _parse_agentica(record: dict, state: dict) -> tuple[str, str, str, int | None] | None:
@@ -133,7 +177,23 @@ def _parse_agentica(record: dict, state: dict) -> tuple[str, str, str, int | Non
 def _parse_claude(record: dict, state: dict) -> tuple[str, str, str, int | None] | None:
     if record.get("type") not in ("user", "assistant") or record.get("isSidechain") or record.get("isMeta"):
         return None
-    text = _blocks_text((record.get("message") or {}).get("content"))
+    content = (record.get("message") or {}).get("content")
+    for block in content if isinstance(content, list) else []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "tool_use":
+            state["steps"].append(
+                _tool_call(str(block.get("id") or ""), str(block.get("name") or ""), block.get("input") or {})
+            )
+        elif block.get("type") == "tool_result":
+            state["steps"].append(
+                _tool_result(str(block.get("tool_use_id") or ""), block.get("content"))
+            )
+    if record.get("cwd"):
+        state["workspace"] = record["cwd"]
+    if record.get("gitBranch"):
+        state["branch"] = record["gitBranch"]
+    text = _blocks_text(content)
     return (
         record["type"],
         _strip_tags(text, _CLAUDE_MARKUP),
@@ -146,7 +206,27 @@ def _parse_codex(record: dict, state: dict) -> tuple[str, str, str, int | None] 
     payload = record.get("payload") or {}
     if record.get("type") == "session_meta":
         state["session_id"] = payload.get("id") or state["session_id"]
+        state["workspace"] = payload.get("cwd") or state["workspace"]
+        state["branch"] = (payload.get("git") or {}).get("branch") or state["branch"]
         return None
+    if record.get("type") == "turn_context":
+        state["workspace"] = payload.get("cwd") or state["workspace"]
+        return None
+    if record.get("type") == "response_item":
+        kind = payload.get("type")
+        if kind in ("function_call", "custom_tool_call"):
+            state["steps"].append(_tool_call(
+                str(payload.get("call_id") or ""),
+                str(payload.get("name") or ""),
+                payload.get("arguments", payload.get("input")),
+            ))
+        elif kind in ("function_call_output", "custom_tool_call_output"):
+            state["steps"].append(
+                _tool_result(str(payload.get("call_id") or ""), payload.get("output"))
+            )
+        else:
+            return None
+        return "assistant", "", state["session_id"], _iso_seconds(record.get("timestamp"))
     if record.get("type") != "event_msg":
         return None
     at = _iso_seconds(record.get("timestamp"))
@@ -198,7 +278,9 @@ def _read_jsonl(
     """Messages after byte ``start``; stops before a trailing line still being written."""
     if start > path.stat().st_size:
         start = 0  # the transcript was rewritten or truncated
-    state: dict[str, Any] = {"session_id": path.stem}
+    state: dict[str, Any] = {
+        "session_id": path.stem, "steps": [], "workspace": None, "branch": None,
+    }
     messages: list[Message] = []
     position = start
     with path.open("rb") as fp:
@@ -213,13 +295,18 @@ def _read_jsonl(
                 break
             line_start, position = position, position + len(line)
             record = _record(line)
+            state["steps"] = []
             parsed = parse(record, state) if record is not None else None
             if parsed is None:
                 continue
             role, text, session_id, at = parsed
             text = strip_memory_injection(text).strip()
-            if text:
-                messages.append(Message(role, text, session_id, at, line_start, position))
+            steps = tuple(state["steps"])
+            if text or steps:
+                messages.append(Message(
+                    role, text, session_id, at, line_start, position,
+                    steps, state["workspace"], state["branch"],
+                ))
     return messages, position
 
 
@@ -306,24 +393,34 @@ def build_turns(messages: list[Message]) -> tuple[list[Turn], Turn | None]:
     """Group messages into turns; the last turn is returned apart as still open.
 
     Consecutive user messages form one request; an assistant message replaces the
-    turn's answer, so the final text wins. Assistant text with no user message
-    before it in this slice belongs to a turn that was already ingested.
+    turn's answer, so the final text wins. Tool calls and results in between are
+    the turn's steps, in order. Messages with no user message before them in this
+    slice belong to a turn that was already ingested.
     """
     turns: list[Turn] = []
     current: Turn | None = None
     for msg in messages:
-        if msg.role == "user":
-            if current and (current.assistant or current.session_id != msg.session_id):
+        if msg.role == "user" and msg.text:
+            if current and (
+                current.assistant or current.steps or current.session_id != msg.session_id
+            ):
                 turns.append(current)
                 current = None
             if current is None:
-                current = Turn(msg.session_id, msg.text, "", msg.at, msg.start, msg.end)
+                current = Turn(
+                    msg.session_id, msg.text, "", msg.at, msg.start, msg.end,
+                    workspace=msg.workspace, branch=msg.branch,
+                )
             else:
                 current.user = f"{current.user}\n{msg.text}"
                 current.end = msg.end
         elif current is not None and current.session_id == msg.session_id:
-            current.assistant = msg.text
+            current.steps.extend(msg.steps)
+            if msg.role == "assistant" and msg.text:
+                current.assistant = msg.text
             current.end = msg.end
+            current.workspace = msg.workspace or current.workspace
+            current.branch = msg.branch or current.branch
     return [t for t in turns if t.assistant], current
 
 
@@ -396,6 +493,8 @@ async def scan_file(
                 memory_at=batch[-1].at,
                 request_id=f"memhub:{request_id}",
                 raw_only=raw_only,
+                workspace_id=batch[-1].workspace,
+                branch=batch[-1].branch,
             )
             cursors.advance(source, key, batch[-1].end, len(batch))
         cursors.advance(source, key, stop, 0)

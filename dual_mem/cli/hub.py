@@ -6,8 +6,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shlex
+import socket
 import subprocess
 import sys
+import time
 from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -15,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
 import typer
 
 from dual_mem.memhub import hosts as hub_hosts
@@ -127,11 +131,130 @@ def hub_attach(
 
 @hub_app.command("detach")
 def hub_detach(hub_dir: str | None = HubDir) -> None:
-    """移除远程连接，恢复 runtime.json 本地自动发现。"""
+    """移除远程连接（含 connect 建立的 SSH 隧道服务），恢复本机 Core 自动发现。"""
+    tunnel = (
+        hub_service.uninstall_tunnel()
+        if load_hub_config(hub_dir).ssh_target
+        else None
+    )
     _echo(
         {
             "hub_dir": str(hub_root(hub_dir)),
             "detached": clear_hub_config(hub_dir),
+            "tunnel": tunnel,
+        }
+    )
+
+
+def _remote_path(path: str) -> str:
+    """Quote a remote path for the remote shell, keeping a leading ``~/`` expandable."""
+    if path == "~":
+        return "~"
+    if path.startswith("~/"):
+        return "~/" + shlex.quote(path[2:])
+    return shlex.quote(path)
+
+
+def read_remote_core(
+    target: str, *, remote_hub_dir: str, ssh_args: list[str]
+) -> tuple[str, int]:
+    """Bearer token and loopback port of the Core running on ``target``.
+
+    One ``ssh`` call reads the server's ``runtime-token`` and ``runtime.json``
+    (published by a running Core), so nothing is copied by hand.
+    """
+    root = _remote_path(remote_hub_dir.rstrip("/") or "~")
+    result = subprocess.run(
+        [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            *ssh_args,
+            target,
+            f"cat {root}/runtime-token && cat {root}/runtime.json",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise typer.BadParameter(
+            f"cannot read the Core on {target}: {result.stderr.strip()}. "
+            "Is `dual-mem hub install-service` running there, and does "
+            "`ssh` reach it without a password prompt?"
+        )
+    token, _, runtime = result.stdout.partition("\n")
+    port = urlparse(json.loads(runtime)["base_url"]).port
+    if not token.strip() or port is None:
+        raise typer.BadParameter(f"incomplete Core runtime on {target}")
+    return token.strip(), port
+
+
+def free_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+async def _wait_identity(
+    base_url: str, api_key: str, *, timeout: float
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    async with HubClient(base_url=base_url, api_key=api_key) as client:
+        while True:
+            try:
+                return await client.identity()
+            except httpx.TransportError:
+                # The tunnel service is still starting; give up only at the deadline.
+                # An HTTP error (wrong token, not a Hub) is final and raises at once.
+                if time.monotonic() >= deadline:
+                    raise
+                await asyncio.sleep(0.5)
+
+
+@hub_app.command("connect")
+def hub_connect(
+    target: str = typer.Argument(..., help="SSH 目标，如 user@server 或 ~/.ssh/config 里的 Host"),
+    local_port: int = typer.Option(0, "--local-port", help="本机隧道端口，0 = 自动选空闲端口"),
+    remote_hub_dir: str = typer.Option("~/.dual-mem", "--remote-hub-dir", help="服务器上的 Hub 根目录"),
+    ssh_arg: list[str] = typer.Option(
+        [], "--ssh-arg", help="透传给 ssh 的参数，可重复，如 --ssh-arg=-p --ssh-arg=2222"
+    ),
+    timeout: float = typer.Option(20.0, "--timeout", help="等待隧道连通的秒数"),
+    hub_dir: str | None = HubDir,
+) -> None:
+    """一条命令连上服务器的 Core：读 token、建常驻 SSH 隧道、写本机 hub.json。
+
+    Core 仍只监听服务器的 127.0.0.1；隧道作为登录服务运行，断线自动重连。
+    """
+    token, remote_port = read_remote_core(
+        target, remote_hub_dir=remote_hub_dir, ssh_args=ssh_arg
+    )
+    port = local_port or free_local_port()
+    tunnel = hub_service.install_tunnel(
+        target,
+        local_port=port,
+        remote_port=remote_port,
+        ssh_args=ssh_arg,
+        hub_dir=hub_dir,
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        identity = asyncio.run(_wait_identity(base_url, token, timeout=timeout))
+    except httpx.HTTPError as exc:
+        hub_service.uninstall_tunnel()
+        raise typer.BadParameter(
+            f"Hub Core on {target} not reachable through the tunnel ({exc}); "
+            f"see {tunnel['log']}"
+        ) from exc
+    cfg = HubConfig(base_url=base_url, api_key=token, ssh_target=target)
+    save_hub_config(cfg, hub_dir)
+    _echo(
+        {
+            "hub_dir": str(hub_root(hub_dir)),
+            "config": cfg.public_dict(),
+            "tunnel": tunnel["service_file"],
+            "identity": identity,
         }
     )
 
@@ -147,6 +270,11 @@ def hub_serve(
         help="可选固定 Bearer key；默认自动生成 runtime-token",
     ),
     mode: str | None = typer.Option(None, "--mode", help="system1 | dual"),
+    digest_idle: float = typer.Option(
+        300.0,
+        "--digest-idle",
+        help="dual 模式：写入队列空闲多少秒后自动 digest()，0 = 关闭",
+    ),
     hub_dir: str | None = HubDir,
 ) -> None:
     """启动唯一 Hub Core；记忆与 Evidence 均留在本机 Hub 根目录。"""
@@ -166,6 +294,7 @@ def hub_serve(
         hub_dir=hub_dir,
         settings=hub_settings(hub_dir, mode=mode),
         published_base_url=f"http://{url_host}:{port}",
+        digest_idle_seconds=digest_idle,
     )
     uvicorn.run(app, host=host, port=port)
 

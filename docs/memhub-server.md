@@ -46,27 +46,19 @@ cat ~/.dual-mem/runtime-token
 
 ## 每台电脑上
 
-工具装在电脑上，记忆库在服务器上。电脑先把服务器的 loopback 接到自己的 loopback。
-
-本地如果已经有 MemHub 占着 `8765`，隧道换一个本机端口，例如 `8766`。下面按这个写。
+工具装在电脑上，记忆库在服务器上。一条命令连上：
 
 ```bash
-ssh -N -L 8766:127.0.0.1:8765 user@your-server
+dual-mem hub connect user@your-server      # 也可以写 ~/.ssh/config 里的 Host 名
 ```
 
-这条命令的意思是：
+它做三件事，安全模型不变：
 
-- `-N`：只转发端口，不打开远程 shell。
-- `-L 8766:127.0.0.1:8765`：本机访问 `127.0.0.1:8766` 时，SSH 把流量送到**服务器自己的** `127.0.0.1:8765`。
-- 加密在 SSH 里完成。MemHub 看到的仍是 loopback，所以可以用 `http://127.0.0.1`。
+1. 通过 SSH 读服务器上的 `~/.dual-mem/runtime-token` 和 `runtime.json`（Core 的端口）。token 不经过剪贴板，也不出现在命令行参数里。
+2. 在本机挑一个空闲端口，建 `ssh -N -L 127.0.0.1:<本机端口>:127.0.0.1:<Core 端口>` 隧道，并把它装成登录服务（macOS LaunchAgent / Linux systemd --user），断线自动重连。本机已经有 MemHub 占着 `8765` 也不冲突。
+3. 等隧道连通、用 token 请求一次 Core 确认身份，再把地址和 token 写进这台电脑的 `~/.dual-mem/hub.json`。
 
-另开一个终端，用服务器上那把 token 接上。`attach` 会先请求一次 Core，成功后把地址和 key 写进这台电脑的 `~/.dual-mem/hub.json`：
-
-```bash
-dual-mem hub attach \
-  --base-url http://127.0.0.1:8766 \
-  --api-key "$(ssh user@your-server 'cat ~/.dual-mem/runtime-token')"
-```
+SSH 要能免密登录（key 或 agent）：隧道服务在后台运行，不能弹密码框。非默认端口或指定 key 用 `--ssh-arg` 透传，例如 `--ssh-arg=-p --ssh-arg=2222`；固定本机端口用 `--local-port 8766`。服务器上的 Hub 目录不是 `~/.dual-mem` 时用 `--remote-hub-dir`。
 
 这台电脑上的 CLI、MCP、Hook 之后都走这条连接，不再使用本机那份记忆库。接入你实际在用的工具，然后把这台电脑上已有的会话送过去：
 
@@ -87,16 +79,24 @@ dual-mem hub recall "我之前做过哪些技术选择"
 dual-mem hub detach
 ```
 
-`detach` 删掉 `hub.json`，这台电脑回到本机 Core 的自动发现。服务器上的库还在。
+`detach` 删掉 `hub.json` 并卸载 `connect` 建的隧道服务，这台电脑回到本机 Core 的自动发现。服务器上的库还在。服务器的 token 换了（例如删掉 `runtime-token` 后重启 Core），重新执行一次 `connect`。
 
-隧道要一直开着。SSH 断了，`attach` 里的地址还在，但请求会失败。可以用 `autossh` 或系统服务把上面的 `ssh -N -L` 挂住。Tailscale、WireGuard 只负责把两台机器连上；MemHub 仍要通过隧道落到本机 loopback，或者由你在服务器上做 TLS 反代之后，用 `https://你的域名` 执行 `attach`。直接写 `http://公网IP:8765` 会被拒绝。
+### 不用 SSH 时
+
+Tailscale、WireGuard 只负责把两台机器连上；MemHub 仍要落到本机 loopback，或者由你在服务器上做 TLS 反代。这时手动接：
+
+```bash
+dual-mem hub attach --base-url https://你的域名 --api-key "$(ssh user@your-server 'cat ~/.dual-mem/runtime-token')"
+```
+
+直接写 `http://公网IP:8765` 会被拒绝。
 
 ## 和本机模式的差别
 
 | | 只在一台电脑上 | 服务器上的一个 Core |
 |---|---|---|
 | Core 在哪 | 这台电脑的 `127.0.0.1:8765` | 服务器的 `127.0.0.1:8765` |
-| 要不要 `attach` | 不用，读 `runtime.json` | 要。每台电脑执行一次 |
+| 要不要连接 | 不用，读 `runtime.json` | 每台电脑执行一次 `hub connect` |
 | 工具配置 | 在这台电脑上 `install-host` | 也在每台电脑上 `install-host`，不要装到服务器上 |
 | 记忆文件 | `~/.dual-mem` | 只在服务器的 `~/.dual-mem` |
 | 断网 | 本机照常 | 隧道断了就写不了；不会在本地另存一份再合并 |

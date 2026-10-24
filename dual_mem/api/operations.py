@@ -25,6 +25,8 @@ class MemoryOperations:
         session_id: str = "",
         memory_at: int | None = None,
         request_id: str | None = None,
+        workspace_id: str | None = None,
+        branch: str | None = None,
     ) -> dict:
         result = await self.client.add(
             content=content,
@@ -35,6 +37,8 @@ class MemoryOperations:
             session_id=session_id,
             memory_at=memory_at,
             request_id=request_id,
+            workspace_id=workspace_id,
+            branch=branch,
         )
         return result.to_dict()
 
@@ -57,6 +61,8 @@ class MemoryOperations:
         as_of: int | None = None,
         raw_limit: int = 0,
         include_relations: bool = True,
+        procedure_limit: int = 0,
+        procedure_min_score: float = 0.3,
     ) -> dict:
         result = await self.client.search(
             query=query,
@@ -75,6 +81,8 @@ class MemoryOperations:
             as_of=as_of,
             raw_limit=raw_limit,
             include_relations=include_relations,
+            procedure_limit=procedure_limit,
+            procedure_min_score=procedure_min_score,
         )
         return result.to_dict()
 
