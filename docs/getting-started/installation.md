@@ -9,7 +9,7 @@ pip install dual-mem              # 核心 SDK（MemoryClient）
 pip install dual-mem[all]         # SDK + REST + CLI + MCP
 pip install dual-mem[api]         # REST（fastapi + uvicorn）
 pip install dual-mem[cli]         # CLI（typer）
-pip install dual-mem[mcp]         # MCP server（mcp）
+pip install dual-mem[mcp]         # MCP server（mcp 2.x，可单独安装）
 ```
 
 ## 源码开发
@@ -22,9 +22,9 @@ pip install -e ".[dev]"
 
 ## 依赖说明
 
-**核心依赖**（默认安装）：`pydantic` / `pydantic-settings` / `pyyaml` / `openai` / `chromadb` / `kuzu` / `scikit-learn` / `numpy`。
+**核心依赖**（默认安装）：`pydantic` / `pydantic-settings` / `pyyaml` / `ruamel.yaml` / `openai` / `chromadb` / `kuzu` / `scikit-learn` / `numpy` / `httpx`。`scikit-learn` 供 `dual` 模式的 `digest()` 聚类使用；`ruamel.yaml` 供 `dual-mem hub install-host` 改写宿主 YAML 时保留注释。
 
-**可选 extras**：`api` → fastapi + uvicorn；`cli` → typer；`mcp` → mcp；`all` → 三者兼有。
+**可选 extras**：`api` → fastapi + uvicorn；`cli` → typer；`mcp` → mcp 2.x（`mcp>=2.2,<3`）；`all` → 三者兼有。每个 extra 可以单独安装，例如只装 `[mcp]` 也能运行 `dual-mem-mcp`。
 
 ## 配置
 

@@ -6,7 +6,7 @@
 import argparse
 import sys
 
-from dual_mem.api.operations import MemoryOperations
+from dual_mem.operations import MemoryOperations
 from dual_mem.client import MemoryClient
 from dual_mem.config import Settings
 

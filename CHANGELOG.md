@@ -31,6 +31,8 @@
 - **`hub install-host` 保留 YAML 注释**：agentica / Hermes 的 YAML 配置改用 ruamel.yaml round-trip 读写；此前 PyYAML 整体重写会清空用户配置里的注释与引号。`ruamel.yaml` 加入基础依赖。卸载后文件与安装前逐字节一致（有测试）。
 - **MCP 适配 mcp 2.x**：`[mcp]` extra 改为 `mcp>=2.2,<3`，`dual-mem-mcp` 与 MemHub MCP 改用 `mcp.server.mcpserver.MCPServer`（mcp 2.x 删除了 `mcp.server.fastmcp`，原先装了 mcp 2.x 的环境里两个 MCP 入口启动即 ImportError）。`build_mcp()` / `build_mcp_backend()` 不再接收 `host` / `port`：它们属于 `server.run(transport="streamable-http", host=..., port=...)`。MemHub MCP 的日志级别设为 WARNING，避免每次工具调用一条 INFO 刷满宿主日志。新增 stdio 端到端测试（真实子进程 + MCP client 握手）。
 - **召回格式**：`format_memories` 中 procedure 显示为 `[procedure]`（原为 `[fact]`）。
+- **extras 可以单独安装**：REST 与 MCP 共用的 `MemoryOperations` 从 `dual_mem/api/operations.py` 移到 `dual_mem/operations.py`（`from dual_mem.api import MemoryOperations` 仍可用）。此前只装 `[mcp]` 时，`dual-mem-mcp` 经 `dual_mem.api` 连带导入 fastapi 而报 `ModuleNotFoundError`。`tests/test_packaging.py` 新增检查：屏蔽其它 extra 的模块后，`[mcp]` / `[api]` 各自的入口仍能构建。
+- **文档**：README / README_EN 补充 MemHub 的写读流程与 `hub connect` 用法；`docs/memhub.md` 新增「记忆是怎么同步的」一节；`docs/mcp_integration.md` 改为 mcp 2.x 用法（`uvx --from "dual-mem[mcp]"`、`build_mcp` 不再接收 host/port、procedure 参数）；`docs/memhub-server.md` 写明模型地址须从服务器可达，以及 dual 模式自动 digest；安装文档补全核心依赖与 extras 说明。
 
 - **MemHub 服务器文档**：新增 `docs/memhub-server.md`，说明在自己的机器上跑唯一 Core，以及每台电脑用 SSH 隧道 `attach`。这不是两台库互相合并。`docs/memhub.md` 里的隧道示例改成解释端口转发和 `runtime-token`。
 - **README / README_EN / 文档首页**：开篇改为 chat 双系统。System 1 负责对话中的事实、画像和版本演化；`dual`（System 2）在显式 `digest()` 时跨证据归纳 L3。MemHub 多 Agent 共享保留为生态能力。版式改成「为什么选 dual-mem」分点展开，评测、安装、快速开始、特性、News、文档、引用分开。News 各条链到对应 Release。示例只点 `02_dual.py` 和 `06_coding_memory.py`。安装说明写明 `jev_api_key`、`llm_api_key`、`embed_api_key` 三者都要，三个地址都可以改。

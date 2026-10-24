@@ -19,7 +19,7 @@ Core 只监听 loopback。它不接受 `0.0.0.0`。明文 HTTP 只允许打到 `
 
 ## 服务器上
 
-需要 Python 3.11+。模型钥匙写在这台机器的 `~/.dual_mem/config.yaml`（`jev_api_key`、`llm_api_key`、`embed_api_key`，三个地址按你的服务改）。登录自启的服务读不到 shell 里临时 `export` 的变量。
+需要 Python 3.11+。模型钥匙写在这台机器的 `~/.dual_mem/config.yaml`（`jev_api_key`、`llm_api_key`、`embed_api_key`，三个地址按你的服务改）。登录自启的服务读不到 shell 里临时 `export` 的变量。抽取和裁决都在服务器上跑，所以这三个地址要**从服务器能访问到**：只在办公内网可达的模型网关，换到公网服务器上会调不通。
 
 ```bash
 pip install "dual-mem[all]"
@@ -35,6 +35,8 @@ sudo loginctl enable-linger "$USER"
 ```
 
 前台看日志时用 `dual-mem hub serve`。默认地址是 `127.0.0.1:8765`。
+
+想让 Core 也做跨证据归纳（L3），在服务器配置里写 `mode: dual`（或 `hub serve --mode dual`）。写入队列空闲 `--digest-idle` 秒（默认 300，0 = 关闭）后 Core 自动 `digest()`，各台电脑不用触发。
 
 第一次启动会在服务器的 `~/.dual-mem/runtime-token` 写下一把 Bearer key，权限 `0600`。以后重启沿用这一把。查看：
 

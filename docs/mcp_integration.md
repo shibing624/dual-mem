@@ -4,11 +4,13 @@ dual-mem 面向 Agent 提供 **两条 MCP 接入路径**，工具名与 REST 路
 
 | 路径 | 状态 | 适用场景 |
 |---|---|---|
-| **本地 uvx Python MCP** | ✅ 已实现 | Cursor / Claude Desktop 本机直连，`uvx dual-mem-mcp` 或 `pip install dual-mem[mcp]` |
+| **本地 uvx Python MCP** | ✅ 已实现 | Cursor / Claude Desktop 本机直连，`uvx --from "dual-mem[mcp]" dual-mem-mcp` 或 `pip install "dual-mem[mcp]"` |
 | **Cloud-hosted HTTP MCP** | 🔜 规划中 | 托管记忆服务 + 远程 Agent；基于 REST API 暴露同一套 `memory_*` 契约 |
 
 **当前**：仅本地 Python MCP Server（stdio / streamable-http）可用。  
 **后续**：REST 层（`dual-mem serve` + `GET /v1/capabilities`）已对齐 MCP 工具契约，可直接作为 HTTP MCP 的传输底座——无需重复实现业务逻辑，只需在 REST 之上封装 MCP streamable-http 协议（或 npm/TypeScript 薄客户端）。
+
+**依赖**：MCP 服务基于 mcp 2.x 的 `MCPServer`（`[mcp]` extra 为 `mcp>=2.2,<3`）。mcp 1.x 的 `mcp.server.fastmcp` 已不再使用；只装 `[mcp]` 即可运行，不需要 `[api]` 的 fastapi。
 
 ```
 Agent (Cursor / Claude / 自研)
@@ -38,12 +40,14 @@ Agent (Cursor / Claude / 自研)
 
 `memory_list` 默认只列当前版本，`include_history=true` 才连同已归档版本。`memory_update` 追加一版并返回新 id。`memory_delete` 归档，不物理删除。`memory_digest` 只在 dual 生成 `L3_DERIVED`；system1 返回 `processed=0`。
 
+`memory_add` 接受 `workspace_id` / `branch`（procedure 的版本边界）；`memory_search` 接受 `procedure_limit`（默认 0）/ `procedure_min_score`，工程经验在返回的 `memories.procedures` 组里，与 `profile` / `proactive` / `normal` / `raw` / `schema` / `catalog` 并列。
+
 ## 本地 MCP（已实现）
 
 ```bash
 # uvx 零安装（推荐）
-uvx dual-mem-mcp
-uvx dual-mem-mcp --transport streamable-http --port 8765
+uvx --from "dual-mem[mcp]" dual-mem-mcp
+uvx --from "dual-mem[mcp]" dual-mem-mcp --transport streamable-http --port 8765
 
 # 或 pip 安装后
 dual-mem-mcp
@@ -51,17 +55,19 @@ dual-mem-mcp --transport streamable-http --port 8765
 dual-mem mcp
 ```
 
+在代码里装配：`build_mcp(client=...)` 只注册工具，返回 `MCPServer` 实例；监听地址在运行时传入，例如 `server.run(transport="streamable-http", host="127.0.0.1", port=8765)`。
+
 ### Cursor（本地 stdio）
 
 ```json
 {
   "mcpServers": {
-    "dual-mem": { "command": "uvx", "args": ["dual-mem-mcp"] }
+    "dual-mem": { "command": "uvx", "args": ["--from", "dual-mem[mcp]", "dual-mem-mcp"] }
   }
 }
 ```
 
-配置：`~/.dual_mem/config.yaml` 或 `DUAL_MEM_*` 环境变量。
+配置：`~/.dual_mem/config.yaml` 或 `DUAL_MEM_*` 环境变量。用 MemHub 的话不必手配，`dual-mem hub install-host cursor` 会写好指向 Core 的 MCP。
 
 ## REST / HTTP MCP 底座（已实现 REST，HTTP MCP 待封装）
 

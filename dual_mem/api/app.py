@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 
 from dual_mem import __version__
 from dual_mem.api.contracts import MEMORY_TOOL_CONTRACTS
-from dual_mem.api.operations import MemoryOperations
+from dual_mem.operations import MemoryOperations
 from dual_mem.api.schemas import (
     AddRequest,
     AddResponse,

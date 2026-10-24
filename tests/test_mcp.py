@@ -9,7 +9,7 @@ pytest.importorskip(
 )
 
 from dual_mem import MemoryClient  # noqa: E402
-from dual_mem.api.operations import MemoryOperations  # noqa: E402
+from dual_mem.operations import MemoryOperations  # noqa: E402
 from dual_mem.config import Settings  # noqa: E402
 from dual_mem.mcp.server import build_mcp, run_server  # noqa: E402
 

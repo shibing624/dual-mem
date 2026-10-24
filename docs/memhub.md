@@ -60,6 +60,27 @@ dual-mem hub connect user@memory-host
 
 不想连了：`dual-mem hub detach`，同时卸载隧道服务，这台电脑恢复使用本机记忆。服务器上的那一份还在。
 
+### 记忆是怎么"同步"的
+
+严格说没有同步：**任何时候只有一个 Core、一份库**，各个工具只是往里送对话、从里取记忆。
+
+```text
+┌─────────── 你的电脑 ────────────┐                    ┌───── Core 所在机器 ─────┐
+│ Claude Code ┐                   │                    │                        │
+│ Codex       ├ capture Hook ─────┼──┐                 │  dual-mem hub serve    │
+│ Agentica    ┘ （一轮对话结束）    │  │  本机 loopback   │  （唯一写者）            │
+│                                 │  ├─ 或 SSH 隧道 ───┼─▶ 127.0.0.1:8765        │
+│ 你输入提示词 ─ hook-search ─────┼──┘                 │  ~/.dual-mem/{hub.db,  │
+│ Agent 主动查 ─ MCP memory_* ────┼────────────────────┼─▶          store}       │
+└─────────────────────────────────┘                    └────────────────────────┘
+```
+
+1. **写**：一轮对话结束，宿主触发 capture Hook（Claude Code `Stop`、Agentica `run.completed`、Codex `Stop`）。它按本机 `cursors.db` 的游标读出会话日志里新增的轮次，交给 Core 后立刻返回，不等 LLM。
+2. **整理**：Core 先把 Evidence 写进持久队列 `hub.db`，再由唯一 worker 在后台抽取、JEV 裁决、写入记忆；dual 模式下空闲时自动 `digest()`。
+3. **读**：你提交提示词时，recall Hook（`hook-search`）把相关记忆注入上下文；Agent 也可以通过 MCP 工具（`memory_search` 等）主动查。
+
+默认 Core 跑在本机，同一台电脑上的所有工具共享它。`hub connect` 之后 Core 换到服务器，**结构不变**：本机的 Hook 和 MCP 改为经 SSH 隧道访问服务器上的 Core，本机只留游标和连接配置。多台电脑 `connect` 同一台服务器，就是同一份记忆。断网时提交失败、游标不前进，恢复后下一次 capture 自动补交。
+
 ## 常用命令
 
 | 想做什么 | 命令 |
@@ -93,7 +114,8 @@ dual-mem hub serve（唯一写者）
 
 - Core 只监听 `127.0.0.1:8765`，启动时自动生成 `runtime-token` 并发布 `runtime.json`，同机的 CLI、MCP 和 Hook 自动发现，不需要配置。
 - Bearer Token 只保存在权限为 `0600` 的 `~/.dual-mem/runtime-token`，不会复制到各宿主的配置里。
-- `install-host` 会安装 MCP、Skill，以及该工具可用的 capture / recall Hook。
+- `install-host` 会安装 MCP、Skill，以及该工具可用的 capture / recall Hook。改写 YAML 配置（Agentica、Hermes）时保留原有注释、引号与缩进；`uninstall-host` 后文件恢复原样。
+- MemHub 自带的 MCP 服务（`python -m dual_mem.memhub.mcp`，由 `install-host` 写入宿主配置）提供 `memory_search`、`memory_add`、`conversation_search`、`memory_status`，请求同样走 `hub.json` / 本机发现的 Core。需要 mcp 2.x（`pip install "dual-mem[mcp]"`）。
 
 ### 写入流程
 
@@ -102,7 +124,7 @@ dual-mem hub serve（唯一写者）
 - 会话扫描游标存在发起扫描那台机器的 `cursors.db`，只越过 Core 已接收的批次；Core 不可达时游标不动。
 - 冷启动可以先 `scan --raw-only`，只存 L0 原文、不调抽取模型；之后 `dual-mem hub extract` 在后台补跑抽取，复用已存的 L0。
 - 普通扫描按会话分批写入，`session_id` 带来源前缀，例如 `codex:<session-id>`。
-- Claude Code / Codex 会话里的工具调用和结果随对话一起送达（单条结果过长时保留头尾），会话的工作目录和 git 分支作为 `workspace_id` / `branch`。Core 据此在对话记忆之外沉淀 procedure 工程经验；`recall` 和 `hook-search` 默认返回最多 3 条相关经验。
+- Claude Code / Codex / Agentica 会话里的工具调用和结果随对话一起送达（单条结果过长时保留头尾），会话的工作目录和 git 分支作为 `workspace_id` / `branch`。Core 据此在对话记忆之外沉淀 procedure 工程经验；`recall` 和 `hook-search` 默认返回最多 3 条相关经验，在注入块里标为 `[procedure]`。
 - Core 以 dual 模式运行时（`hub serve --mode dual`），写入队列空闲 `--digest-idle` 秒（默认 300，0 = 关闭）后自动 `digest()`，不需要任何人手动触发。
 
 ### 云端单实例

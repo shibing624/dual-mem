@@ -51,7 +51,15 @@ dual-mem hub scan --source all     # 把过去的对话也变成记忆
 dual-mem hub recall "我之前做过哪些技术选择"
 ```
 
-零配置发现本机服务，对话先存下来立刻返回，整理在后台进行。也可以在你自己的服务器上只跑一个 Core，多台电脑连同一份记忆，见 [服务器搭建](https://github.com/shibing624/dual-mem/blob/main/docs/memhub-server.md)。本机用法见 [MemHub 文档](https://github.com/shibing624/dual-mem/blob/main/docs/memhub.md)。
+零配置发现本机服务，对话先存下来立刻返回，整理在后台进行。一轮对话结束时宿主的 Hook 把新增内容交给 Core，你下一次输入提示词时相关记忆自动注入；Agent 也能通过 MCP 主动查。写代码的会话会连同工具调用一起送达，沉淀成工程经验。
+
+多台电脑共用一份记忆：在你的服务器上跑唯一一个 Core，每台电脑一条命令连上——
+
+```bash
+dual-mem hub connect user@your-server   # 自动建 SSH 隧道、读服务器 token、写好本机 hub.json
+```
+
+Core 只监听服务器的 `127.0.0.1`，不需要开放端口；隧道装成登录服务，断线自动重连。始终只有一份库，没有 push / pull 合并。见 [服务器搭建](https://github.com/shibing624/dual-mem/blob/main/docs/memhub-server.md) 与 [MemHub 文档](https://github.com/shibing624/dual-mem/blob/main/docs/memhub.md)。
 
 ### 4. 🛠️ 工程排障也能留下来
 
@@ -63,7 +71,7 @@ chat 和 coding 是同一个 `add()` / `search()`。`messages` 里带工具轨�
 pip install dual-mem
 ```
 
-含 REST / CLI / MCP / MemHub：`pip install "dual-mem[all]"`。首次运行会把包内 [`config.default.yaml`](https://github.com/shibing624/dual-mem/blob/main/dual_mem/config.default.yaml) 复制成 `~/.dual_mem/config.yaml`。启动要三把钥匙，缺一就拒绝构造：
+含 REST / CLI / MCP / MemHub：`pip install "dual-mem[all]"`；各 extra 也可以单独装，MCP 基于 mcp 2.x。首次运行会把包内 [`config.default.yaml`](https://github.com/shibing624/dual-mem/blob/main/dual_mem/config.default.yaml) 复制成 `~/.dual_mem/config.yaml`。启动要三把钥匙，缺一就拒绝构造：
 
 ```yaml
 jev_api_key: ""    # 写入裁决。System One，不是 Chat Completions
@@ -163,7 +171,8 @@ with SyncMemoryClient() as memory:
 - [x] dual / System 2：显式 `digest()` 归纳 L3
 - [x] 专用决策模型把关写入
 - [x] MemHub：5 个 AI 工具共享记忆、历史会话导入、后台整理
-- [x] 云主机单实例：多台电脑连同一份记忆
+- [x] 云主机单实例：多台电脑 `hub connect` 连同一份记忆
+- [x] chat 与 coding 统一：工程会话沉淀 procedure 经验，`dual` 也归纳工程习惯
 - [x] LoCoMo / LongMemEval / PersonaMem-v2 同场评测领先
 - [ ] MemHub 接入更多工具：OpenCode、WorkBuddy、Gemini CLI、Windsurf、Trae 等，目标 10+ 种
 - [ ] 云端 HTTP MCP：远程 Agent 直接连接托管记忆
@@ -177,7 +186,7 @@ with SyncMemoryClient() as memory:
 
 ## News
 
-- [2026/10/24] **v0.2.0**：chat 与 coding 统一成同一套 `add()` / `search()`。带工具轨迹的工程会话在对话记忆之外沉淀 `kind="procedure"` 工程经验，共用存储、版本链和 JEV 裁决，`search(procedure_limit=3)` 单独返回 `procedures` 组；`dual` 的 `digest()` 也覆盖工程经验。删除 `search_coding` 与独立的 coding 库。chat 路径的 prompt、裁决与召回不变。MemHub 采集保留工具轨迹，dual 模式空闲时自动 digest；新增 `dual-mem hub connect user@server`，一条命令建隧道、读 token、写好 `hub.json`。详见 [Release-v0.2.0](https://github.com/shibing624/dual-mem/releases/tag/v0.2.0)。
+- [2026/10/24] **v0.2.0**：chat 与 coding 统一成同一套 `add()` / `search()`。带工具轨迹的工程会话在对话记忆之外沉淀 `kind="procedure"` 工程经验，共用存储、版本链和 JEV 裁决，`search(procedure_limit=3)` 单独返回 `procedures` 组；`dual` 的 `digest()` 也覆盖工程经验。删除 `search_coding` 与独立的 coding 库。chat 路径的 prompt、裁决与召回不变。MemHub 采集 Claude Code / Codex / Agentica 的工具轨迹，dual 模式空闲时自动 digest；新增 `dual-mem hub connect user@server`，一条命令建隧道、读 token、写好 `hub.json`。MCP 迁移到 mcp 2.x；`install-host` 改写 YAML 时保留注释。详见 [Release-v0.2.0](https://github.com/shibing624/dual-mem/releases/tag/v0.2.0)。
 - [2026/10/23] **v0.1.5**：修复 Coding 记忆接真实模型时写不进去的问题。抽取改为返回 `{"candidates": [...]}` 对象，适配默认 `llm_json_mode`；去掉 coverage 硬门槛；同一批写入可以覆盖同一条旧方案；裁决只看当前版本边界内的记录；同一用户的并发写入按 scope 串行。快速上手补充 Coding 记忆章节，`examples/06_coding_memory.py` 增加方案更新后只返回当前版本的示例。详见 [Release-v0.1.5](https://github.com/shibing624/dual-mem/releases/tag/v0.1.5)。
 - [2026/10/23] **v0.1.4**：新增 MemHub 本地单 Core 跨工具记忆中枢（支持 Claude Code / Codex / Cursor / Hermes / Agentica 会话增量导入、后台持久队列写入、开机自启与云端隧道连接）；升级 System 2 v3 聚类认知与版本桥召回；补充 Coding 记忆示例并精简无收益配置项；在 LoCoMo（74.7）、LongMemEval（91.7）、PersonaMem-v2（50.0）同场评测中全面领先 hy-memory 2.0.4 与 mem0。详见 [Release-v0.1.4](https://github.com/shibing624/dual-mem/releases/tag/v0.1.4)。
 - [2026/10/15] **v0.1.3**：升级为 L0_RAW / L1_FACT / L2_PROFILE / L3_DERIVED 四层记忆架构与 JEV 专用决策模型写路径，支持 target-first 关系裁决、版本演化链与历史回溯；新增 Agentica / Claude Code / Hermes / OpenClaw 原生生态集成与 Coding 记忆子系统（存储格式不兼容旧版，需使用新目录）。详见 [Release-v0.1.3](https://github.com/shibing624/dual-mem/releases/tag/v0.1.3)。
