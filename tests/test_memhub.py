@@ -497,6 +497,51 @@ def test_install_uninstall_hosts_use_remote_proxy(tmp_path: Path, monkeypatch) -
     )
 
 
+def test_agentica_yaml_install_keeps_comments_and_uninstall_restores_bytes(
+    tmp_path: Path,
+) -> None:
+    hub = tmp_path / "hub"
+    save_hub_config(HubConfig(base_url="http://127.0.0.1:8765", api_key="k"), hub)
+    home = tmp_path / "home"
+    (home / ".agentica").mkdir(parents=True)
+    original = (
+        "# Agentica configuration - hand-edited.\n"
+        "profiles:\n"
+        "  main:\n"
+        "    model_name: gpt-5.5  # main model\n"
+        "    extra_headers:\n"
+        '      Routing: "true"\n'
+        "settings:\n"
+        "  hooks:\n"
+        "    enabled: true\n"
+        "    # open-island owns this consumer\n"
+        "    consumers:\n"
+        "      - name: open-island\n"
+        "        command:\n"
+        '          - "/Applications/Open Island/bin/hooks"\n'
+    )
+    config = home / ".agentica" / "config.yaml"
+    config.write_text(original)
+
+    install_host("agentica", hub_dir=hub, home=home)
+    installed = config.read_text()
+    for line in (
+        "# Agentica configuration - hand-edited.",
+        "model_name: gpt-5.5  # main model",
+        'Routing: "true"',
+        "# open-island owns this consumer",
+        '- "/Applications/Open Island/bin/hooks"',
+    ):
+        assert line in installed
+    assert [c["name"] for c in yaml.safe_load(installed)["settings"]["hooks"]["consumers"]] == [
+        "open-island",
+        "dual-mem-hub",
+    ]
+
+    uninstall_host("agentica", home=home)
+    assert config.read_text() == original
+
+
 def test_cli_attach_capture_hook_and_status(tmp_path: Path, monkeypatch) -> None:
     class FakeAttach:
         def __init__(self, *, base_url: str, api_key: str) -> None:
@@ -952,6 +997,43 @@ async def test_unreachable_core_leaves_cursor_in_place(tmp_path: Path) -> None:
 
 def test_claude_and_codex_tool_steps_become_turn_steps(tmp_path: Path) -> None:
     roots = default_source_roots(tmp_path)
+    agentica = roots["agentica"] / "default" / "proj" / "ag-tools.jsonl"
+    # Shape of a real agentica session log: tool_calls on the assistant record,
+    # one ``tool`` record per result (parallel calls), cwd / git_branch on each.
+    _jsonl(
+        agentica,
+        [
+            {"type": "event", "name": "session_meta", "session_id": "ag"},
+            {"type": "user", "session_id": "ag", "cwd": "/proj", "git_branch": "fix/slug",
+             "content": "slugify does nothing"},
+            {"type": "assistant", "session_id": "ag", "cwd": "/proj", "git_branch": "fix/slug",
+             "content": "", "tool_calls": [
+                 {"id": "a1", "type": "function",
+                  "function": {"name": "read_file", "arguments": "{\"file_path\": \"t.py\"}"}},
+                 {"id": "a2", "type": "function",
+                  "function": {"name": "glob", "arguments": "{\"pattern\": \"AGENTS.md\"}"}},
+             ]},
+            {"type": "tool", "session_id": "ag", "cwd": "/proj", "git_branch": "fix/slug",
+             "tool_call_id": "a1", "tool_name": "read_file", "content": "def slugify(s): return s"},
+            {"type": "tool", "session_id": "ag", "cwd": "/proj", "git_branch": "fix/slug",
+             "tool_call_id": "a2", "tool_name": "glob", "content": "[]"},
+            {"type": "event", "name": "token_usage", "session_id": "ag"},
+            {"type": "assistant", "session_id": "ag", "cwd": "/proj", "git_branch": "fix/slug",
+             "content": "fixed slugify"},
+        ],
+    )
+    messages, _ = SOURCE_SPECS["agentica"].read(agentica, 0)
+    done, open_turn = build_turns(messages)
+    turn = (done + [open_turn])[0]
+    assert (turn.user, turn.assistant) == ("slugify does nothing", "fixed slugify")
+    assert (turn.workspace, turn.branch) == ("/proj", "fix/slug")
+    msgs = turn.messages()
+    assert [m["role"] for m in msgs] == ["user", "assistant", "assistant", "tool", "tool", "assistant"]
+    assert [m["tool_calls"][0]["function"]["name"] for m in msgs[1:3]] == ["read_file", "glob"]
+    assert json.loads(msgs[1]["tool_calls"][0]["function"]["arguments"]) == {"file_path": "t.py"}
+    assert msgs[3] == {"role": "tool", "tool_call_id": "a1", "content": "def slugify(s): return s"}
+    assert msgs[4] == {"role": "tool", "tool_call_id": "a2", "content": "[]"}
+
     claude = roots["claude-code"] / "proj" / "cc-tools.jsonl"
     _jsonl(
         claude,

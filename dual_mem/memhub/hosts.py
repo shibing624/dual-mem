@@ -5,11 +5,12 @@
 skill, and (where the host has hooks) transcript capture / prompt-time recall.
 
 Every host file is edited in place, keeping all other entries; the first edit
-leaves ``<file>.dual-mem-hub.bak``. YAML hosts lose comments on rewrite, which is
-why the backup exists.
+leaves ``<file>.dual-mem-hub.bak``. YAML hosts are rewritten round-trip, so the
+user's comments, quoting and indentation survive.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -20,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-import yaml
+from ruamel.yaml import YAML
 
 from dual_mem.memhub.config import hub_root
 
@@ -98,12 +99,24 @@ def _dump_json(path: Path, data: dict) -> None:
     _write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
+def _round_trip_yaml() -> YAML:
+    rt = YAML()
+    rt.preserve_quotes = True
+    rt.width = 4096
+    rt.indent(mapping=2, sequence=4, offset=2)
+    return rt
+
+
 def _load_yaml(path: Path) -> dict:
-    return (yaml.safe_load(path.read_text(encoding="utf-8")) or {}) if path.is_file() else {}
+    if not path.is_file():
+        return {}
+    return _round_trip_yaml().load(path.read_text(encoding="utf-8")) or {}
 
 
 def _dump_yaml(path: Path, data: dict) -> None:
-    _write(path, yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
+    buf = io.StringIO()
+    _round_trip_yaml().dump(data, buf)
+    _write(path, buf.getvalue())
 
 
 class Part(Protocol):

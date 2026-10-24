@@ -551,3 +551,19 @@ async def test_extractor_uses_a_json_object_envelope():
         (CANDIDATE["task"], "b", ["dual_mem/store.py"])
     ]
     await llm.aclose()
+
+
+def test_format_memories_labels_procedures_by_kind() -> None:
+    from dual_mem.retrieval.formatter import format_memories
+
+    text = format_memories(
+        {
+            "normal": [{"content": "用户在做支付服务", "category": "fact", "owner": "user"}],
+            "procedures": [
+                {"content": "去重：按 event_id 幂等", "category": "fact", "kind": "procedure"}
+            ],
+        },
+        date_preamble=False,
+    )
+    assert "- [fact] [user] 用户在做支付服务" in text
+    assert "- [procedure] 去重：按 event_id 幂等" in text

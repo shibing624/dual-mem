@@ -20,6 +20,9 @@
   - Claude Code / Codex 会话采集与 Claude Code Hook 保留工具调用和结果，并把会话的 cwd / git 分支作为 `workspace_id` / `branch`；原先只保留 user / assistant 文本，coding 记忆在集成路径上写不进去。`recall` / `hook-search` 默认带最多 3 条 procedure。`/recall` 在 `limit=0` 但 `procedure_limit>0` 时仍返回 procedures。
   - dual 模式的 Core 在写入队列空闲 `--digest-idle` 秒（默认 300，0 = 关闭）后自动 `digest()`；原先没有任何地方会触发，L3 永远不生成。`hub status` 显示自动 digest 设置。
   - 新增 `dual-mem hub connect user@server`：通过 SSH 读服务器 `runtime-token` 与 Core 端口，在本机空闲端口建 `ssh -N -L` 隧道并装成登录服务（断线重连），确认身份后写 `hub.json`。安全模型不变（Core 仍只听 loopback）；`hub detach` 同时卸载隧道服务。
+  - Agentica 会话采集同样保留工具调用（`tool_calls` 与 `tool` 记录）和 `cwd` / `git_branch`；原先只读文本，agentica CLI 的 coding 会话会被当成纯 chat 写入。
+  - `install-host agentica` / `hermes` 改写 YAML 时保留注释、引号与缩进（ruamel.yaml 往返）；原先用 PyYAML 整体重写，会丢掉 `~/.agentica/config.yaml` 里的全部注释。
+  - 召回上下文里 procedure 显示为 `[procedure]`，原先与普通事实一样显示为 `[fact]`。
 - **CLI**：`dual-mem digest` 新增 `--mode`；用 `--mode dual` 写入而配置不是 dual 时，原先 `digest` 直接返回 `processed=0`。
 - **依赖**：`scikit-learn` 加入基础依赖。System 2 的事实聚类一直依赖它，但只在 `[dev]` 环境里被间接装上；干净安装后 `digest()` 报 `ModuleNotFoundError: sklearn`。新增 `tests/test_packaging.py`：核心模块导入的第三方包必须出现在 `[project].dependencies` 里。
 - **`python -m dual_mem.cli`**：新增 `dual_mem/cli/__main__.py`。Core 服务、Hook 与后台 scan 改用 `-m dual_mem.cli` 启动，消除 `'dual_mem.cli.main' found in sys.modules` 的 RuntimeWarning；已装的旧 `-m dual_mem.cli.main` Hook 仍能被识别，重新 `install-host` 时会被替换，不会重复。

@@ -37,7 +37,6 @@ def _format_item(
     *,
     include_superseded: bool = False,
 ) -> str:
-    """docstring placeholder"""
     """Format one memory item; evolution chains default to current head only."""
     content = item["content"]
     if item["category"] == "raw" and len(content) > raw_truncate:
@@ -45,7 +44,8 @@ def _format_item(
 
     mem_date = format_memory_timestamp(item.get("memory_at") or item.get("gmt_created"))
     date_suffix = f" (conversation date: {mem_date})" if mem_date else ""
-    lines = [f"- [{item['category']}] {_source_tag(item)}{content}{date_suffix}"]
+    label = "procedure" if item.get("kind") == "procedure" else item["category"]
+    lines = [f"- [{label}] {_source_tag(item)}{content}{date_suffix}"]
     if item.get("valid_from") is not None or item.get("valid_until") is not None:
         start = format_memory_timestamp(item.get("valid_from")) or "?"
         end = format_memory_timestamp(item.get("valid_until")) or "?"

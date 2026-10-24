@@ -164,13 +164,30 @@ def _tool_result(call_id: str, output: Any) -> dict:
 
 
 def _parse_agentica(record: dict, state: dict) -> tuple[str, str, str, int | None] | None:
-    if record.get("type") not in ("user", "assistant"):
+    kind = record.get("type")
+    if kind not in ("user", "assistant", "tool"):
         return None
+    if record.get("cwd"):
+        state["workspace"] = record["cwd"]
+    if record.get("git_branch"):
+        state["branch"] = record["git_branch"]
+    session_id = record.get("session_id") or state["session_id"]
+    at = _iso_seconds(record.get("timestamp"))
+    if kind == "tool":
+        state["steps"].append(
+            _tool_result(str(record.get("tool_call_id") or ""), record.get("content"))
+        )
+        return "assistant", "", session_id, at
+    for call in record.get("tool_calls") or []:
+        function = call.get("function") or {}
+        state["steps"].append(
+            _tool_call(str(call.get("id") or ""), str(function.get("name") or ""), function.get("arguments") or {})
+        )
     return (
-        record["type"],
+        kind,
         _blocks_text(record.get("content")),
-        record.get("session_id") or state["session_id"],
-        _iso_seconds(record.get("timestamp")),
+        session_id,
+        at,
     )
 
 
