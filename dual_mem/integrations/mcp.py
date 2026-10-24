@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: MCP 后端入口 — 复用 dual_mem.mcp.server 的 FastMCP builder。
+@description: MCP 后端入口 — 复用 dual_mem.mcp.server 的 MCPServer builder。
 """
 from __future__ import annotations
 
@@ -17,17 +17,16 @@ def build_mcp_backend(
     settings: Optional[Settings] = None,
     storage_dir: Optional[str] = None,
     mode: Optional[str] = None,
-    host: str = "127.0.0.1",
-    port: int = 8765,
     embed: Any = None,
     llm: Any = None,
 ) -> Any:
-    """Build the dual-mem FastMCP server instance.
+    """Build the dual-mem MCP server (mcp 2.x ``MCPServer``).
 
     Constructs a ``MemoryClient`` from the provided settings / storage_dir / mode /
     injected ``embed`` / ``llm`` when ``client`` is not given, then hands it to the
     shared ``build_mcp`` so the integration layer and the standalone ``dual-mem-mcp``
-    CLI use one implementation.
+    CLI use one implementation. Host/port belong to ``server.run(transport=...,
+    host=..., port=...)``, not to construction.
     """
     from dual_mem.mcp.server import build_mcp
 
@@ -40,4 +39,4 @@ def build_mcp_backend(
                 overrides["mode"] = mode
             settings = Settings(**overrides)
         client = MemoryClient(settings=settings, embed=embed, llm=llm)
-    return build_mcp(client=client, host=host, port=port)
+    return build_mcp(client=client)

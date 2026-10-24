@@ -5,7 +5,6 @@
 """
 import argparse
 import sys
-from typing import Literal, cast
 
 from dual_mem.api.operations import MemoryOperations
 from dual_mem.client import MemoryClient
@@ -26,12 +25,13 @@ def build_mcp(
     *,
     client: MemoryClient | None = None,
     ops: MemoryOperations | None = None,
-    host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
 ):
-    """Register dual-mem memory tools on a FastMCP instance."""
+    """Register dual-mem memory tools on an MCP server (mcp 2.x ``MCPServer``).
+
+    Transport, host and port are chosen at run time (``run_server``), not here.
+    """
     try:
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
     except ImportError as exc:
         raise ImportError(
             "MCP support requires the optional dependency. Install with: pip install dual-mem[mcp]"
@@ -42,7 +42,7 @@ def build_mcp(
             client = MemoryClient(settings=Settings())
         ops = MemoryOperations(client)
 
-    mcp = FastMCP("dual-mem", host=host, port=port)
+    mcp = MCPServer("dual-mem")
 
     @mcp.tool(
         description=(
@@ -189,14 +189,15 @@ def run_server(
             "(no further console output — normal)",
             file=sys.stderr,
         )
-    else:
+        build_mcp().run(transport="stdio")
+    elif transport == "streamable-http":
         print(
-            f"dual-mem MCP ({transport}): starting http://{host}:{port}",
+            f"dual-mem MCP (streamable-http): starting http://{host}:{port}/mcp",
             file=sys.stderr,
         )
-
-    mcp = build_mcp(host=host, port=port)
-    mcp.run(transport=cast(Literal["stdio", "sse", "streamable-http"], transport))
+        build_mcp().run(transport="streamable-http", host=host, port=port)
+    else:
+        raise ValueError(f"unknown MCP transport {transport!r}: stdio | streamable-http")
 
 
 def main() -> None:

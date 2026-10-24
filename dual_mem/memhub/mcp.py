@@ -20,7 +20,7 @@ def build_hub_mcp(
     """Build the MCP server. The Core is resolved per tool call, so a host that
     starts before ``hub serve`` still gets working tools once the Core is up."""
     try:
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
     except ImportError as exc:
         raise ImportError(
             "MemHub MCP requires: pip install dual-mem[mcp]"
@@ -34,7 +34,9 @@ def build_hub_mcp(
         async with HubClient.from_config(hub_dir) as connected:
             yield connected
 
-    mcp = FastMCP("dual-mem-hub")
+    # WARNING, not the INFO default: every tool call is an HTTP request to the Core,
+    # and an INFO line per request floods the host's MCP log (stderr).
+    mcp = MCPServer("dual-mem-hub", log_level="WARNING")
 
     @mcp.tool(
         description=(

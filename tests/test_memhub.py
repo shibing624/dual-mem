@@ -962,7 +962,7 @@ def test_install_service_writes_launchd_plist_or_systemd_unit(
 
 def test_mcp_builds_without_a_running_core(tmp_path: Path) -> None:
     """A host that starts the MCP server before `hub serve` must not crash at import time."""
-    pytest.importorskip("mcp.server.fastmcp")
+    pytest.importorskip("mcp.server.mcpserver")
     from dual_mem.memhub.mcp import build_hub_mcp
 
     server = build_hub_mcp(hub_dir=tmp_path)  # no runtime.json yet: no connection attempted

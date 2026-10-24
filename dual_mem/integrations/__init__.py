@@ -5,7 +5,7 @@
 
 把 dual_mem 的 MemoryClient 适配到各类 Agent 框架 / 协议：
 
-- ``mcp``         : FastMCP server（dual-mem-mcp）
+- ``mcp``         : MCP server（mcp 2.x MCPServer，dual-mem-mcp）
 - ``hermes``      : Hermes Agent 的 MemoryProvider 插件（被动 prefetch + 异步 sync_turn）
 - ``openclaw``    : OpenClaw 的 MemoryProvider 插件（与 Hermes 同源契约）
 - ``agentica``    : agentica 框架的 Memory 模块（add_messages / retrieve）+ Workspace 适配器

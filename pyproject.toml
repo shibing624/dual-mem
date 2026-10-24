@@ -35,7 +35,7 @@ cli = [
 ]
 # MCP server (`dual-mem-mcp`, `dual-mem mcp`)
 mcp = [
-    "mcp>=1.2,<2",
+    "mcp>=2.2,<3",
 ]
 # agentica integration (`dual_mem.integrations.agentica`)
 agentica = [

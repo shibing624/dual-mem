@@ -16,7 +16,7 @@ dual-mem 原生对接 5 类社区生态，统一入口在 `dual_mem.integrations
 | 生态 | 接入方式 | 关键文件 / 命令 |
 |------|----------|----------------|
 | skill | 本 SKILL.md + `MemoryClient` | `skills/dual-mem/SKILL.md` |
-| mcp | FastMCP server（`dual-mem-mcp`，stdio / streamable-http） | `dual_mem/mcp/server.py` |
+| mcp | MCP server（mcp 2.x `MCPServer`，`dual-mem-mcp`，stdio / streamable-http） | `dual_mem/mcp/server.py` |
 | hermes agent | `DualMemHermesProvider` 原生插件（被动 prefetch + 异步 sync_turn） | `dual_mem/integrations/hermes.py` |
 | openclaw | `DualMemOpenClawProvider` 原生插件（同源 MemoryProvider 契约） | `dual_mem/integrations/openclaw.py` |
 | agentica | `DualMemMemory` 记忆模块（`add_messages` / `retrieve`）+ `DualMemWorkspace`（`Agent(workspace=…)` 直接接入） | `dual_mem/integrations/agentica.py` |
@@ -27,7 +27,7 @@ dual-mem 原生对接 5 类社区生态，统一入口在 `dual_mem.integrations
 
 ```python
 from dual_mem.integrations import get_backend
-mcp_server = get_backend("mcp")                       # FastMCP 实例
+mcp_server = get_backend("mcp")                       # MCPServer 实例
 hermes = get_backend("hermes")                        # 注册进 Hermes runtime
 openclaw = get_backend("openclaw")
 memory = get_backend("agentica", user_id="u1")        # agentica 记忆模块

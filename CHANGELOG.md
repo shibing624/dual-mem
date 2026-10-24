@@ -27,12 +27,11 @@
 - **依赖**：`scikit-learn` 加入基础依赖。System 2 的事实聚类一直依赖它，但只在 `[dev]` 环境里被间接装上；干净安装后 `digest()` 报 `ModuleNotFoundError: sklearn`。新增 `tests/test_packaging.py`：核心模块导入的第三方包必须出现在 `[project].dependencies` 里。
 - **`python -m dual_mem.cli`**：新增 `dual_mem/cli/__main__.py`。Core 服务、Hook 与后台 scan 改用 `-m dual_mem.cli` 启动，消除 `'dual_mem.cli.main' found in sys.modules` 的 RuntimeWarning；已装的旧 `-m dual_mem.cli.main` Hook 仍能被识别，重新 `install-host` 时会被替换，不会重复。
 - **验证**：chat 路径的 LLM prompt、JEV 问题、召回顺序与分数在 system1 / dual 下与 v0.1.5 逐项一致（mock 指纹对比）；全量 pytest 与 AST 检查通过；真实模型验证 procedure 写入、方案演化（OVERRIDE）、`procedures` 分组与阈值（相关查询 0.40–0.64，无关 0.09–0.18），以及 dual digest。另在一台 Linux 外网服务器（Python 3.12，systemd --user）上用 0.2.0 wheel 做了端到端：`hub connect` 建隧道、Claude Code 会话经隧道写入同时产出 chat 记忆与 procedure、本机召回 `procedures` 分组、Core 空闲 5 分钟后自动 digest 生成 L3、隧道进程被杀后自动重连、重复 connect 幂等、`detach` 清理干净。
+- **MemHub 采集 agentica 工具轨迹**：agentica 会话日志里的 assistant `tool_calls`、`type="tool"` 记录与 `git_branch` 现在进入 Turn 的 steps / branch；此前只读文本，agentica 的工程会话一律按 chat 写入、产出 0 条 procedure。
+- **`hub install-host` 保留 YAML 注释**：agentica / Hermes 的 YAML 配置改用 ruamel.yaml round-trip 读写；此前 PyYAML 整体重写会清空用户配置里的注释与引号。`ruamel.yaml` 加入基础依赖。卸载后文件与安装前逐字节一致（有测试）。
+- **MCP 适配 mcp 2.x**：`[mcp]` extra 改为 `mcp>=2.2,<3`，`dual-mem-mcp` 与 MemHub MCP 改用 `mcp.server.mcpserver.MCPServer`（mcp 2.x 删除了 `mcp.server.fastmcp`，原先装了 mcp 2.x 的环境里两个 MCP 入口启动即 ImportError）。`build_mcp()` / `build_mcp_backend()` 不再接收 `host` / `port`：它们属于 `server.run(transport="streamable-http", host=..., port=...)`。MemHub MCP 的日志级别设为 WARNING，避免每次工具调用一条 INFO 刷满宿主日志。新增 stdio 端到端测试（真实子进程 + MCP client 握手）。
+- **召回格式**：`format_memories` 中 procedure 显示为 `[procedure]`（原为 `[fact]`）。
 
-
-- **MemHub 服务器文档**：新增 `docs/memhub-server.md`，说明在自己的机器上跑唯一 Core，以及每台电脑用 SSH 隧道 `attach`。这不是两台库互相合并。`docs/memhub.md` 里的隧道示例改成解释端口转发和 `runtime-token`。
-- **README / README_EN / 文档首页**：开篇改为 chat 双系统。System 1 负责对话中的事实、画像和版本演化；`dual`（System 2）在显式 `digest()` 时跨证据归纳 L3。MemHub 多 Agent 共享保留为生态能力。版式改成「为什么选 dual-mem」分点展开，评测、安装、快速开始、特性、News、文档、引用分开。News 各条链到对应 Release。示例只点 `02_dual.py` 和 `06_coding_memory.py`。安装说明写明 `jev_api_key`、`llm_api_key`、`embed_api_key` 三者都要，三个地址都可以改。
-- **`config.default.yaml`**：文件头写明三把钥匙和三个可改地址。首次生成的 `~/.dual_mem/config.yaml` 用的就是这份模板。键和默认值没有变。
-- **示例不再回退内网 JEV 中转**：`examples/_common.py` 只使用配置里的 `jev_api_key` 或 `DUAL_MEM_JEV_API_KEY` / `DUAL_MEM_JEV_ENDPOINT`。随包发出的 `config.default.yaml` 与示例说明里不再出现内网地址。
 - **MemHub 服务器文档**：新增 `docs/memhub-server.md`，说明在自己的机器上跑唯一 Core，以及每台电脑用 SSH 隧道 `attach`。这不是两台库互相合并。`docs/memhub.md` 里的隧道示例改成解释端口转发和 `runtime-token`。
 - **README / README_EN / 文档首页**：开篇改为 chat 双系统。System 1 负责对话中的事实、画像和版本演化；`dual`（System 2）在显式 `digest()` 时跨证据归纳 L3。MemHub 多 Agent 共享保留为生态能力。版式改成「为什么选 dual-mem」分点展开，评测、安装、快速开始、特性、News、文档、引用分开。News 各条链到对应 Release。示例只点 `02_dual.py` 和 `06_coding_memory.py`。安装说明写明 `jev_api_key`、`llm_api_key`、`embed_api_key` 三者都要，三个地址都可以改。
 - **`config.default.yaml`**：文件头写明三把钥匙和三个可改地址。首次生成的 `~/.dual_mem/config.yaml` 用的就是这份模板。键和默认值没有变。
