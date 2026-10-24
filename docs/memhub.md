@@ -76,7 +76,7 @@ dual-mem hub connect user@memory-host
 ```
 
 1. **写**：一轮对话结束，宿主触发 capture Hook（Claude Code `Stop`、Agentica `run.completed`、Codex `Stop`）。它按本机 `cursors.db` 的游标读出会话日志里新增的轮次，交给 Core 后立刻返回，不等 LLM。
-2. **整理**：Core 先把 Evidence 写进持久队列 `hub.db`，再由唯一 worker 在后台抽取、JEV 裁决、写入记忆；dual 模式下空闲时自动 `digest()`。
+2. **整理**：Core 先把 Evidence 写进持久队列 `hub.db`，再由唯一 worker 在后台抽取、JEV 裁决、写入记忆；dual 模式下，距上次成功归纳满一天且仍有新证据时，在写入空档自动 `digest()`。
 3. **读**：你提交提示词时，recall Hook（`hook-search`）把相关记忆注入上下文；Agent 也可以通过 MCP 工具（`memory_search` 等）主动查。
 
 默认 Core 跑在本机，同一台电脑上的所有工具共享它。`hub connect` 之后 Core 换到服务器，**结构不变**：本机的 Hook 和 MCP 改为经 SSH 隧道访问服务器上的 Core，本机只留游标和连接配置。多台电脑 `connect` 同一台服务器，就是同一份记忆。断网时提交失败、游标不前进，恢复后下一次 capture 自动补交。
@@ -125,7 +125,7 @@ dual-mem hub serve（唯一写者）
 - 冷启动可以先 `scan --raw-only`，只存 L0 原文、不调抽取模型；之后 `dual-mem hub extract` 在后台补跑抽取，复用已存的 L0。
 - 普通扫描按会话分批写入，`session_id` 带来源前缀，例如 `codex:<session-id>`。
 - Claude Code / Codex / Agentica 会话里的工具调用和结果随对话一起送达（单条结果过长时保留头尾），会话的工作目录和 git 分支作为 `workspace_id` / `branch`。Core 据此在对话记忆之外沉淀 procedure 工程经验；`recall` 和 `hook-search` 默认返回最多 3 条相关经验，在注入块里标为 `[procedure]`。
-- Core 以 dual 模式运行时（`hub serve --mode dual`），写入队列空闲 `--digest-idle` 秒（默认 300，0 = 关闭）后自动 `digest()`，不需要任何人手动触发。
+- Core 以 dual 模式运行时（`hub serve --mode dual`）自己 `digest()`，一天最多一次。写入队列排空后，距上次成功已满 `--digest-every` 小时（默认 24），并且还有待归纳证据，才跑。`--digest-every 0` 关闭。各台电脑不用自己触发。
 
 ### 云端单实例
 

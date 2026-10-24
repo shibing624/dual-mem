@@ -71,7 +71,7 @@ chat 和 coding 是同一个 `add()` / `search()`。`messages` 里带工具轨�
 pip install dual-mem
 ```
 
-含 REST / CLI / MCP / MemHub：`pip install "dual-mem[all]"`；各 extra 也可以单独装，MCP 基于 mcp 2.x。首次运行会把包内 [`config.default.yaml`](https://github.com/shibing624/dual-mem/blob/main/dual_mem/config.default.yaml) 复制成 `~/.dual_mem/config.yaml`。启动要三把钥匙，缺一就拒绝构造：
+含 REST / CLI / MCP / MemHub：`pip install "dual-mem[all]"`；首次运行会把包内 [`config.default.yaml`](https://github.com/shibing624/dual-mem/blob/main/dual_mem/config.default.yaml) 复制成 `~/.dual_mem/config.yaml`。启动要三把钥匙，缺一就拒绝构造：
 
 ```yaml
 jev_api_key: ""    # 写入裁决。System One，不是 Chat Completions

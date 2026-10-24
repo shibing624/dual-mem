@@ -36,7 +36,7 @@ sudo loginctl enable-linger "$USER"
 
 前台看日志时用 `dual-mem hub serve`。默认地址是 `127.0.0.1:8765`。
 
-想让 Core 也做跨证据归纳（L3），在服务器配置里写 `mode: dual`（或 `hub serve --mode dual`）。写入队列空闲 `--digest-idle` 秒（默认 300，0 = 关闭）后 Core 自动 `digest()`，各台电脑不用触发。
+想让 Core 也做跨证据归纳（L3），在服务器配置里写 `mode: dual`（或 `hub serve --mode dual`）。自动 `digest()` 一天最多一次：写入队列排空后，距上次成功已满 `--digest-every` 小时（默认 24），并且还有没归纳的证据，才跑。`--digest-every 0` 关闭自动归纳。时间记在 Hub 根目录的 `digest-at`。评测集用 `0` 关掉，写完后自己调用 `digest()`。
 
 第一次启动会在服务器的 `~/.dual-mem/runtime-token` 写下一把 Bearer key，权限 `0600`。以后重启沿用这一把。查看：
 

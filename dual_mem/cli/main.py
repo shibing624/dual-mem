@@ -277,10 +277,12 @@ def list_scopes(
 @app.command()
 def digest(
     mode: str | None = typer.Option(
-        None, "--mode", help="system1 | dual（默认取配置）；写入用了 --mode dual 时这里也要传"
+        None,
+        "--mode",
+        help="system1 | dual。配置已是 dual 时不用传；配置是 system1 时要传 dual，否则这次 processed 为 0",
     ),
 ):
-    """dual 模式生成 L3_DERIVED；system1 的 processed 为 0。"""
+    """手动跑一次 L3 归纳。配置是 dual，或这次加上 --mode dual，才会真正归纳。"""
     client = make_client(mode)
     result = _run(client.digest())
     _echo_json(result.to_dict())

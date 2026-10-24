@@ -247,9 +247,14 @@ dual 的 `add()` 和 system1 完全相同，返回前已完成 L1/L2（以及 pr
 一次 digest 只处理一遍。
 
 开启方式（优先级从高到低）：`MemoryClient(mode="dual")`、`DUAL_MEM_MODE=dual`、
-`~/.dual_mem/config.yaml` 里 `mode: dual`；CLI 用 `--mode dual`（`dual-mem digest --mode dual`
-也要带上）。MemHub 以 dual 启动时（`dual-mem hub serve --mode dual`），Core 会在写入队列空闲
-`--digest-idle` 秒（默认 300，0 = 关闭）后自动 digest，不需要任何人手动调用。
+`~/.dual_mem/config.yaml` 里 `mode: dual`。开启之后 `add()` 只是把 scope 登记为待归纳，
+不会自己跑。SDK 在边界上调用一次 `await client.digest()`；命令行用 `dual-mem digest`
+手动跑一次。配置文件已经是 dual 时不用再加参数；配置仍是 system1 时，这次要写成
+`dual-mem digest --mode dual`，否则按 system1 处理，`processed` 为 0。
+
+MemHub 的 Core 在 `mode: dual` 时自己归纳，一天最多一次：写入队列排空后，距上次成功
+已满 `--digest-every` 小时（默认 24），并且还有待归纳证据，才跑。`--digest-every 0`
+关闭自动归纳。评测集用这个关掉，语料写完后自己调用 `digest()`。
 
 ```python
 from dual_mem import MemoryClient
@@ -271,7 +276,7 @@ await client.aclose()
 | 适合 | 个人助手、客服、快速接入 | 需要行为画像、意图推断的深度场景 |
 | 额外开销 | 无 | 显式调用 `digest()` 时的生成与校验 |
 
-在当前评测中，L3 推导记忆默认只写入、不进入检索结果（`derived_context_limit=0`）：把它放进问答上下文时，选择题效果下降约 1.5 分。所以对大多数应用来说，`system1` 已经是最佳选择。
+L3 推导记忆默认只写入、不进入检索结果（`derived_context_limit=0`）。
 
 ## REST / MCP / CLI 速查
 

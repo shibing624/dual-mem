@@ -270,10 +270,10 @@ def hub_serve(
         help="可选固定 Bearer key；默认自动生成 runtime-token",
     ),
     mode: str | None = typer.Option(None, "--mode", help="system1 | dual"),
-    digest_idle: float = typer.Option(
-        300.0,
-        "--digest-idle",
-        help="dual 模式：写入队列空闲多少秒后自动 digest()，0 = 关闭",
+    digest_every: float = typer.Option(
+        24.0,
+        "--digest-every",
+        help="dual 模式：距上次成功自动 digest 至少多少小时才再跑，0 = 关闭",
     ),
     hub_dir: str | None = HubDir,
 ) -> None:
@@ -294,7 +294,7 @@ def hub_serve(
         hub_dir=hub_dir,
         settings=hub_settings(hub_dir, mode=mode),
         published_base_url=f"http://{url_host}:{port}",
-        digest_idle_seconds=digest_idle,
+        digest_min_hours=digest_every,
     )
     uvicorn.run(app, host=host, port=port)
 

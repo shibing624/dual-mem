@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **MemHub 自动 digest 改为每天最多一次，并删除 `--digest-idle`**。dual Core 在写入队列排空后检查：距上次成功自动 `digest()` 已满 `--digest-every` 小时（默认 24，`0` = 关闭自动 digest）且仍有待归纳证据才调用模型。原先 `--digest-idle` 默认 300 秒，每次停够 5 分钟就归纳，开会、吃饭会一天跑很多次；这个等待不再决定频率，已从 `hub serve` 去掉。成功时间写在 Hub 根目录 `digest-at`；失败不记，下次队列排空后再试。没有这个文件时，下一次满足条件会归纳一次，然后才开始 24 小时间隔。`hub status` 的 `digest` 为 `auto` / `min_hours` / `last_at` / `last_error`。评测集写完后自己调用 `digest()`。
+
 ## [0.2.0] — 2026-10-24
 
 **破坏性变更**：删除 `MemoryClient.search_coding` / `SyncMemoryClient.search_coding`、`Settings.coding_enabled` / `coding_db_path`、`CodingMemoryStore` 与 `{storage_dir}/coding_memory.db`。旧 coding 库不迁移；chat 记忆（向量库、versions.db、图）格式不变，可以直接沿用。

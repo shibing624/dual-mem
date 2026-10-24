@@ -36,7 +36,13 @@ from dual_mem.memhub import (
     uninstall_host,
 )
 from dual_mem.memhub.queue import HubWriteQueue
-from dual_mem.memhub.server import HUB_USER_ID, create_hub_app
+from dual_mem.memhub.server import (
+    HUB_USER_ID,
+    create_hub_app,
+    last_digest_due,
+    read_last_digest_at,
+    write_last_digest_at,
+)
 from dual_mem.memhub.sources import SOURCE_SPECS
 from dual_mem.memhub.config import resolve_hub_config
 from dual_mem.types import Layer
@@ -1128,6 +1134,14 @@ async def test_scan_forwards_tool_steps_and_boundary(tmp_path: Path) -> None:
     assert [m["role"] for m in call["messages"]] == ["user", "assistant", "tool", "assistant"]
 
 
+def test_last_digest_due_follows_the_stamp(tmp_path: Path) -> None:
+    assert last_digest_due(tmp_path, min_hours=24) is True
+    write_last_digest_at(tmp_path, 1_000_000.0)
+    assert last_digest_due(tmp_path, min_hours=24, now=1_000_000.0 + 23 * 3600) is False
+    assert last_digest_due(tmp_path, min_hours=24, now=1_000_000.0 + 24 * 3600) is True
+    assert last_digest_due(tmp_path, min_hours=0, now=1_000_000.0) is False
+
+
 async def _until(predicate) -> None:
     while not predicate():
         await asyncio.sleep(0.01)
@@ -1184,7 +1198,7 @@ async def test_dual_core_digests_on_idle_and_recalls_procedures(
 
     core.digest = counted
     app = create_hub_app(api_key="secret", hub_dir=tmp_path / "hub", client=core,
-                         settings=core.settings, digest_idle_seconds=0.05)
+                         settings=core.settings)
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with HubClient(base_url="http://hub", api_key="secret",
@@ -1212,14 +1226,148 @@ async def test_dual_core_digests_on_idle_and_recalls_procedures(
             await asyncio.wait_for(_until(lambda: digests), 5)
             assert core.factory.cache.list_pending_s2_scopes() == []
             status = await remote.status()
-            assert status["digest"]["auto"] is True and status["digest"]["last_error"] is None
+            assert status["digest"]["auto"] is True
+            assert status["digest"]["min_hours"] == 24.0
+            assert status["digest"]["last_at"] == read_last_digest_at(tmp_path / "hub")
+            assert status["digest"]["last_error"] is None
+    await core.aclose()
+
+
+async def test_auto_digest_skips_pauses_until_a_day_has_passed(
+    tmp_path: Path, fake_embed, fake_llm, fake_jev
+) -> None:
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    write_last_digest_at(hub, time.time())
+    core = MemoryClient(
+        settings=Settings(storage_dir=str(hub / "store"), mode="dual"),
+        embed=fake_embed,
+        llm=fake_llm,
+        jev=fake_jev,
+    )
+    calls: list[int] = []
+    seen: list = []
+    original = core.digest
+
+    async def counted():
+        calls.append(1)
+        result = await original()
+        seen.append(result)
+        return result
+
+    core.digest = counted
+    app = create_hub_app(
+        api_key="secret", hub_dir=hub, client=core, settings=core.settings,
+    )
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with HubClient(base_url="http://hub", api_key="secret",
+                             transport=transport) as remote:
+            receipt = await remote.write(content="我习惯用 pytest", request_id="r", wait=True)
+            assert receipt["status"] == "done"
+            assert core.factory.cache.list_pending_s2_scopes()
+            await asyncio.sleep(0.25)
+            assert calls == []
+            stamped = read_last_digest_at(hub)
+            assert stamped is not None and time.time() - stamped < 10
+
+            write_last_digest_at(hub, time.time() - 25 * 3600)
+            remote_write = await remote.write(
+                content="明天起改用 uv", request_id="r2", wait=True
+            )
+            assert remote_write["status"] == "done"
+            await asyncio.wait_for(
+                _until(lambda: seen or app.state.queue.last_idle_error), 5
+            )
+            assert app.state.queue.last_idle_error is None
+            assert len(calls) == 1 and seen[0].processed > 0
+            assert time.time() - read_last_digest_at(hub) < 10
+            assert core.factory.cache.list_pending_s2_scopes() == []
+    await core.aclose()
+
+
+async def test_auto_digest_does_not_run_without_pending_evidence(
+    tmp_path: Path, fake_embed, fake_llm, fake_jev
+) -> None:
+    hub = tmp_path / "hub"
+    core = MemoryClient(
+        settings=Settings(storage_dir=str(hub / "store"), mode="dual"),
+        embed=fake_embed,
+        llm=fake_llm,
+        jev=fake_jev,
+    )
+    calls: list[int] = []
+
+    async def counted():
+        calls.append(1)
+        raise AssertionError("digest with an empty queue")
+
+    core.digest = counted
+    app = create_hub_app(
+        api_key="secret", hub_dir=hub, client=core, settings=core.settings,
+    )
+    async with app.router.lifespan_context(app):
+        await asyncio.sleep(0.2)
+        assert calls == []
+        assert read_last_digest_at(hub) is None
+    await core.aclose()
+
+
+async def test_failed_auto_digest_does_not_start_the_day_clock(
+    tmp_path: Path, fake_embed, fake_llm, fake_jev
+) -> None:
+    hub = tmp_path / "hub"
+    core = MemoryClient(
+        settings=Settings(storage_dir=str(hub / "store"), mode="dual"),
+        embed=fake_embed,
+        llm=fake_llm,
+        jev=fake_jev,
+    )
+
+    async def broken():
+        raise RuntimeError("model down")
+
+    core.digest = broken
+    app = create_hub_app(
+        api_key="secret", hub_dir=hub, client=core, settings=core.settings,
+    )
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with HubClient(base_url="http://hub", api_key="secret",
+                             transport=transport) as remote:
+            receipt = await remote.write(content="记下这件事", request_id="r", wait=True)
+            assert receipt["status"] == "done"
+            await asyncio.wait_for(
+                _until(lambda: app.state.queue.last_idle_error), 5
+            )
+            assert app.state.queue.last_idle_error == "RuntimeError: model down"
+            assert read_last_digest_at(hub) is None
+            assert core.factory.cache.list_pending_s2_scopes()
+    await core.aclose()
+
+
+async def test_digest_every_zero_turns_auto_digest_off(
+    tmp_path: Path, fake_embed, fake_llm, fake_jev
+) -> None:
+    core = MemoryClient(
+        settings=Settings(storage_dir=str(tmp_path / "hub" / "store"), mode="dual"),
+        embed=fake_embed,
+        llm=fake_llm,
+        jev=fake_jev,
+    )
+    app = create_hub_app(
+        api_key="secret", hub_dir=tmp_path / "hub", client=core,
+        settings=core.settings, digest_min_hours=0,
+    )
+    async with app.router.lifespan_context(app):
+        assert app.state.queue._on_idle is None
     await core.aclose()
 
 
 async def test_system1_core_never_digests(tmp_path: Path, fake_embed, fake_llm, fake_jev) -> None:
     core = _memory_client(tmp_path / "hub", fake_embed, fake_llm, fake_jev)
     app = create_hub_app(api_key="secret", hub_dir=tmp_path / "hub", client=core,
-                         settings=core.settings, digest_idle_seconds=0.01)
+                         settings=core.settings)
     async with app.router.lifespan_context(app):
         assert app.state.queue._on_idle is None
     await core.aclose()

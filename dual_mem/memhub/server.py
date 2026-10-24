@@ -6,6 +6,7 @@ from __future__ import annotations
 import fcntl
 import os
 import secrets
+import time
 import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
@@ -95,6 +96,36 @@ def _instance_id(root: Path) -> str:
     return value
 
 
+DIGEST_AT_NAME = "digest-at"
+
+
+def read_last_digest_at(root: Path) -> float | None:
+    """Unix time of the last successful automatic digest, or None if none yet."""
+    path = root / DIGEST_AT_NAME
+    if not path.is_file():
+        return None
+    return float(path.read_text(encoding="utf-8").strip())
+
+
+def write_last_digest_at(root: Path, when: float) -> None:
+    (root / DIGEST_AT_NAME).write_text(f"{when:.3f}\n", encoding="utf-8")
+
+
+def last_digest_due(root: Path, *, min_hours: float, now: float | None = None) -> bool:
+    """True when no successful auto-digest is on record, or the interval has elapsed.
+
+    ``min_hours <= 0`` turns automatic digest off. A missing stamp is due: the
+    first drain after evidence exists consolidates once, then the clock starts.
+    """
+    if min_hours <= 0:
+        return False
+    last = read_last_digest_at(root)
+    if last is None:
+        return True
+    current = time.time() if now is None else now
+    return current - last >= min_hours * 3600.0
+
+
 def create_hub_app(
     *,
     api_key: str | None = None,
@@ -103,7 +134,7 @@ def create_hub_app(
     settings: Settings | None = None,
     published_base_url: str = "http://127.0.0.1:8765",
     queue_retry_seconds: float = 30.0,
-    digest_idle_seconds: float = 300.0,
+    digest_min_hours: float = 24.0,
 ) -> FastAPI:
     """Create the personal Hub Core; one process owns one local store.
 
@@ -111,8 +142,10 @@ def create_hub_app(
     written to the token file inside the lifespan, after the exclusive lock, so a
     second ``hub serve`` cannot replace the running Core's token on its way out.
 
-    In ``dual`` mode the Core runs ``digest()`` itself once its write queue has
-    been idle for ``digest_idle_seconds``; ``0`` turns that off.
+    In ``dual`` mode, once the write queue drains, the Core calls ``digest()``
+    when pending System 2 evidence exists and the last successful auto-digest
+    was at least ``digest_min_hours`` ago. ``digest_min_hours <= 0`` turns that
+    off. The stamp is ``digest-at`` in the Hub root; a failed run does not write it.
     """
     root = hub_root(hub_dir)
     lock = HubProcessLock(root / "hub.lock")
@@ -159,15 +192,23 @@ def create_hub_app(
                 return result.to_dict()
 
             async def digest() -> None:
-                await core_client.digest()
+                # The queue just drained. The day interval and the pending list
+                # decide whether this spends a model call.
+                if not last_digest_due(root, min_hours=digest_min_hours):
+                    return
+                if not core_client.factory.cache.list_pending_s2_scopes():
+                    return
+                result = await core_client.digest()
+                if result.processed > 0:
+                    write_last_digest_at(root, time.time())
 
-            auto_digest = core_client.settings.mode == "dual" and digest_idle_seconds > 0
+            auto_digest = core_client.settings.mode == "dual" and digest_min_hours > 0
             queue = HubWriteQueue(
                 root / "hub.db",
                 process,
                 retry_base_seconds=queue_retry_seconds,
                 on_idle=digest if auto_digest else None,
-                idle_seconds=digest_idle_seconds,
+                idle_seconds=0,
             )
             app.state.queue = queue
             queue.start()
@@ -318,8 +359,9 @@ def create_hub_app(
             },
             "writes": app.state.queue.counts(),
             "digest": {
-                "auto": app.state.client.settings.mode == "dual" and digest_idle_seconds > 0,
-                "idle_seconds": digest_idle_seconds,
+                "auto": app.state.client.settings.mode == "dual" and digest_min_hours > 0,
+                "min_hours": digest_min_hours,
+                "last_at": read_last_digest_at(root),
                 "last_error": app.state.queue.last_idle_error,
             },
         }
